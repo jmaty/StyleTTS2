@@ -567,7 +567,7 @@ def main(config_path):
                 
                 running_loss = 0
                 
-                print('Time elasped:', time.time()-start_time)
+                print('Time elapsed:', time.time()-start_time)
             
         loss_test = 0
         loss_align = 0

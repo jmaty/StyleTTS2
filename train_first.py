@@ -303,7 +303,9 @@ def main(config_path):
             
             if epoch >= TMA_epoch: 
                 optimizer.step('text_aligner')
-                optimizer.step('pitch_extractor')
+                # JMa: pitch extractor should not be updated, see:
+                # https://github.com/yl4579/StyleTTS2/issues/10#issuecomment-1783701686
+                # optimizer.step('pitch_extractor')
             
             iters = iters + 1
             
@@ -320,7 +322,7 @@ def main(config_path):
 
                 running_loss = 0
                 
-                print('Time elasped:', time.time()-start_time)
+                print('Time elapsed:', time.time()-start_time)
                                 
         loss_test = 0
 
