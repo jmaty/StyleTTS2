@@ -1,0 +1,15 @@
+__pycache__
+.ipynb_checkpoints
+.*.swp
+
+build
+*.c
+monotonic_align/monotonic_align
+
+.cache
+.config
+.keras
+*.o[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]
+
+Data
+Models
