@@ -681,7 +681,7 @@ def build_model(args, text_aligner, pitch_extractor, bert):
             style_encoder=style_encoder,
             diffusion=diffusion,
 
-            text_aligner = text_aligner,
+            text_aligner=text_aligner,
             pitch_extractor=pitch_extractor,
 
             mpd = MultiPeriodDiscriminator(),
