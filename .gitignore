@@ -10,8 +10,11 @@ monotonic_align/monotonic_align
 .config
 .keras
 *.o[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]
+~*
 
+Configs
 Data
 Models
 output_logs
 output_notebooks
+*.wav
