@@ -96,7 +96,7 @@ SELECT="-l select=1:ncpus=2:mem=$MEM:scratch_local=$LSCRATCH:ngpus=1$CLUSTER"
 WALLTIME="-l walltime=$HOURS:00:00"
 
 # Extract name of the experiment
-EXP=$(grep 'run_name:' "$CFG" | sed -r 's/run_name: "(.+)"/\1/')
+EXP=$(grep 'log_dir:' "$CFG" | sed -r 's/log_dir: "Models\/(.+)"/\1/')
 
 # Timestep to differentiate among runs with the same run name
 TIMESTEP=$(date +"%y%m%d_%H%M%S")
