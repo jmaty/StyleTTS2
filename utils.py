@@ -1,15 +1,14 @@
-from monotonic_align import maximum_path
-from monotonic_align import mask_from_lens
 from monotonic_align.core import maximum_path_c
 import numpy as np
 import torch
-import copy
-from torch import nn
 import torch.nn.functional as F
-import torchaudio
-import librosa
+import scipy
+import os.path
 import matplotlib.pyplot as plt
 from munch import Munch
+from nltk.tokenize import word_tokenize
+from text_utils import TextCleaner
+from Modules.diffusion.sampler import DiffusionSampler, ADPM2Sampler, KarrasSchedule
 
 def maximum_path(neg_cent, mask):
   """ Cython optimized version.
@@ -71,4 +70,70 @@ def recursive_munch(d):
 def log_print(message, logger):
     logger.info(message)
     print(message)
-    
+
+# JMa: Infere a single sentence
+def inference(sentence, model, textcleaner, sampler, noise, diffusion_steps=5, embedding_scale=1, device='cuda'):
+    ps = word_tokenize(sentence)
+    ps = ' '.join(ps)
+    tokens = textcleaner(ps)
+    tokens.insert(0, 0)
+    tokens = torch.LongTensor(tokens).to(device).unsqueeze(0)
+
+    with torch.no_grad():
+        input_lengths = torch.LongTensor([tokens.shape[-1]]).to(tokens.device)
+        text_mask = length_to_mask(input_lengths).to(tokens.device)
+
+        t_en = model.text_encoder(tokens, input_lengths, text_mask)
+        bert_dur = model.bert(tokens, attention_mask=(~text_mask).int())
+        d_en = model.bert_encoder(bert_dur).transpose(-1, -2)
+
+        s_pred = sampler(noise,
+                         embedding=bert_dur[0].unsqueeze(0),
+                         num_steps=diffusion_steps,
+                         embedding_scale=embedding_scale).squeeze(0)
+        
+        s = s_pred[:, 128:]
+        ref = s_pred[:, :128]
+
+        d = model.predictor.text_encoder(d_en, s, input_lengths, text_mask)
+
+        x, _ = model.predictor.lstm(d)
+        duration = model.predictor.duration_proj(x)
+        duration = torch.sigmoid(duration).sum(axis=-1)
+        pred_dur = torch.round(duration.squeeze()).clamp(min=1)
+
+        pred_dur[-1] += 5
+
+        pred_aln_trg = torch.zeros(input_lengths, int(pred_dur.sum().data))
+        c_frame = 0
+        for i in range(pred_aln_trg.size(0)):
+            pred_aln_trg[i, c_frame:c_frame + int(pred_dur[i].data)] = 1
+            c_frame += int(pred_dur[i].data)
+        
+        # encode prosody
+        en = (d.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0).to(device))
+        F0_pred, N_pred = model.predictor.F0Ntrain(en, s)
+        out = model.decoder((t_en @ pred_aln_trg.unsqueeze(0).to(device)), 
+                            F0_pred, N_pred, ref.squeeze().unsqueeze(0))
+        return out.squeeze().cpu().numpy()
+
+# JMa: Synthesize test files
+def synth_test_files(model, test_sentences, outdir, outfile_template, sr, sampler=None, diffusion_steps=5, embedding_scale=1, device='cuda'):
+    textcleaner = TextCleaner()
+    # Generate noise
+    noise = torch.randn(1,1,256).to(device)
+    # Set up sampler
+    if not sampler:
+        sampler = DiffusionSampler(
+        model.diffusion.diffusion,
+        sampler=ADPM2Sampler(),
+        sigma_schedule=KarrasSchedule(sigma_min=0.0001, sigma_max=3.0, rho=9.0), # empirical parameters
+        clamp=False
+    )
+    for idx, snt in enumerate(test_sentences):
+        wav = inference(snt, model, textcleaner, sampler, noise, diffusion_steps, embedding_scale, device)
+        outfile = f'{outfile_template}-{idx}.wav'
+        scipy.io.wavfile.write(filename=os.path.join(outdir, outfile),
+                               rate=sr, 
+                               data=wav,
+        )

@@ -41,7 +41,9 @@ class TextCleaner:
             try:
                 indexes.append(self.word_index_dictionary[char])
             except KeyError:
-                print(text)
+                # JMa: 
+                # print(text)
+                print(f'[!] Character [{char}] not defined! ({text})')
         return indexes
 
 np.random.seed(1)

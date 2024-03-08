@@ -7,13 +7,12 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
-import torchaudio
-import librosa
 import click
 import shutil
 import warnings
 warnings.simplefilter('ignore')
 from torch.utils.tensorboard import SummaryWriter
+from monotonic_align import mask_from_lens
 
 from meldataset import build_dataloader
 
@@ -50,56 +49,6 @@ handler = StreamHandler()
 handler.setLevel(logging.DEBUG)
 logger.addHandler(handler)
 
-
-from nltk.tokenize import word_tokenize
-from text_utils import TextCleaner
-
-def inference(phnone_seq, model, textcleaner, sampler, noise, diffusion_steps=5, embedding_scale=1, device='cuda'):
-    ps = word_tokenize(phnone_seq)
-    ps = ' '.join(ps)
-    tokens = textcleaner(ps)
-    tokens.insert(0, 0)
-    tokens = torch.LongTensor(tokens).to(device).unsqueeze(0)
-
-    with torch.no_grad():
-        input_lengths = torch.LongTensor([tokens.shape[-1]]).to(tokens.device)
-        text_mask = length_to_mask(input_lengths).to(tokens.device)
-
-        t_en = model.text_encoder(tokens, input_lengths, text_mask)
-        bert_dur = model.bert(tokens, attention_mask=(~text_mask).int())
-        d_en = model.bert_encoder(bert_dur).transpose(-1, -2)
-
-        s_pred = sampler(noise,
-                         embedding=bert_dur[0].unsqueeze(0),
-                         num_steps=diffusion_steps,
-                         embedding_scale=embedding_scale).squeeze(0)
-        
-        s = s_pred[:, 128:]
-        ref = s_pred[:, :128]
-
-        d = model.predictor.text_encoder(d_en, s, input_lengths, text_mask)
-
-        x, _ = model.predictor.lstm(d)
-        duration = model.predictor.duration_proj(x)
-        duration = torch.sigmoid(duration).sum(axis=-1)
-        pred_dur = torch.round(duration.squeeze()).clamp(min=1)
-
-        pred_dur[-1] += 5
-
-        pred_aln_trg = torch.zeros(input_lengths, int(pred_dur.sum().data))
-        c_frame = 0
-        for i in range(pred_aln_trg.size(0)):
-            pred_aln_trg[i, c_frame:c_frame + int(pred_dur[i].data)] = 1
-            c_frame += int(pred_dur[i].data)
-        
-        # encode prosody
-        en = (d.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0).to(device))
-        F0_pred, N_pred = model.predictor.F0Ntrain(en, s)
-        out = model.decoder((t_en @ pred_aln_trg.unsqueeze(0).to(device)), 
-                            F0_pred, N_pred, ref.squeeze().unsqueeze(0))
-        return out.squeeze().cpu().numpy()
-
-
 @click.command()
 @click.option('-p', '--config_path', default='Configs/config_ft.yml', type=str)
 def main(config_path):
@@ -122,7 +71,6 @@ def main(config_path):
     epochs = config.get('epochs', 200)
     save_freq = config.get('save_freq', 2)
     log_interval = config.get('log_interval', 10)
-    saving_epoch = config.get('save_freq', 2)
 
     data_params = config.get('data_params', None)
     sr = config['preprocess_params'].get('sr', 24000)
@@ -131,6 +79,10 @@ def main(config_path):
     root_path = data_params['root_path']
     min_length = data_params['min_length']
     OOD_data = data_params['OOD_data']
+    save_val_audio = data_params.get('save_val_audio', False)
+    save_test_audio = data_params.get('save_test_audio', False)
+    test_sentences = data_params.get('test_sentences', [])
+    test_audio_dir = os.path.join(config['log_dir'], config['data_params'].get('test_audio_dir', 'test_audios'))
 
     max_len = config.get('max_len', 200)
     
@@ -296,11 +248,10 @@ def main(config_path):
         model, optimizer, train_dataloader
     )
 
-    # JMa:
-    # # Create test audio dir under log/eval dir
-    eval_dir = os.path.join(log_dir, 'eval_audios')
-    os.makedirs(eval_dir, exist_ok=True)
-
+    # Create test audio dir under log/eval dir
+    if (save_val_audio or save_test_audio) and not os.path.exists(test_audio_dir):
+        os.makedirs(test_audio_dir, exist_ok=True)
+    
     for epoch in range(start_epoch, epochs):
         running_loss = 0
         start_time = time.time()
@@ -763,18 +714,17 @@ def main(config_path):
                 with open(osp.join(log_dir, osp.basename(config_path)), 'w') as outfile:
                     yaml.dump(config, outfile, default_flow_style=True)
             
-            # JMa:
-            noise = torch.randn(1,1,256).to(device)
-            phone_seq = 'pˈɜːsənəlˌaɪz ænd ˈɔːθɚ dˌiːvˌiːdˈiː wɪð tʃˈæptɚ mˈɛnjuː, sˈʌbtaɪɾəl, bˈækɡɹaʊnd mjˈuːzɪk ænd pˈɪktʃɚ'
-            wav = inference(phone_seq, model, TextCleaner(), sampler, noise, diffusion_steps=5, embedding_scale=1)
-
-            import scipy
-            out_file = 'epoch_2nd_%05d.wav' % epoch
-            scipy.io.wavfile.write(
-                filename=os.path.join(eval_dir, out_file),
-                rate=config['preprocess_params']['sr'], 
-                data=wav,
-            )
+            # JMa: synthesize test audios
+            if save_test_audio:
+                synth_test_files(model,
+                                test_sentences,
+                                test_audio_dir,
+                                f'epoch_2nd_{epoch:0>5}_test',
+                                sr,
+                                sampler=None,
+                                diffusion_steps=5,
+                                embedding_scale=1,
+                                device=device)
                             
 if __name__=="__main__":
     main()

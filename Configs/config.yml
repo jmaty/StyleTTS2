@@ -1,15 +1,14 @@
-log_dir: "Models/StyleTTS2_LJS.bs20.ml100"
+log_dir: "Models/StyleTTS2_ThaTi"
 first_stage_path: "first_stage.pth"
-save_freq: 10
+save_freq: 1
 log_interval: 10
 device: "cuda"
 epochs_1st: 200 # number of epochs for first stage training (pre-training)
 epochs_2nd: 100 # number of epochs for second stage training (joint training)
-batch_size: 20
-# max_len: 400    # maximum number of frames
-max_len: 100    # maximum number of frames
-pretrained_model: ""
-second_stage_load_pretrained: true # set to true if the pre-trained model is for 2nd stage
+batch_size: 72
+max_len: 100    # maximum number of frames (400)
+pretrained_model: "epoch_1st_00024.pth"
+second_stage_load_pretrained: false # set to true if the pre-trained model is for 2nd stage
 load_only_params: false # set to true if do not want to load epoch numbers and optimizer parameters
 
 F0_path: "Utils/JDC/bst.t7"
@@ -18,11 +17,19 @@ ASR_path: "Utils/ASR/epoch_00080.pth"
 PLBERT_dir: 'Utils/PLBERT/'
 
 data_params:
-  train_data: "/storage/plzen4-ntis/home/jmatouse/experimenty/StyleTTS2_LJS/Data/LJS/train_list.txt"
-  val_data: "/storage/plzen4-ntis/home/jmatouse/experimenty/StyleTTS2_LJS/Data/LJS/val_list.txt"
-  root_path: "/storage/plzen4-ntis/home/jmatouse/experimenty/StyleTTS2_LJS/Data/LJS/wavs"
-  OOD_data: "/storage/plzen4-ntis/home/jmatouse/experimenty/StyleTTS2_LJS/Data/LJS/OOD_texts.txt"
+  train_data: "/storage/plzen4-ntis/home/jmatouse/experimenty/StyleTTS2_ThaTi/Data/ThaTi/train.csv"
+  val_data: "/storage/plzen4-ntis/home/jmatouse/experimenty/StyleTTS2_ThaTi/Data/ThaTi/val.csv"
+  root_path: "/storage/plzen4-ntis/home/jmatouse/experimenty/StyleTTS2_ThaTi/Data/ThaTi/wavs"
+  OOD_data: "/storage/plzen4-ntis/home/jmatouse/experimenty/StyleTTS2_ThaTi/Data/ThaTi/OOD_texts.csv"
   min_length: 50  # sample until texts with this size are obtained for OOD texts
+  save_val_audio: true
+  save_test_audio: false
+  test_audio_dir: "test_audios" # directory under `log_dir`
+  test_sentences: [
+    'pˈɜːsənəlˌaɪz ænd ˈɔːθɚ dˌiːvˌiːdˈiː wɪð tʃˈæptɚ mˈɛnjuː, sˈʌbtaɪɾəl, bˈækɡɹaʊnd mjˈuːzɪk ænd pˈɪktʃɚ.',
+    'ʌv kˈoːɹs bˈɑːksɪŋ ʃˌʊd biː ɛŋkˈɜːɹɪdʒd ɪnðɪ ˈɑːɹmi ænd nˈeɪvi.',
+    'jˈɛt ðɛɹ hɐvbɪn ænd stˈɪl ɑːɹ dʒˌiːoʊmɪtɹˈɪʃənz ænd fɪlˈɑːsəfɚz, ænd ˈiːvən sˌʌm ʌvðə mˈoʊst dɪstˈɪŋɡwɪʃt, hˌuː dˈaʊt wˈɛðɚ ðə hˈoʊl jˈuːnɪvˌɜːs, ɔːɹ tə spˈiːk mˈoːɹ wˈaɪdli ðə hˈoʊl ʌv bˈiːɪŋ, wʌz ˈoʊnli kɹiːˈeɪɾᵻd ɪn jˈuːklɪdz dʒiˈɑːmətɹi; ðeɪ ˈiːvən dˈɛɹ tə dɹˈiːm ðæt tˈuː pˈæɹəlˌɛl lˈaɪnz, wˌɪtʃ ɐkˈoːɹdɪŋ tə jˈuːklɪd kæn nˈɛvɚ mˈiːt ˌɔn ˈɜːθ, mˈeɪ mˈiːt sˈʌmwɛɹ ɪn ɪnfˈɪnᵻɾi.',
+  ]
 
 preprocess_params:
   sr: 24000
@@ -89,7 +96,7 @@ loss_params:
     
     lambda_mono: 1. # monotonic alignment loss (1st stage, TMA)
     lambda_s2s: 1.  # sequence-to-sequence loss (1st stage, TMA)
-    TMA_epoch: 5   # TMA starting epoch (1st stage) (50)
+    TMA_epoch: 50   # TMA starting epoch (1st stage) (50)
 
     lambda_F0: 1.   # F0 reconstruction loss (2nd stage)
     lambda_norm: 1. # norm reconstruction loss (2nd stage)

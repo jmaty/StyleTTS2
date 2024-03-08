@@ -1,5 +1,4 @@
 # load packages
-import random
 import yaml
 import time
 from munch import Munch
@@ -7,19 +6,15 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
-import torchaudio
-import librosa
 import click
 import shutil
 import traceback
+from torch.utils.tensorboard import SummaryWriter
 import warnings
 warnings.simplefilter('ignore')
-from torch.utils.tensorboard import SummaryWriter
+from monotonic_align import mask_from_lens
 
 from meldataset import build_dataloader
-
-from Utils.ASR.models import ASRCNN
-from Utils.JDC.model import JDCNet
 from Utils.PLBERT.util import load_plbert
 
 from models import *
@@ -79,6 +74,10 @@ def main(config_path):
     root_path = data_params['root_path']
     min_length = data_params['min_length']
     OOD_data = data_params['OOD_data']
+    save_val_audio = data_params.get('save_val_audio', False)
+    save_test_audio = data_params.get('save_test_audio', False)
+    test_sentences = data_params.get('test_sentences', [])
+    test_audio_dir = os.path.join(config['log_dir'], config['data_params'].get('test_audio_dir', 'test_audios'))
 
     max_len = config.get('max_len', 200)
     
@@ -240,6 +239,9 @@ def main(config_path):
                                 sig=slmadv_params.sig
                                )
 
+    # Create test audio dir under log/eval dir
+    if (save_val_audio or save_test_audio) and not os.path.exists(test_audio_dir):
+        os.makedirs(test_audio_dir, exist_ok=True)
 
     for epoch in range(start_epoch, epochs):
         running_loss = 0
@@ -787,6 +789,18 @@ def main(config_path):
                 
                 with open(osp.join(log_dir, osp.basename(config_path)), 'w') as outfile:
                     yaml.dump(config, outfile, default_flow_style=True)
+            
+            # JMa: synthesize test audios
+            if save_test_audio:
+                synth_test_files(model,
+                                test_sentences,
+                                test_audio_dir,
+                                f'epoch_2nd_{epoch:0>5}_test',
+                                sr,
+                                sampler=None,
+                                diffusion_steps=5,
+                                embedding_scale=1,
+                                device=device)
         
 if __name__=="__main__":
     main()
