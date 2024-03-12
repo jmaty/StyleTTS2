@@ -80,6 +80,7 @@ def main(config_path):
     OOD_data = data_params['OOD_data']
 
     max_len = config.get('max_len', 200)
+    grad_clip = config.get('grad_clip', None)
     
     loss_params = Munch(config['loss_params'])
     diff_epoch = loss_params.diff_epoch
@@ -90,6 +91,7 @@ def main(config_path):
     train_list, val_list = get_data_path_list(train_path, val_path)
     device = 'cuda'
 
+    # load data
     train_dataloader = build_dataloader(train_list,
                                         root_path,
                                         OOD_data=OOD_data,

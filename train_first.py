@@ -70,6 +70,7 @@ def main(config_path):
     test_audio_dir = os.path.join(config['log_dir'], config['data_params'].get('test_audio_dir', 'test_audios'))
     
     max_len = config.get('max_len', 200)
+    grad_clip = config.get('grad_clip', None)
     
     # load data
     train_list, val_list = get_data_path_list(train_path, val_path)
@@ -120,8 +121,8 @@ def main(config_path):
     model = build_model(model_params, text_aligner, pitch_extractor, plbert)
 
     best_loss = float('inf')  # best test loss
-    loss_train_record = list([])
-    loss_test_record = list([])
+    # loss_train_record = list([])
+    # loss_test_record = list([])
 
     loss_params = Munch(config['loss_params'])
     TMA_epoch = loss_params.TMA_epoch
@@ -136,9 +137,10 @@ def main(config_path):
     _ = [model[key].to(device) for key in model]
 
     # initialize optimizers after preparing models for compatibility with FSDP
-    optimizer = build_optimizer({key: model[key].parameters() for key in model},
-                                  scheduler_params_dict= {key: scheduler_params.copy() for key in model},
-                               lr=float(config['optimizer_params'].get('lr', 1e-4)))
+    parameters_dict = {key: model[key].parameters() for key in model}
+    scheduler_params_dict = {key: scheduler_params.copy() for key in model}
+    lr = float(config['optimizer_params'].get('lr', 1e-4))
+    optimizer = build_optimizer(parameters_dict, scheduler_params_dict, lr)
     
     for k, v in optimizer.optimizers.items():
         optimizer.optimizers[k] = accelerator.prepare(optimizer.optimizers[k])
@@ -171,6 +173,7 @@ def main(config_path):
     if (save_val_audio or save_test_audio) and not os.path.exists(test_audio_dir):
         os.makedirs(test_audio_dir, exist_ok=True)
 
+    # Train model
     for epoch in range(start_epoch, epochs):
         running_loss = 0
         start_time = time.time()
@@ -260,6 +263,9 @@ def main(config_path):
                 optimizer.zero_grad()
                 d_loss = dl(wav.detach().unsqueeze(1).float(), y_rec.detach()).mean()
                 accelerator.backward(d_loss)
+                # JMa: gradient clipping
+                if grad_clip:
+                    _ = [accelerator.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
                 optimizer.step('msd')
                 optimizer.step('mpd')
             else:
@@ -296,6 +302,9 @@ def main(config_path):
             running_loss += accelerator.gather(loss_mel).mean().item()
 
             accelerator.backward(g_loss)
+            # JMa: gradient clipping
+            if grad_clip:
+                _ = [accelerator.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
             
             optimizer.step('text_encoder')
             optimizer.step('style_encoder')

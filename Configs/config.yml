@@ -5,9 +5,10 @@ log_interval: 10
 device: "cuda"
 epochs_1st: 200 # number of epochs for first stage training (pre-training)
 epochs_2nd: 100 # number of epochs for second stage training (joint training)
-batch_size: 72
-max_len: 100    # maximum number of frames (400)
-pretrained_model: "epoch_1st_00024.pth"
+batch_size: 32  # paper: 32
+max_len: 100    # maximum number of frames (400), paper: 240
+grad_clip: 5.0  # JMa: gradient clipping
+pretrained_model: ""
 second_stage_load_pretrained: false # set to true if the pre-trained model is for 2nd stage
 load_only_params: false # set to true if do not want to load epoch numbers and optimizer parameters
 
@@ -114,8 +115,8 @@ optimizer_params:
   ft_lr: 0.00001    # learning rate for acoustic modules
   
 slmadv_params:
-  min_len: 400          # minimum length of samples
-  max_len: 500          # maximum length of samples
+  min_len: 400          # minimum length of samples (400), paper: 240
+  max_len: 500          # maximum length of samples (500), paper: 480
   batch_percentage: 0.5 # to prevent out of memory, only use half of the original batch size (0.5)
   iter: 10              # update the discriminator every this iterations of generator update
   thresh: 5             # gradient norm above which the gradient is scaled

@@ -85,6 +85,7 @@ def main(config_path):
     test_audio_dir = os.path.join(config['log_dir'], config['data_params'].get('test_audio_dir', 'test_audios'))
 
     max_len = config.get('max_len', 200)
+    grad_clip = config.get('grad_clip', None)
     
     loss_params = Munch(config['loss_params'])
     diff_epoch = loss_params.diff_epoch
@@ -213,17 +214,22 @@ def main(config_path):
         
     # load models if there is a model
     if load_pretrained:
-        model, optimizer, start_epoch, iters = load_checkpoint(model,  optimizer, config['pretrained_model'],
-                                    load_only_params=config.get('load_only_params', True))
+        model, optimizer, start_epoch, iters = load_checkpoint(model,
+                                                               optimizer,
+                                                               config['pretrained_model'],
+                                                               load_only_params=config.get('load_only_params', True))
+        print(f'Loading pre-trained model: {config['pretrained_model']}')
+        print(f'Starting epoch:      {start_epoch}')
+        print(f'Starting iterations: {iters}')
         
     n_down = model.text_aligner.n_down
 
     best_loss = float('inf')  # best test loss
-    loss_train_record = list([])
-    loss_test_record = list([])
+    # loss_train_record = list([])
+    # loss_test_record = list([])
     iters = 0
     
-    criterion = nn.L1Loss() # F0 loss (regression)
+    # criterion = nn.L1Loss() # F0 loss (regression)
     torch.cuda.empty_cache()
     
     stft_loss = MultiResolutionSTFTLoss().to(device)
@@ -231,7 +237,7 @@ def main(config_path):
     print('BERT', optimizer.optimizers['bert'])
     print('decoder', optimizer.optimizers['decoder'])
 
-    start_ds = False
+    # start_ds = False
     
     running_std = []
     
@@ -419,6 +425,9 @@ def main(config_path):
             optimizer.zero_grad()
             d_loss = dl(wav.detach(), y_rec.detach()).mean()
             accelerator.backward(d_loss)
+            # JMa: gradient clipping
+            if grad_clip:
+                _ = [accelerator.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
             optimizer.step('msd')
             optimizer.step('mpd')
 
@@ -462,11 +471,14 @@ def main(config_path):
                      loss_params.lambda_slm * loss_lm + \
                      loss_params.lambda_sty * loss_sty + \
                      loss_params.lambda_diff * loss_diff + \
-                    loss_params.lambda_mono * loss_mono + \
-                    loss_params.lambda_s2s * loss_s2s
+                     loss_params.lambda_mono * loss_mono + \
+                     loss_params.lambda_s2s * loss_s2s
             
             running_loss += loss_mel.item()
             accelerator.backward(g_loss)
+            # JMa: gradient clipping
+            if grad_clip:
+                _ = [accelerator.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
             if torch.isnan(g_loss):
                 from IPython.core.debugger import set_trace
                 set_trace()
@@ -510,6 +522,9 @@ def main(config_path):
                     # SLM generator loss
                     optimizer.zero_grad()
                     accelerator.backward(loss_gen_lm)
+                    # JMa: gradient clipping
+                    if grad_clip:
+                        _ = [accelerator.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
 
                     # compute the gradient norm
                     total_norm = {}
@@ -549,9 +564,12 @@ def main(config_path):
                     if d_loss_slm != 0:
                         optimizer.zero_grad()
                         accelerator.backward(d_loss_slm)
+                        # JMa: gradient clipping
+                        if grad_clip:
+                            _ = [accelerator.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
                         optimizer.step('wd')
 
-            iters = iters + 1
+            iters += 1
             
             if (i+1)%log_interval == 0:
                 logger.info ('Epoch [%d/%d], Step [%d/%d], Loss: %.5f, Disc Loss: %.5f, Dur Loss: %.5f, CE Loss: %.5f, Norm Loss: %.5f, F0 Loss: %.5f, LM Loss: %.5f, Gen Loss: %.5f, Sty Loss: %.5f, Diff Loss: %.5f, DiscLM Loss: %.5f, GenLM Loss: %.5f, SLoss: %.5f, S2S Loss: %.5f, Mono Loss: %.5f'
@@ -696,7 +714,7 @@ def main(config_path):
         if (epoch + 1) % save_freq == 0 :
             if (loss_test / iters_test) < best_loss:
                 best_loss = loss_test / iters_test
-            print('Saving..')
+            print(f'Saving to epoch_2nd_{epoch:0>5}.pth...')
             state = {
                 'net':  {key: model[key].state_dict() for key in model}, 
                 'optimizer': optimizer.state_dict(),

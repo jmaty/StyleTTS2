@@ -58,7 +58,8 @@ def define_scheduler(optimizer, params):
         steps_per_epoch=params.get('steps_per_epoch', 1000),
         pct_start=params.get('pct_start', 0.0),
         div_factor=1,
-        final_div_factor=1)
+        final_div_factor=1
+    )
 
     return scheduler
 
