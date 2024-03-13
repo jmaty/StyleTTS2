@@ -218,9 +218,10 @@ def main(config_path):
                                                                optimizer,
                                                                config['pretrained_model'],
                                                                load_only_params=config.get('load_only_params', True))
-        print(f'Loading pre-trained model: {config['pretrained_model']}')
+        print(f'Loading pre-trained model: {config["pretrained_model"]}')
         print(f'Starting epoch:      {start_epoch}')
         print(f'Starting iterations: {iters}')
+        print()
         
     n_down = model.text_aligner.n_down
 
