@@ -148,8 +148,15 @@ def main(config_path):
     
     with accelerator.main_process_first():
         if config.get('pretrained_model', '') != '':
-            model, optimizer, start_epoch, iters = load_checkpoint(model,  optimizer, config['pretrained_model'],
-                                        load_only_params=config.get('load_only_params', True))
+            model, optimizer, start_epoch, iters = load_checkpoint(
+                model,
+                optimizer,
+                config['pretrained_model'],
+                load_only_params=config.get('load_only_params', True))
+            print(f'Loading pre-trained model: {config["pretrained_model"]}')
+            print(f'Starting epoch:      {start_epoch}')
+            print(f'Starting iterations: {iters}')
+            print()
         else:
             start_epoch = 0
             iters = 0
