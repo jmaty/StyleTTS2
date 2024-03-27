@@ -65,7 +65,9 @@ class SLMAdversarialLoss(torch.nn.Module):
             t = torch.arange(0, l).expand(l)
 
             t = torch.arange(0, l).unsqueeze(0).expand((len(_s2s_pred), l)).to(ref_text.device)
+            torch.use_deterministic_algorithms(False)
             loc = torch.cumsum(_dur_pred, dim=0) - _dur_pred / 2
+            torch.use_deterministic_algorithms(True)
 
             h = torch.exp(-0.5 * torch.square(t - (l - loc.unsqueeze(-1))) / (self.sig)**2)
 

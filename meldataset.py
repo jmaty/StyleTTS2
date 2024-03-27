@@ -32,6 +32,14 @@ dicts = {}
 for i in range(len((symbols))):
     dicts[symbols[i]] = i
 
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+g = torch.Generator()
+g.manual_seed(0)
+
 class TextCleaner:
     def __init__(self, dummy=None):
         self.word_index_dictionary = dicts
@@ -252,7 +260,10 @@ def build_dataloader(path_list,
                              num_workers=num_workers,
                              drop_last=(not validation),
                              collate_fn=collate_fn,
-                             pin_memory=(device != 'cpu'))
+                             pin_memory=(device != 'cpu'),
+                             worker_init_fn=seed_worker,
+                             generator=g,
+                            )
 
     return data_loader
 

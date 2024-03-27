@@ -31,6 +31,14 @@ import logging
 from accelerate.logging import get_logger
 logger = get_logger(__name__, log_level="DEBUG")
 
+torch.manual_seed(0)
+random.seed(0)
+np.random.seed(0)
+
+# torch.use_deterministic_algorithms(True, warn_only=True)
+torch.use_deterministic_algorithms(True)
+torch.backends.cudnn.benchmark = False
+
 @click.command()
 @click.option('-p', '--config_path', default='Configs/config.yml', type=str)
 def main(config_path):
@@ -258,6 +266,8 @@ def main(config_path):
                 
             with torch.no_grad():    
                 real_norm = log_norm(gt.unsqueeze(1)).squeeze(1).detach()
+                # from IPython.core.debugger import set_trace
+                # set_trace()
                 F0_real, _, _ = model.pitch_extractor(gt.unsqueeze(1))
                 
             s = model.style_encoder(st.unsqueeze(1) if multispeaker else gt.unsqueeze(1))
@@ -308,7 +318,9 @@ def main(config_path):
             
             running_loss += accelerator.gather(loss_mel).mean().item()
 
+            torch.use_deterministic_algorithms(False)
             accelerator.backward(g_loss)
+            torch.use_deterministic_algorithms(True)
             # JMa: gradient clipping
             if grad_clip:
                 _ = [accelerator.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]

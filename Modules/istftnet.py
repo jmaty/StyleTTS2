@@ -180,7 +180,9 @@ class SineGen(torch.nn.Module):
 #             cumsum_shift = torch.zeros_like(rad_values)
 #             cumsum_shift[:, 1:, :] = tmp_over_one_idx * -1.0
     
+            torch.use_deterministic_algorithms(False)
             phase = torch.cumsum(rad_values, dim=1) * 2 * np.pi
+            torch.use_deterministic_algorithms(True)
             phase = torch.nn.functional.interpolate(phase.transpose(1, 2) * self.upsample_scale, 
                                                     scale_factor=self.upsample_scale, mode="linear").transpose(1, 2)
             sines = torch.sin(phase)
@@ -197,7 +199,9 @@ class SineGen(torch.nn.Module):
             u_loc = (uv < 1) * (uv_1 > 0)
 
             # get the instantanouse phase
+            torch.use_deterministic_algorithms(False)
             tmp_cumsum = torch.cumsum(rad_values, dim=1)
+            torch.use_deterministic_algorithms(True)
             # different batch needs to be processed differently
             for idx in range(f0_values.shape[0]):
                 temp_sum = tmp_cumsum[idx, u_loc[idx, :, 0], :]
