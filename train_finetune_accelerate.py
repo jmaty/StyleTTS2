@@ -85,6 +85,7 @@ def main(config_path):
     test_audio_dir = os.path.join(config['log_dir'], config['data_params'].get('test_audio_dir', 'test_audios'))
 
     max_len = config.get('max_len', 200)
+    # JMa: gradient clipping support
     grad_clip = config.get('grad_clip', None)
     
     loss_params = Munch(config['loss_params'])

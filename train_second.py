@@ -13,6 +13,7 @@ from torch.utils.tensorboard import SummaryWriter
 import warnings
 warnings.simplefilter('ignore')
 from monotonic_align import mask_from_lens
+from IPython.core.debugger import set_trace
 
 from meldataset import build_dataloader
 from Utils.PLBERT.util import load_plbert
@@ -80,6 +81,8 @@ def main(config_path):
     test_audio_dir = os.path.join(config['log_dir'], config['data_params'].get('test_audio_dir', 'test_audios'))
 
     max_len = config.get('max_len', 200)
+    # JMa: gradient clipping support
+    grad_clip = config.get('grad_clip', None)
     
     loss_params = Munch(config['loss_params'])
     diff_epoch = loss_params.diff_epoch
@@ -214,8 +217,8 @@ def main(config_path):
     n_down = model.text_aligner.n_down
 
     best_loss = float('inf')  # best test loss
-    loss_train_record = list([])
-    loss_test_record = list([])
+    # loss_train_record = list([])
+    # loss_test_record = list([])
     iters = 0
     
     criterion = nn.L1Loss() # F0 loss (regression)
@@ -392,6 +395,11 @@ def main(config_path):
                 y_rec_gt = wav.unsqueeze(1)
                 y_rec_gt_pred = model.decoder(en, F0_real, N_real, s)
 
+                # print("F0_real", F0_real)
+                # print("N_real", N_real)
+                # print("s", s)
+                # print("y_rec_gt_pred", y_rec_gt_pred)
+
                 if epoch >= joint_epoch:
                     # ground truth from recording
                     wav = y_rec_gt # use recording since decoder is tuned
@@ -410,6 +418,9 @@ def main(config_path):
                 optimizer.zero_grad()
                 d_loss = dl(wav.detach(), y_rec.detach()).mean()
                 d_loss.backward()
+                # JMa: gradient clipping
+                if grad_clip:
+                    _ = [nn.utils.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
                 optimizer.step('msd')
                 optimizer.step('mpd')
             else:
@@ -454,8 +465,10 @@ def main(config_path):
 
             running_loss += loss_mel.item()
             g_loss.backward()
+            # JMa: gradient clipping
+            if grad_clip:
+                _ = [nn.utils.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
             if torch.isnan(g_loss):
-                from IPython.core.debugger import set_trace
                 set_trace()
 
             optimizer.step('bert_encoder')
@@ -496,6 +509,9 @@ def main(config_path):
                 # SLM generator loss
                 optimizer.zero_grad()
                 loss_gen_lm.backward()
+                # JMa: gradient clipping
+                if grad_clip:
+                    _ = [nn.utils.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
 
                 # compute the gradient norm
                 total_norm = {}
@@ -535,6 +551,9 @@ def main(config_path):
                 if d_loss_slm != 0:
                     optimizer.zero_grad()
                     d_loss_slm.backward(retain_graph=True)
+                    # JMa: gradient clipping
+                    if grad_clip:
+                        _ = [nn.utils.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
                     optimizer.step('wd')
 
             else:
