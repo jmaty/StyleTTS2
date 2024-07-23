@@ -1,34 +1,31 @@
 import os
 import os.path as osp
-import yaml
-import shutil
-import numpy as np
-import torch
-import click
 import random
-import yaml
-from munch import Munch
+import shutil
+import warnings
+
+import click
 import numpy as np
 import torch
 import torch.nn.functional as F
-import warnings
-warnings.simplefilter('ignore')
-from monotonic_align import mask_from_lens
+import yaml
+from munch import Munch
 
-from models import *
-from meldataset import build_dataloader
-from utils import *
-from losses import *
-from optimizers import build_optimizer
+warnings.simplefilter('ignore')
+import logging
 import time
 
-from accelerate import Accelerator
-from accelerate import DistributedDataParallelKwargs
-
+from accelerate import Accelerator, DistributedDataParallelKwargs
+from accelerate.logging import get_logger
+from monotonic_align import mask_from_lens
 from torch.utils.tensorboard import SummaryWriter
 
-import logging
-from accelerate.logging import get_logger
+from losses import *
+from meldataset import build_dataloader
+from models import *
+from optimizers import build_optimizer
+from utils import *
+
 logger = get_logger(__name__, log_level="DEBUG")
 
 @click.command()
@@ -49,14 +46,14 @@ def main(config_path):
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(logging.Formatter('%(levelname)s:%(asctime)s: %(message)s'))
     logger.logger.addHandler(file_handler)
-    
+
     batch_size = config.get('batch_size', 10)
     device = accelerator.device
-    
+
     epochs = config.get('epochs_1st', 200)
     log_interval = config.get('log_interval', 10)
     saving_epoch = config.get('save_freq', 2)
-    
+
     data_params = config.get('data_params', None)
     sr = config['preprocess_params'].get('sr', 24000)
     train_path = data_params['train_data']
@@ -68,10 +65,10 @@ def main(config_path):
     save_test_audio = data_params.get('save_test_audio', False)
     test_sentences = data_params.get('test_sentences', [])
     test_audio_dir = os.path.join(config['log_dir'], config['data_params'].get('test_audio_dir', 'test_audios'))
-    
+
     max_len = config.get('max_len', 200)
     grad_clip = config.get('grad_clip', None)
-    
+
     # load data
     train_list, val_list = get_data_path_list(train_path, val_path)
 
@@ -93,7 +90,7 @@ def main(config_path):
                                       num_workers=0,
                                       device=device,
                                       dataset_config={})
-    
+
     with accelerator.main_process_first():
         # load pretrained ASR model
         ASR_config = config.get('ASR_config', False)
@@ -115,7 +112,7 @@ def main(config_path):
         "epochs": epochs,
         "steps_per_epoch": len(train_dataloader),
     }
-    
+
     model_params = recursive_munch(config['model_params'])
     multispeaker = model_params.multispeaker
     model = build_model(model_params, text_aligner, pitch_extractor, plbert)
@@ -126,14 +123,14 @@ def main(config_path):
 
     loss_params = Munch(config['loss_params'])
     TMA_epoch = loss_params.TMA_epoch
-    
+
     for k in model:
         model[k] = accelerator.prepare(model[k])
-    
+
     train_dataloader, val_dataloader = accelerator.prepare(
         train_dataloader, val_dataloader
     )
-    
+
     _ = [model[key].to(device) for key in model]
 
     # initialize optimizers after preparing models for compatibility with FSDP
@@ -141,11 +138,11 @@ def main(config_path):
     scheduler_params_dict = {key: scheduler_params.copy() for key in model}
     lr = float(config['optimizer_params'].get('lr', 1e-4))
     optimizer = build_optimizer(parameters_dict, scheduler_params_dict, lr)
-    
+
     for k, v in optimizer.optimizers.items():
         optimizer.optimizers[k] = accelerator.prepare(optimizer.optimizers[k])
         optimizer.schedulers[k] = accelerator.prepare(optimizer.schedulers[k])
-    
+
     with accelerator.main_process_first():
         if config.get('pretrained_model', '') != '':
             model, optimizer, start_epoch, iters = load_checkpoint(
@@ -160,13 +157,13 @@ def main(config_path):
         else:
             start_epoch = 0
             iters = 0
-    
+
     # in case not distributed
     try:
         n_down = model.text_aligner.module.n_down
     except:
         n_down = model.text_aligner.n_down
-    
+
     # wrapped losses for compatibility with mixed precision
     stft_loss = MultiResolutionSTFTLoss().to(device)
     gl = GeneratorLoss(model.mpd, model.msd).to(device)
@@ -191,7 +188,7 @@ def main(config_path):
             waves = batch[0]
             batch = [b.to(device) for b in batch[1:]]
             texts, input_lengths, _, _, mels, mel_input_length, _ = batch
-            
+
             with torch.no_grad():
                 mask = length_to_mask(mel_input_length // (2 ** n_down)).to('cuda')
                 text_mask = length_to_mask(input_lengths).to(texts.device)
@@ -208,7 +205,7 @@ def main(config_path):
                 attn_mask = (attn_mask < 1)
 
             s2s_attn.masked_fill_(attn_mask, 0.0)
-                        
+
             with torch.no_grad():
                 mask_ST = mask_from_lens(s2s_attn, input_lengths, mel_input_length // (2 ** n_down))
                 s2s_attn_mono = maximum_path(s2s_attn, mask_ST)
@@ -221,17 +218,17 @@ def main(config_path):
                 asr = (t_en @ s2s_attn)
             else:
                 asr = (t_en @ s2s_attn_mono)
-    
+
             # get clips
             mel_input_length_all = accelerator.gather(mel_input_length) # for balanced load
             mel_len = min([int(mel_input_length_all.min().item() / 2 - 1), max_len // 2])
             mel_len_st = int(mel_input_length.min().item() / 2 - 1)
-        
+
             en = []
             gt = []
             wav = []
             st = []
-            
+
             for bib in range(len(mel_input_length)):
                 mel_length = int(mel_input_length[bib].item() / 2)
 
@@ -255,17 +252,17 @@ def main(config_path):
             # clip too short to be used by the style encoder
             if gt.shape[-1] < 80:
                 continue
-                
+   
             with torch.no_grad():    
                 real_norm = log_norm(gt.unsqueeze(1)).squeeze(1).detach()
                 F0_real, _, _ = model.pitch_extractor(gt.unsqueeze(1))
-                
+
             s = model.style_encoder(st.unsqueeze(1) if multispeaker else gt.unsqueeze(1))
-            
+
             y_rec = model.decoder(en, F0_real, real_norm, s)
-            
+
             # discriminator loss
-            
+
             if epoch >= TMA_epoch:
                 optimizer.zero_grad()
                 d_loss = dl(wav.detach().unsqueeze(1).float(), y_rec.detach()).mean()
@@ -281,7 +278,7 @@ def main(config_path):
             # generator loss
             optimizer.zero_grad()
             loss_mel = stft_loss(y_rec.squeeze(), wav.detach())
-            
+
             if epoch >= TMA_epoch: # start TMA training
                 loss_s2s = 0
                 for _s2s_pred, _text_input, _text_length in zip(s2s_pred, texts, input_lengths):
@@ -289,10 +286,10 @@ def main(config_path):
                 loss_s2s /= texts.size(0)
 
                 loss_mono = F.l1_loss(s2s_attn, s2s_attn_mono) * 10
-                    
+
                 loss_gen_all = gl(wav.detach().unsqueeze(1).float(), y_rec).mean()
                 loss_slm = wl(wav.detach(), y_rec).mean()
-                
+
                 g_loss = loss_params.lambda_mel * loss_mel + \
                 loss_params.lambda_mono * loss_mono + \
                 loss_params.lambda_s2s * loss_s2s + \
@@ -305,30 +302,30 @@ def main(config_path):
                 loss_gen_all = 0
                 loss_slm = 0
                 g_loss = loss_mel
-            
+
             running_loss += accelerator.gather(loss_mel).mean().item()
 
             accelerator.backward(g_loss)
             # JMa: gradient clipping
             if grad_clip:
                 _ = [accelerator.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
-            
+
             optimizer.step('text_encoder')
             optimizer.step('style_encoder')
             optimizer.step('decoder')
-            
+
             if epoch >= TMA_epoch: 
                 optimizer.step('text_aligner')
                 # JMa: pitch extractor should not be updated, see:
                 # https://github.com/yl4579/StyleTTS2/issues/10#issuecomment-1783701686
                 # optimizer.step('pitch_extractor')
-            
+
             iters = iters + 1
-            
+
             if (i+1)%log_interval == 0 and accelerator.is_main_process:
                 log_print ('Epoch [%d/%d], Step [%d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f'
                         %(epoch+1, epochs, i+1, len(train_list)//batch_size, running_loss / log_interval, loss_gen_all, d_loss, loss_mono, loss_s2s, loss_slm), logger)
-                
+
                 writer.add_scalar('train/mel_loss', running_loss / log_interval, iters)
                 writer.add_scalar('train/gen_loss', loss_gen_all, iters)
                 writer.add_scalar('train/d_loss', d_loss, iters)
@@ -337,9 +334,9 @@ def main(config_path):
                 writer.add_scalar('train/slm_loss', loss_slm, iters)
 
                 running_loss = 0
-                
+
                 print('Time elapsed:', time.time()-start_time)
-                                
+
         loss_test = 0
 
         _ = [model[key].eval() for key in model]
@@ -369,13 +366,13 @@ def main(config_path):
 
                 # encode
                 t_en = model.text_encoder(texts, input_lengths, text_mask)
-                
+
                 asr = (t_en @ s2s_attn)
 
                 # get clips
                 mel_input_length_all = accelerator.gather(mel_input_length) # for balanced load
                 mel_len = min([int(mel_input_length.min().item() / 2 - 1), max_len // 2])
-                
+
                 en = []
                 gt = []
                 wav = []
@@ -410,20 +407,20 @@ def main(config_path):
             writer.add_scalar('eval/mel_loss', loss_test / iters_test, epoch + 1)
             attn_image = get_image(s2s_attn[0].cpu().numpy().squeeze())
             writer.add_figure('eval/attn', attn_image, epoch)
-            
+
             with torch.no_grad():
                 for bib in range(len(asr)):
                     mel_length = int(mel_input_length[bib].item())
                     gt = mels[bib, :, :mel_length].unsqueeze(0)
                     en = asr[bib, :, :mel_length // 2].unsqueeze(0)
-                                        
+
                     F0_real, _, _ = model.pitch_extractor(gt.unsqueeze(1))
                     F0_real = F0_real.unsqueeze(0)
                     s = model.style_encoder(gt.unsqueeze(1))
                     real_norm = log_norm(gt.unsqueeze(1)).squeeze(1)
-                    
+
                     y_rec = model.decoder(en, F0_real, real_norm, s)
-                    
+
                     # Write and save val audio
                     wav = y_rec.cpu().numpy().squeeze()
                     writer.add_audio('eval/y' + str(bib), wav, epoch, sample_rate=sr)
@@ -442,7 +439,7 @@ def main(config_path):
                             scipy.io.wavfile.write(filename=os.path.join(test_audio_dir, out_file),
                                                    rate=config['preprocess_params']['sr'], 
                                                    data=wav)
-                    
+
                     if bib >= 6:
                         break
 
@@ -471,7 +468,7 @@ def main(config_path):
                                     diffusion_steps=5,
                                     embedding_scale=1,
                                     device=device)
-    
+
     if accelerator.is_main_process:
         print(f'Saving to final first-stage model...')
         state = {
@@ -484,7 +481,7 @@ def main(config_path):
         save_path = osp.join(log_dir, config.get('first_stage_path', 'first_stage.pth'))
         torch.save(state, save_path)
 
-        
-    
+
+
 if __name__=="__main__":
     main()
