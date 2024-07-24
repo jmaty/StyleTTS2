@@ -12,6 +12,9 @@ SPEC="gpu3"
 RUNS=1
 HOURS=24
 MODELS=""
+# QSUB ARGUMENTS
+MEM=64gb
+LSCRATCH=20gb
 
 if [[ "$#" -lt 2 ]]; then
      echo "Usage: run_train_jupyter.sh cfg notebook [specification: iti dgx gpu<0-3>] [hours] [runs] [jobid]"
@@ -40,12 +43,6 @@ if [[ "$#" -gt 5 ]]; then
      JOBID=$6
 fi
 
-# -----------------------------------------------------------------------------
-# QSUB ARGUMENTS
-# -----------------------------------------------------------------------------
-MEM=64gb
-LSCRATCH=20gb
-
 # Check dependencies
 if [[ -z $JOBID ]]; then
      # No deps at the beginning
@@ -57,10 +54,14 @@ else
 fi
 
 # Check run specification and set queue and cluster to run on
-if [[ $SPEC == "iti" ]]; then
-     # Only ITI queue (konos)
+if [[ $SPEC == "iti0" || $SPEC == "iti"  ]]; then
+     # ITI queue: any machine
      QUEUE="-q iti"
      CLUSTER=""
+elif [[ $SPEC == "iti1" ]]; then
+     # ITI queue: alfrid (>40 gb GPU)
+     QUEUE="-q iti"
+     CLUSTER=":gpu_mem=40000mb"
 elif [[ $SPEC == "dgx" ]]; then
      # GDX queue
      QUEUE="-q gpu_dgx"
