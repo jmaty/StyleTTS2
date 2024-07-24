@@ -34,7 +34,8 @@ def main(config_path):
     config = yaml.safe_load(open(config_path))
 
     log_dir = config['log_dir']
-    if not osp.exists(log_dir): os.makedirs(log_dir, exist_ok=True)
+    if not osp.exists(log_dir):
+        os.makedirs(log_dir, exist_ok=True)
     shutil.copy(config_path, osp.join(log_dir, osp.basename(config_path)))
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(project_dir=log_dir, split_batches=True, kwargs_handlers=[ddp_kwargs])    
@@ -68,6 +69,9 @@ def main(config_path):
 
     max_len = config.get('max_len', 200)
     grad_clip = config.get('grad_clip', None)
+
+    # JMa: gradient accumulation
+    grad_accum_steps = config.get('grad_accum_steps', 4)
 
     # load data
     train_list, val_list = get_data_path_list(train_path, val_path)
@@ -177,6 +181,9 @@ def main(config_path):
     if (save_val_audio or save_test_audio) and not os.path.exists(test_audio_dir):
         os.makedirs(test_audio_dir, exist_ok=True)
 
+    # JMa: Init gradient accumulation
+    optimizer.zero_grad()
+
     # Train model
     for epoch in range(start_epoch, epochs):
         running_loss = 0
@@ -184,6 +191,7 @@ def main(config_path):
 
         _ = [model[key].train() for key in model]
 
+        # Train loop
         for i, batch in enumerate(train_dataloader):
             waves = batch[0]
             batch = [b.to(device) for b in batch[1:]]
@@ -264,19 +272,21 @@ def main(config_path):
             # discriminator loss
 
             if epoch >= TMA_epoch:
-                optimizer.zero_grad()
                 d_loss = dl(wav.detach().unsqueeze(1).float(), y_rec.detach()).mean()
+                d_loss = d_loss / grad_accum_steps  # JMa: gradient accumulation loss division
                 accelerator.backward(d_loss)
-                # JMa: gradient clipping
-                if grad_clip:
-                    _ = [accelerator.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
-                optimizer.step('msd')
-                optimizer.step('mpd')
+                # JMa: Gradient accumulation
+                if (i + 1) % grad_accum_steps == 0:
+                    # JMa: gradient clipping
+                    if grad_clip:
+                        _ = [accelerator.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
+                    optimizer.step('msd')
+                    optimizer.step('mpd')
+                    optimizer.zero_grad()
             else:
                 d_loss = 0
 
             # generator loss
-            optimizer.zero_grad()
             loss_mel = stft_loss(y_rec.squeeze(), wav.detach())
 
             if epoch >= TMA_epoch: # start TMA training
@@ -291,10 +301,10 @@ def main(config_path):
                 loss_slm = wl(wav.detach(), y_rec).mean()
 
                 g_loss = loss_params.lambda_mel * loss_mel + \
-                loss_params.lambda_mono * loss_mono + \
-                loss_params.lambda_s2s * loss_s2s + \
-                loss_params.lambda_gen * loss_gen_all + \
-                loss_params.lambda_slm * loss_slm
+                         loss_params.lambda_mono * loss_mono + \
+                         loss_params.lambda_s2s * loss_s2s + \
+                         loss_params.lambda_gen * loss_gen_all + \
+                         loss_params.lambda_slm * loss_slm
 
             else:
                 loss_s2s = 0
@@ -302,23 +312,31 @@ def main(config_path):
                 loss_gen_all = 0
                 loss_slm = 0
                 g_loss = loss_mel
+            
+            g_loss = g_loss / grad_accum_steps  # JMa
 
+            # JMa: ??? loss_mel = loss_mel / grad_accum_steps ???
             running_loss += accelerator.gather(loss_mel).mean().item()
 
             accelerator.backward(g_loss)
-            # JMa: gradient clipping
-            if grad_clip:
-                _ = [accelerator.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
 
-            optimizer.step('text_encoder')
-            optimizer.step('style_encoder')
-            optimizer.step('decoder')
+            # JMa: Gradient accumulation
+            if (i + 1) % grad_accum_steps == 0:
+                # JMa: gradient clipping
+                if grad_clip:
+                    _ = [accelerator.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
 
-            if epoch >= TMA_epoch: 
-                optimizer.step('text_aligner')
-                # JMa: pitch extractor should not be updated, see:
-                # https://github.com/yl4579/StyleTTS2/issues/10#issuecomment-1783701686
-                # optimizer.step('pitch_extractor')
+                optimizer.step('text_encoder')
+                optimizer.step('style_encoder')
+                optimizer.step('decoder')
+
+                if epoch >= TMA_epoch:
+                    optimizer.step('text_aligner')
+                    # JMa: pitch extractor should not be updated, see:
+                    # https://github.com/yl4579/StyleTTS2/issues/10#issuecomment-1783701686
+                    # optimizer.step('pitch_extractor')
+                
+                optimizer.zero_grad()
 
             iters = iters + 1
 
@@ -341,9 +359,10 @@ def main(config_path):
 
         _ = [model[key].eval() for key in model]
 
+        # Validation
         with torch.no_grad():
             iters_test = 0
-            for batch_idx, batch in enumerate(val_dataloader):
+            for _, batch in enumerate(val_dataloader):
                 optimizer.zero_grad()
 
                 waves = batch[0]
