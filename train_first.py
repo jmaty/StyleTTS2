@@ -1,37 +1,41 @@
+import logging
 import os
 import os.path as osp
 import random
 import shutil
+import time
 import warnings
+import numpy as np
+import scipy
 
 import click
-import numpy as np
 import torch
 import torch.nn.functional as F
 import yaml
-from munch import Munch
-
-warnings.simplefilter('ignore')
-import logging
-import time
-
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.logging import get_logger
 from monotonic_align import mask_from_lens
+from munch import Munch
 from torch.utils.tensorboard import SummaryWriter
 
 from losses import *
 from meldataset import build_dataloader
 from models import *
 from optimizers import build_optimizer
-from utils import *
+from utils import (get_data_path_list, get_image, length_to_mask, log_norm,
+                   log_print, maximum_path, recursive_munch, save_model,
+                   synth_test_files)
+from Utils.PLBERT.util import load_plbert
+
+warnings.simplefilter('ignore')
 
 logger = get_logger(__name__, log_level="DEBUG")
 
 @click.command()
 @click.option('-p', '--config_path', default='Configs/config.yml', type=str)
 def main(config_path):
-    config = yaml.safe_load(open(config_path))
+    with open(config_path, encoding="utf-8") as fr:
+        config = yaml.safe_load(fr)
 
     log_dir = config['log_dir']
     if not osp.exists(log_dir):
@@ -54,6 +58,7 @@ def main(config_path):
     epochs = config.get('epochs_1st', 200)
     log_interval = config.get('log_interval', 10)
     saving_epoch = config.get('save_freq', 2)
+    max_saved_models = config.get('max_saved_models', 3)
 
     data_params = config.get('data_params', None)
     sr = config['preprocess_params'].get('sr', 24000)
@@ -106,7 +111,6 @@ def main(config_path):
         pitch_extractor = load_F0_models(F0_path)
 
         # load BERT model
-        from Utils.PLBERT.util import load_plbert
         BERT_path = config.get('PLBERT_dir', False)
         plbert = load_plbert(BERT_path)
 
@@ -181,17 +185,20 @@ def main(config_path):
     if (save_val_audio or save_test_audio) and not os.path.exists(test_audio_dir):
         os.makedirs(test_audio_dir, exist_ok=True)
 
-    # JMa: Init gradient accumulation
-    optimizer.zero_grad()
+    tot_num_steps = len(train_list)//batch_size
 
     # Train model
     for epoch in range(start_epoch, epochs):
         running_loss = 0
         start_time = time.time()
 
+        # Set all models to train mode
         _ = [model[key].train() for key in model]
 
-        # Train loop
+        # JMa: Zero gradients for at each epoch start
+        optimizer.zero_grad()
+
+        # Train loop for each epoch
         for i, batch in enumerate(train_dataloader):
             waves = batch[0]
             batch = [b.to(device) for b in batch[1:]]
@@ -201,7 +208,7 @@ def main(config_path):
                 mask = length_to_mask(mel_input_length // (2 ** n_down)).to('cuda')
                 text_mask = length_to_mask(input_lengths).to(texts.device)
 
-            ppgs, s2s_pred, s2s_attn = model.text_aligner(mels, mask, texts)
+            _, s2s_pred, s2s_attn = model.text_aligner(mels, mask, texts)
 
             s2s_attn = s2s_attn.transpose(-1, -2)
             s2s_attn = s2s_attn[..., 1:]
@@ -223,9 +230,9 @@ def main(config_path):
 
             # 50% of chance of using monotonic version
             if bool(random.getrandbits(1)):
-                asr = (t_en @ s2s_attn)
+                asr = t_en @ s2s_attn
             else:
-                asr = (t_en @ s2s_attn_mono)
+                asr = t_en @ s2s_attn_mono
 
             # get clips
             mel_input_length_all = accelerator.gather(mel_input_length) # for balanced load
@@ -237,19 +244,33 @@ def main(config_path):
             wav = []
             st = []
 
-            for bib in range(len(mel_input_length)):
-                mel_length = int(mel_input_length[bib].item() / 2)
+            for idx, (mel_input_length_item, wave_item) in enumerate(zip(mel_input_length, waves)):
+                mel_length = int(mel_input_length_item.item() / 2)
 
                 random_start = np.random.randint(0, mel_length - mel_len)
-                en.append(asr[bib, :, random_start:random_start+mel_len])
-                gt.append(mels[bib, :, (random_start * 2):((random_start+mel_len) * 2)])
+                en.append(asr[idx, :, random_start:random_start+mel_len])
+                gt.append(mels[idx, :, (random_start * 2):((random_start+mel_len) * 2)])
 
-                y = waves[bib][(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
+                y = wave_item[(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
                 wav.append(torch.from_numpy(y).to(device))
-                
+ 
                 # style reference (better to be different from the GT)
                 random_start = np.random.randint(0, mel_length - mel_len_st)
-                st.append(mels[bib, :, (random_start * 2):((random_start+mel_len_st) * 2)])
+                st.append(mels[idx, :, (random_start * 2):((random_start+mel_len_st) * 2)])
+
+            # for bib in range(len(mel_input_length)):
+            #     mel_length = int(mel_input_length[bib].item() / 2)
+
+            #     random_start = np.random.randint(0, mel_length - mel_len)
+            #     en.append(asr[bib, :, random_start:random_start+mel_len])
+            #     gt.append(mels[bib, :, (random_start * 2):((random_start+mel_len) * 2)])
+
+            #     y = waves[bib][(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
+            #     wav.append(torch.from_numpy(y).to(device))
+
+            #     # style reference (better to be different from the GT)
+            #     random_start = np.random.randint(0, mel_length - mel_len_st)
+            #     st.append(mels[bib, :, (random_start * 2):((random_start+mel_len_st) * 2)])
 
             en = torch.stack(en)
             gt = torch.stack(gt).detach()
@@ -260,7 +281,7 @@ def main(config_path):
             # clip too short to be used by the style encoder
             if gt.shape[-1] < 80:
                 continue
-   
+
             with torch.no_grad():    
                 real_norm = log_norm(gt.unsqueeze(1)).squeeze(1).detach()
                 F0_real, _, _ = model.pitch_extractor(gt.unsqueeze(1))
@@ -269,8 +290,7 @@ def main(config_path):
 
             y_rec = model.decoder(en, F0_real, real_norm, s)
 
-            # discriminator loss
-
+            #--- Discriminator loss ---
             if epoch >= TMA_epoch:
                 d_loss = dl(wav.detach().unsqueeze(1).float(), y_rec.detach()).mean()
                 d_loss = d_loss / grad_accum_steps  # JMa: gradient accumulation loss division
@@ -286,7 +306,7 @@ def main(config_path):
             else:
                 d_loss = 0
 
-            # generator loss
+            #--- Generator loss ---
             loss_mel = stft_loss(y_rec.squeeze(), wav.detach())
 
             if epoch >= TMA_epoch: # start TMA training
@@ -341,25 +361,22 @@ def main(config_path):
             iters = iters + 1
 
             if (i+1)%log_interval == 0 and accelerator.is_main_process:
-                log_print ('Epoch [%d/%d], Step [%d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f'
-                        %(epoch+1, epochs, i+1, len(train_list)//batch_size, running_loss / log_interval, loss_gen_all, d_loss, loss_mono, loss_s2s, loss_slm), logger)
-
-                writer.add_scalar('train/mel_loss', running_loss / log_interval, iters)
+                mel_loss = running_loss / log_interval
+                log_print(f'Epoch [{epoch+1:3}/{epochs}], Step [{i+1:4}/{tot_num_steps}], Mel Loss: {mel_loss:.5f}, Gen Loss: {loss_gen_all:.5f}, Disc Loss: {d_loss:.5f}, Mono Loss: {loss_mono:.5f}, S2S Loss: {loss_s2s:.5f}, SLM Loss: {loss_slm:.5f}', logger)
+                writer.add_scalar('train/mel_loss', mel_loss, iters)
                 writer.add_scalar('train/gen_loss', loss_gen_all, iters)
                 writer.add_scalar('train/d_loss', d_loss, iters)
                 writer.add_scalar('train/mono_loss', loss_mono, iters)
                 writer.add_scalar('train/s2s_loss', loss_s2s, iters)
                 writer.add_scalar('train/slm_loss', loss_slm, iters)
-
+                # print('Time elapsed:', time.time()-start_time)
                 running_loss = 0
 
-                print('Time elapsed:', time.time()-start_time)
-
+        # Validation
         loss_test = 0
-
+        # Set all models to eval mode
         _ = [model[key].eval() for key in model]
 
-        # Validation
         with torch.no_grad():
             iters_test = 0
             for _, batch in enumerate(val_dataloader):
@@ -371,7 +388,7 @@ def main(config_path):
 
                 with torch.no_grad():
                     mask = length_to_mask(mel_input_length // (2 ** n_down)).to('cuda')
-                    ppgs, s2s_pred, s2s_attn = model.text_aligner(mels, mask, texts)
+                    _, s2s_pred, s2s_attn = model.text_aligner(mels, mask, texts)
 
                     s2s_attn = s2s_attn.transpose(-1, -2)
                     s2s_attn = s2s_attn[..., 1:]
@@ -386,7 +403,7 @@ def main(config_path):
                 # encode
                 t_en = model.text_encoder(texts, input_lengths, text_mask)
 
-                asr = (t_en @ s2s_attn)
+                asr = t_en @ s2s_attn
 
                 # get clips
                 mel_input_length_all = accelerator.gather(mel_input_length) # for balanced load
@@ -395,21 +412,30 @@ def main(config_path):
                 en = []
                 gt = []
                 wav = []
-                for bib in range(len(mel_input_length)):
-                    mel_length = int(mel_input_length[bib].item() / 2)
+                for idx, (mel_input_length_item, wave_item) in enumerate(zip(mel_input_length, waves)):
+                    mel_length = int(mel_input_length_item.item() / 2)
 
                     random_start = np.random.randint(0, mel_length - mel_len)
-                    en.append(asr[bib, :, random_start:random_start+mel_len])
-                    gt.append(mels[bib, :, (random_start * 2):((random_start+mel_len) * 2)])
-                    y = waves[bib][(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
+                    en.append(asr[idx, :, random_start:random_start+mel_len])
+                    gt.append(mels[idx, :, (random_start * 2):((random_start+mel_len) * 2)])
+                    y = wave_item[(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
                     wav.append(torch.from_numpy(y).to('cuda'))
+
+                # for bib in range(len(mel_input_length)):
+                #     mel_length = int(mel_input_length[bib].item() / 2)
+
+                #     random_start = np.random.randint(0, mel_length - mel_len)
+                #     en.append(asr[bib, :, random_start:random_start+mel_len])
+                #     gt.append(mels[bib, :, (random_start * 2):((random_start+mel_len) * 2)])
+                #     y = waves[bib][(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
+                #     wav.append(torch.from_numpy(y).to('cuda'))
 
                 wav = torch.stack(wav).float().detach()
 
                 en = torch.stack(en)
                 gt = torch.stack(gt).detach()
 
-                F0_real, _, F0 = model.pitch_extractor(gt.unsqueeze(1))
+                F0_real, _, _ = model.pitch_extractor(gt.unsqueeze(1))
                 s = model.style_encoder(gt.unsqueeze(1))
                 real_norm = log_norm(gt.unsqueeze(1)).squeeze(1)
                 y_rec = model.decoder(en, F0_real, real_norm, s)
@@ -420,21 +446,21 @@ def main(config_path):
                 iters_test += 1
 
         if accelerator.is_main_process:
-            print('Epochs:', epoch + 1)
-            log_print('Validation loss: %.3f' % (loss_test / iters_test) + '\n\n\n\n', logger)
-            print('\n\n\n')
+            # print('Epochs:', epoch + 1)
+            log_print(f'Epoch [{epoch+1:3}/{epochs}]: validation loss: {loss_test/iters_test:.3f}', logger)
+            # print('\n\n\n')
             writer.add_scalar('eval/mel_loss', loss_test / iters_test, epoch + 1)
             attn_image = get_image(s2s_attn[0].cpu().numpy().squeeze())
             writer.add_figure('eval/attn', attn_image, epoch)
 
             with torch.no_grad():
-                for bib in range(len(asr)):
-                    mel_length = int(mel_input_length[bib].item())
-                    gt = mels[bib, :, :mel_length].unsqueeze(0)
-                    en = asr[bib, :, :mel_length // 2].unsqueeze(0)
+                for idx, (mel_input_length_item, wave_item) in enumerate(zip(mel_input_length, waves)):
+                    mel_length = int(mel_input_length_item.item())
+                    gt = mels[idx, :, :mel_length].unsqueeze(0)
+                    en = asr[idx, :, :mel_length // 2].unsqueeze(0)
 
                     F0_real, _, _ = model.pitch_extractor(gt.unsqueeze(1))
-                    F0_real = F0_real.unsqueeze(0)
+                    F0_real = F0_real.unsqueeze(0)    # JMa
                     s = model.style_encoder(gt.unsqueeze(1))
                     real_norm = log_norm(gt.unsqueeze(1)).squeeze(1)
 
@@ -442,30 +468,31 @@ def main(config_path):
 
                     # Write and save val audio
                     wav = y_rec.cpu().numpy().squeeze()
-                    writer.add_audio('eval/y' + str(bib), wav, epoch, sample_rate=sr)
+                    writer.add_audio('eval/y' + str(idx), wav, epoch, sample_rate=sr)
                     if save_val_audio and epoch % saving_epoch == 0:
                         outfile_template = f'epoch_1st_{epoch:0>5}'
-                        out_file = f'{outfile_template}_val-{bib}.wav'
+                        out_file = f'{outfile_template}_val-{idx}.wav'
                         scipy.io.wavfile.write(filename=os.path.join(test_audio_dir, out_file),
-                                               rate=config['preprocess_params']['sr'], 
+                                               rate=config['preprocess_params']['sr'],
                                                data=wav)
                     # Write and save ground-truth audio
                     if epoch == 0:
-                        wav = waves[bib].squeeze()
-                        writer.add_audio('gt/y' + str(bib), wav, epoch, sample_rate=sr)
+                        wav = wave_item.squeeze()
+                        writer.add_audio('gt/y' + str(idx), wav, epoch, sample_rate=sr)
                         if save_val_audio:
-                            out_file = f'{outfile_template}_gt-{bib}.wav'
+                            out_file = f'{outfile_template}_gt-{idx}.wav'
                             scipy.io.wavfile.write(filename=os.path.join(test_audio_dir, out_file),
-                                                   rate=config['preprocess_params']['sr'], 
+                                                   rate=config['preprocess_params']['sr'],
                                                    data=wav)
 
-                    if bib >= 6:
+                    if idx >= 6:
                         break
 
             if epoch % saving_epoch == 0:
-                if (loss_test / iters_test) < best_loss:
-                    best_loss = loss_test / iters_test
-                print(f'Saving to epoch_1st_{epoch:0>5}.pth...')
+                curr_loss = loss_test / iters_test
+                if curr_loss < best_loss:
+                    best_loss = curr_loss
+                # Prepare model state fo saving
                 state = {
                     'net':  {key: model[key].state_dict() for key in model}, 
                     'optimizer': optimizer.state_dict(),
@@ -473,8 +500,8 @@ def main(config_path):
                     'val_loss': loss_test / iters_test,
                     'epoch': epoch,
                 }
-                save_path = osp.join(log_dir, f'epoch_1st_{epoch:0>5}.pth')
-                torch.save(state, save_path)
+                # Save model
+                save_model(state, '1st', epoch, log_dir, max_saved_models)
 
                 # JMa: synthesize test audios
                 if save_test_audio:
@@ -489,7 +516,6 @@ def main(config_path):
                                     device=device)
 
     if accelerator.is_main_process:
-        print(f'Saving to final first-stage model...')
         state = {
             'net':  {key: model[key].state_dict() for key in model}, 
             'optimizer': optimizer.state_dict(),
@@ -499,7 +525,7 @@ def main(config_path):
         }
         save_path = osp.join(log_dir, config.get('first_stage_path', 'first_stage.pth'))
         torch.save(state, save_path)
-
+        print('Final first-stage model saved')
 
 
 if __name__=="__main__":

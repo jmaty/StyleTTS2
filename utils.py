@@ -1,29 +1,33 @@
-from monotonic_align.core import maximum_path_c
+import os.path
+
+import matplotlib.pyplot as plt
 import numpy as np
+import scipy
 import torch
 import torch.nn.functional as F
-import scipy
-import os.path
-import matplotlib.pyplot as plt
+from monotonic_align.core import maximum_path_c
 from munch import Munch
 from nltk.tokenize import word_tokenize
+
+from Modules.diffusion.sampler import (ADPM2Sampler, DiffusionSampler,
+                                       KarrasSchedule)
 from text_utils import TextCleaner
-from Modules.diffusion.sampler import DiffusionSampler, ADPM2Sampler, KarrasSchedule
+
 
 def maximum_path(neg_cent, mask):
-  """ Cython optimized version.
-  neg_cent: [b, t_t, t_s]
-  mask: [b, t_t, t_s]
-  """
-  device = neg_cent.device
-  dtype = neg_cent.dtype
-  neg_cent =  np.ascontiguousarray(neg_cent.data.cpu().numpy().astype(np.float32))
-  path =  np.ascontiguousarray(np.zeros(neg_cent.shape, dtype=np.int32))
+    """ Cython optimized version.
+    neg_cent: [b, t_t, t_s]
+    mask: [b, t_t, t_s]
+    """
+    device = neg_cent.device
+    dtype = neg_cent.dtype
+    neg_cent =  np.ascontiguousarray(neg_cent.data.cpu().numpy().astype(np.float32))
+    path =  np.ascontiguousarray(np.zeros(neg_cent.shape, dtype=np.int32))
 
-  t_t_max = np.ascontiguousarray(mask.sum(1)[:, 0].data.cpu().numpy().astype(np.int32))
-  t_s_max = np.ascontiguousarray(mask.sum(2)[:, 0].data.cpu().numpy().astype(np.int32))
-  maximum_path_c(path, neg_cent, t_t_max, t_s_max)
-  return torch.from_numpy(path).to(device=device, dtype=dtype)
+    t_t_max = np.ascontiguousarray(mask.sum(1)[:, 0].data.cpu().numpy().astype(np.int32))
+    t_s_max = np.ascontiguousarray(mask.sum(2)[:, 0].data.cpu().numpy().astype(np.int32))
+    maximum_path_c(path, neg_cent, t_t_max, t_s_max)
+    return torch.from_numpy(path).to(device=device, dtype=dtype)
 
 def get_data_path_list(train_path=None, val_path=None):
     if train_path is None:
@@ -62,17 +66,23 @@ def get_image(arrs):
 def recursive_munch(d):
     if isinstance(d, dict):
         return Munch((k, recursive_munch(v)) for k, v in d.items())
-    elif isinstance(d, list):
+    if isinstance(d, list):
         return [recursive_munch(v) for v in d]
-    else:
-        return d
-    
+    return d
+
 def log_print(message, logger):
     logger.info(message)
     print(message)
 
 # JMa: Infere a single sentence
-def inference(sentence, model, textcleaner, sampler, noise, diffusion_steps=5, embedding_scale=1, device='cuda'):
+def inference(sentence,
+              model,
+              textcleaner,
+              sampler,
+              noise,
+              diffusion_steps=5,
+              embedding_scale=1,
+              device='cuda'):
     ps = word_tokenize(sentence)
     ps = ' '.join(ps)
     tokens = textcleaner(ps)
@@ -91,7 +101,7 @@ def inference(sentence, model, textcleaner, sampler, noise, diffusion_steps=5, e
                          embedding=bert_dur[0].unsqueeze(0),
                          num_steps=diffusion_steps,
                          embedding_scale=embedding_scale).squeeze(0)
-        
+
         s = s_pred[:, 128:]
         ref = s_pred[:, :128]
 
@@ -109,16 +119,24 @@ def inference(sentence, model, textcleaner, sampler, noise, diffusion_steps=5, e
         for i in range(pred_aln_trg.size(0)):
             pred_aln_trg[i, c_frame:c_frame + int(pred_dur[i].data)] = 1
             c_frame += int(pred_dur[i].data)
-        
+
         # encode prosody
         en = (d.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0).to(device))
-        F0_pred, N_pred = model.predictor.F0Ntrain(en, s)
-        out = model.decoder((t_en @ pred_aln_trg.unsqueeze(0).to(device)), 
-                            F0_pred, N_pred, ref.squeeze().unsqueeze(0))
+        f0_pred, n_pred = model.predictor.F0Ntrain(en, s)
+        out = model.decoder((t_en @ pred_aln_trg.unsqueeze(0).to(device)),
+                            f0_pred, n_pred, ref.squeeze().unsqueeze(0))
         return out.squeeze().cpu().numpy()
 
 # JMa: Synthesize test files
-def synth_test_files(model, test_sentences, outdir, outfile_template, sr, sampler=None, diffusion_steps=5, embedding_scale=1, device='cuda'):
+def synth_test_files(model,
+                     test_sentences,
+                     outdir,
+                     outfile_template,
+                     sr,
+                     sampler=None,
+                     diffusion_steps=5,
+                     embedding_scale=1,
+                     device='cuda'):
     textcleaner = TextCleaner()
     # Generate noise
     noise = torch.randn(1,1,256).to(device)
@@ -127,13 +145,44 @@ def synth_test_files(model, test_sentences, outdir, outfile_template, sr, sample
         sampler = DiffusionSampler(
         model.diffusion.diffusion,
         sampler=ADPM2Sampler(),
-        sigma_schedule=KarrasSchedule(sigma_min=0.0001, sigma_max=3.0, rho=9.0), # empirical parameters
+        # empirical parameters
+        sigma_schedule=KarrasSchedule(sigma_min=0.0001, sigma_max=3.0, rho=9.0),
         clamp=False
     )
     for idx, snt in enumerate(test_sentences):
-        wav = inference(snt, model, textcleaner, sampler, noise, diffusion_steps, embedding_scale, device)
+        wav = inference(snt,
+                        model,
+                        textcleaner,
+                        sampler,
+                        noise,
+                        diffusion_steps,
+                        embedding_scale,
+                        device)
         outfile = f'{outfile_template}-{idx}.wav'
         scipy.io.wavfile.write(filename=os.path.join(outdir, outfile),
-                               rate=sr, 
+                               rate=sr,
                                data=wav,
         )
+
+# JMa: Save model and delete old models
+def save_model(model_state, stage, epoch, save_dir, max_saved_models=3):
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    # Save the model
+    filename = f"epoch_{stage}_{epoch:05d}.pth"
+    filepath = os.path.join(save_dir, filename)
+    torch.save(model_state, filepath)
+    print(f"New model saved to {filepath}")
+
+    # Get list of all saved models and sort by epoch number
+    saved_models = sorted(
+        [f for f in os.listdir(save_dir) if f.startswith(f"epoch_{stage}") and f.endswith(".pth")],
+        key=lambda x: int(x.split('_')[2].split('.')[0])
+    )
+
+    # Remove old models if exceeding max_saved_models
+    while len(saved_models) > max_saved_models:
+        old_model = saved_models.pop(0)
+        os.remove(os.path.join(save_dir, old_model))
+        print(f"Old model {old_model} removed")
