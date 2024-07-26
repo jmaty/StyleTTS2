@@ -17,7 +17,7 @@ MEM=64gb
 LSCRATCH=20gb
 
 if [[ "$#" -lt 2 ]]; then
-     echo "Usage: run_train_jupyter.sh cfg notebook [specification: iti dgx gpu<0-3>] [hours] [runs] [jobid]"
+     echo "Usage: run_train_jupyter.sh cfg notebook [specification: iti<0-1> dgx gpu<0-3>] [hours] [runs] [jobid]"
      exit 1
 fi
 if [[ "$#" -gt 1 ]]; then

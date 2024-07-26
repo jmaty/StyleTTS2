@@ -102,17 +102,17 @@ def main(config_path):
 
     with accelerator.main_process_first():
         # load pretrained ASR model
-        ASR_config = config.get('ASR_config', False)
-        ASR_path = config.get('ASR_path', False)
-        text_aligner = load_ASR_models(ASR_path, ASR_config)
+        asr_config = config.get('ASR_config', False)
+        asr_path = config.get('ASR_path', False)
+        text_aligner = load_ASR_models(asr_path, asr_config)
 
         # load pretrained F0 model
-        F0_path = config.get('F0_path', False)
-        pitch_extractor = load_F0_models(F0_path)
+        f0_path = config.get('F0_path', False)
+        pitch_extractor = load_F0_models(f0_path)
 
         # load BERT model
-        BERT_path = config.get('PLBERT_dir', False)
-        plbert = load_plbert(BERT_path)
+        bert_path = config.get('PLBERT_dir', False)
+        plbert = load_plbert(bert_path)
 
     scheduler_params = {
         "max_lr": float(config['optimizer_params'].get('lr', 1e-4)),
@@ -126,11 +126,9 @@ def main(config_path):
     model = build_model(model_params, text_aligner, pitch_extractor, plbert)
 
     best_loss = float('inf')  # best test loss
-    # loss_train_record = list([])
-    # loss_test_record = list([])
 
     loss_params = Munch(config['loss_params'])
-    TMA_epoch = loss_params.TMA_epoch
+    tma_epoch = loss_params.TMA_epoch
 
     for k in model:
         model[k] = accelerator.prepare(model[k])
@@ -139,6 +137,7 @@ def main(config_path):
         train_dataloader, val_dataloader
     )
 
+    # Move models to device (cuda)
     _ = [model[key].to(device) for key in model]
 
     # initialize optimizers after preparing models for compatibility with FSDP
@@ -147,7 +146,7 @@ def main(config_path):
     lr = float(config['optimizer_params'].get('lr', 1e-4))
     optimizer = build_optimizer(parameters_dict, scheduler_params_dict, lr)
 
-    for k, v in optimizer.optimizers.items():
+    for k, _ in optimizer.optimizers.items():
         optimizer.optimizers[k] = accelerator.prepare(optimizer.optimizers[k])
         optimizer.schedulers[k] = accelerator.prepare(optimizer.schedulers[k])
 
@@ -166,25 +165,27 @@ def main(config_path):
             start_epoch = 0
             iters = 0
 
-    # in case not distributed
+    # in case not distributed computing
     try:
         n_down = model.text_aligner.module.n_down
-    except:
+    except AttributeError:
+        print("Distributed computing NOT used")
         n_down = model.text_aligner.n_down
 
     # wrapped losses for compatibility with mixed precision
     stft_loss = MultiResolutionSTFTLoss().to(device)
     gl = GeneratorLoss(model.mpd, model.msd).to(device)
     dl = DiscriminatorLoss(model.mpd, model.msd).to(device)
-    wl = WavLMLoss(model_params.slm.model, 
-                   model.wd, 
-                   sr, 
+    wl = WavLMLoss(model_params.slm.model,
+                   model.wd,
+                   sr,
                    model_params.slm.sr).to(device)
 
     # Create test audio dir under log/eval dir
     if (save_val_audio or save_test_audio) and not os.path.exists(test_audio_dir):
         os.makedirs(test_audio_dir, exist_ok=True)
 
+    # Total number of steps given the batch size
     tot_num_steps = len(train_list)//batch_size
 
     # Train model
@@ -195,7 +196,7 @@ def main(config_path):
         # Set all models to train mode
         _ = [model[key].train() for key in model]
 
-        # JMa: Zero gradients for at each epoch start
+        # JMa: Zero gradients at each epoch start
         optimizer.zero_grad()
 
         # Train loop for each epoch
@@ -205,7 +206,7 @@ def main(config_path):
             texts, input_lengths, _, _, mels, mel_input_length, _ = batch
 
             with torch.no_grad():
-                mask = length_to_mask(mel_input_length // (2 ** n_down)).to('cuda')
+                mask = length_to_mask(mel_input_length // (2 ** n_down)).to(mel_input_length.device)
                 text_mask = length_to_mask(input_lengths).to(texts.device)
 
             _, s2s_pred, s2s_attn = model.text_aligner(mels, mask, texts)
@@ -284,14 +285,14 @@ def main(config_path):
 
             with torch.no_grad():    
                 real_norm = log_norm(gt.unsqueeze(1)).squeeze(1).detach()
-                F0_real, _, _ = model.pitch_extractor(gt.unsqueeze(1))
+                f0_real, _, _ = model.pitch_extractor(gt.unsqueeze(1))
 
             s = model.style_encoder(st.unsqueeze(1) if multispeaker else gt.unsqueeze(1))
 
-            y_rec = model.decoder(en, F0_real, real_norm, s)
+            y_rec = model.decoder(en, f0_real, real_norm, s)
 
             #--- Discriminator loss ---
-            if epoch >= TMA_epoch:
+            if epoch >= tma_epoch:
                 d_loss = dl(wav.detach().unsqueeze(1).float(), y_rec.detach()).mean()
                 d_loss = d_loss / grad_accum_steps  # JMa: gradient accumulation loss division
                 accelerator.backward(d_loss)
@@ -309,7 +310,7 @@ def main(config_path):
             #--- Generator loss ---
             loss_mel = stft_loss(y_rec.squeeze(), wav.detach())
 
-            if epoch >= TMA_epoch: # start TMA training
+            if epoch >= tma_epoch: # start TMA training
                 loss_s2s = 0
                 for _s2s_pred, _text_input, _text_length in zip(s2s_pred, texts, input_lengths):
                     loss_s2s += F.cross_entropy(_s2s_pred[:_text_length], _text_input[:_text_length])
@@ -350,12 +351,12 @@ def main(config_path):
                 optimizer.step('style_encoder')
                 optimizer.step('decoder')
 
-                if epoch >= TMA_epoch:
+                if epoch >= tma_epoch:
                     optimizer.step('text_aligner')
                     # JMa: pitch extractor should not be updated, see:
                     # https://github.com/yl4579/StyleTTS2/issues/10#issuecomment-1783701686
                     # optimizer.step('pitch_extractor')
-                
+
                 optimizer.zero_grad()
 
             iters = iters + 1
@@ -435,10 +436,10 @@ def main(config_path):
                 en = torch.stack(en)
                 gt = torch.stack(gt).detach()
 
-                F0_real, _, _ = model.pitch_extractor(gt.unsqueeze(1))
+                f0_real, _, _ = model.pitch_extractor(gt.unsqueeze(1))
                 s = model.style_encoder(gt.unsqueeze(1))
                 real_norm = log_norm(gt.unsqueeze(1)).squeeze(1)
-                y_rec = model.decoder(en, F0_real, real_norm, s)
+                y_rec = model.decoder(en, f0_real, real_norm, s)
 
                 loss_mel = stft_loss(y_rec.squeeze(), wav.detach())
 
@@ -459,12 +460,12 @@ def main(config_path):
                     gt = mels[idx, :, :mel_length].unsqueeze(0)
                     en = asr[idx, :, :mel_length // 2].unsqueeze(0)
 
-                    F0_real, _, _ = model.pitch_extractor(gt.unsqueeze(1))
-                    F0_real = F0_real.unsqueeze(0)    # JMa
+                    f0_real, _, _ = model.pitch_extractor(gt.unsqueeze(1))
+                    f0_real = f0_real.unsqueeze(0)    # JMa
                     s = model.style_encoder(gt.unsqueeze(1))
                     real_norm = log_norm(gt.unsqueeze(1)).squeeze(1)
 
-                    y_rec = model.decoder(en, F0_real, real_norm, s)
+                    y_rec = model.decoder(en, f0_real, real_norm, s)
 
                     # Write and save val audio
                     wav = y_rec.cpu().numpy().squeeze()
@@ -529,4 +530,4 @@ def main(config_path):
 
 
 if __name__=="__main__":
-    main()
+    main(None)
