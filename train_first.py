@@ -66,15 +66,16 @@ def main(config_path):
     val_path = data_params['val_data']
     root_path = data_params['root_path']
     min_length = data_params['min_length']
-    OOD_data = data_params['OOD_data']
+    ood_data = data_params['OOD_data']
     save_val_audio = data_params.get('save_val_audio', False)
     save_test_audio = data_params.get('save_test_audio', False)
     test_sentences = data_params.get('test_sentences', [])
     test_audio_dir = os.path.join(config['log_dir'], config['data_params'].get('test_audio_dir', 'test_audios'))
 
     max_len = config.get('max_len', 200)
-    grad_clip = config.get('grad_clip', None)
 
+    # JMa: gradient clipping support
+    grad_clip = config.get('grad_clip', None)
     # JMa: gradient accumulation
     grad_accum_steps = config.get('grad_accum_steps', 4)
 
@@ -83,7 +84,7 @@ def main(config_path):
 
     train_dataloader = build_dataloader(train_list,
                                         root_path,
-                                        OOD_data=OOD_data,
+                                        OOD_data=ood_data,
                                         min_length=min_length,
                                         batch_size=batch_size,
                                         num_workers=2,
@@ -92,7 +93,7 @@ def main(config_path):
 
     val_dataloader = build_dataloader(val_list,
                                       root_path,
-                                      OOD_data=OOD_data,
+                                      OOD_data=ood_data,
                                       min_length=min_length,
                                       batch_size=batch_size,
                                       validation=True,
@@ -191,7 +192,7 @@ def main(config_path):
     # Train model
     for epoch in range(start_epoch, epochs):
         running_loss = 0
-        start_time = time.time()
+        # start_time = time.time()
 
         # Set all models to train mode
         _ = [model[key].train() for key in model]
@@ -223,8 +224,8 @@ def main(config_path):
             s2s_attn.masked_fill_(attn_mask, 0.0)
 
             with torch.no_grad():
-                mask_ST = mask_from_lens(s2s_attn, input_lengths, mel_input_length // (2 ** n_down))
-                s2s_attn_mono = maximum_path(s2s_attn, mask_ST)
+                mask_st = mask_from_lens(s2s_attn, input_lengths, mel_input_length // (2 ** n_down))
+                s2s_attn_mono = maximum_path(s2s_attn, mask_st)
 
             # encode
             t_en = model.text_encoder(texts, input_lengths, text_mask)
@@ -294,7 +295,7 @@ def main(config_path):
             #--- Discriminator loss ---
             if epoch >= tma_epoch:
                 d_loss = dl(wav.detach().unsqueeze(1).float(), y_rec.detach()).mean()
-                d_loss = d_loss / grad_accum_steps  # JMa: gradient accumulation loss division
+                d_loss = d_loss / grad_accum_steps  # JMa: normalize loss
                 accelerator.backward(d_loss)
                 # JMa: Gradient accumulation
                 if (i + 1) % grad_accum_steps == 0:
@@ -334,12 +335,10 @@ def main(config_path):
                 loss_slm = 0
                 g_loss = loss_mel
             
-            g_loss = g_loss / grad_accum_steps  # JMa
-
-            # JMa: ??? loss_mel = loss_mel / grad_accum_steps ???
-            running_loss += accelerator.gather(loss_mel).mean().item()
-
+            g_loss = g_loss / grad_accum_steps  # JMa: normalize loss
             accelerator.backward(g_loss)
+
+            running_loss += accelerator.gather(loss_mel).mean().item()
 
             # JMa: Gradient accumulation
             if (i + 1) % grad_accum_steps == 0:
