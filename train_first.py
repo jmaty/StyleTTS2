@@ -197,7 +197,7 @@ def main(config_path):
         # Set all models to train mode
         _ = [model[key].train() for key in model]
 
-        # JMa: Zero gradients at each epoch start
+        # JMa: Zero gradients of all optimizers at each epoch start
         optimizer.zero_grad()
 
         # Train loop for each epoch
@@ -241,10 +241,7 @@ def main(config_path):
             mel_len = min([int(mel_input_length_all.min().item() / 2 - 1), max_len // 2])
             mel_len_st = int(mel_input_length.min().item() / 2 - 1)
 
-            en = []
-            gt = []
-            wav = []
-            st = []
+            en, gt, wav, st = [], [], [], []
 
             for idx, (mel_input_length_item, wave_item) in enumerate(zip(mel_input_length, waves)):
                 mel_length = int(mel_input_length_item.item() / 2)
@@ -259,20 +256,6 @@ def main(config_path):
                 # style reference (better to be different from the GT)
                 random_start = np.random.randint(0, mel_length - mel_len_st)
                 st.append(mels[idx, :, (random_start * 2):((random_start+mel_len_st) * 2)])
-
-            # for bib in range(len(mel_input_length)):
-            #     mel_length = int(mel_input_length[bib].item() / 2)
-
-            #     random_start = np.random.randint(0, mel_length - mel_len)
-            #     en.append(asr[bib, :, random_start:random_start+mel_len])
-            #     gt.append(mels[bib, :, (random_start * 2):((random_start+mel_len) * 2)])
-
-            #     y = waves[bib][(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
-            #     wav.append(torch.from_numpy(y).to(device))
-
-            #     # style reference (better to be different from the GT)
-            #     random_start = np.random.randint(0, mel_length - mel_len_st)
-            #     st.append(mels[bib, :, (random_start * 2):((random_start+mel_len_st) * 2)])
 
             en = torch.stack(en)
             gt = torch.stack(gt).detach()
@@ -304,7 +287,8 @@ def main(config_path):
                         _ = [accelerator.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
                     optimizer.step('msd')
                     optimizer.step('mpd')
-                    optimizer.zero_grad()
+                    optimizer.zero_grad('msd')
+                    optimizer.zero_grad('mpd')
             else:
                 d_loss = 0
 
@@ -349,14 +333,16 @@ def main(config_path):
                 optimizer.step('text_encoder')
                 optimizer.step('style_encoder')
                 optimizer.step('decoder')
+                optimizer.zero_grad('text_encoder')
+                optimizer.zero_grad('style_encoder')
+                optimizer.zero_grad('decoder')
 
                 if epoch >= tma_epoch:
                     optimizer.step('text_aligner')
                     # JMa: pitch extractor should not be updated, see:
                     # https://github.com/yl4579/StyleTTS2/issues/10#issuecomment-1783701686
                     # optimizer.step('pitch_extractor')
-
-                optimizer.zero_grad()
+                    optimizer.zero_grad('text_aligner')
 
             iters = iters + 1
 
@@ -380,7 +366,7 @@ def main(config_path):
         with torch.no_grad():
             iters_test = 0
             for _, batch in enumerate(val_dataloader):
-                optimizer.zero_grad()
+                # optimizer.zero_grad()
 
                 waves = batch[0]
                 batch = [b.to(device) for b in batch[1:]]
@@ -420,15 +406,6 @@ def main(config_path):
                     gt.append(mels[idx, :, (random_start * 2):((random_start+mel_len) * 2)])
                     y = wave_item[(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
                     wav.append(torch.from_numpy(y).to('cuda'))
-
-                # for bib in range(len(mel_input_length)):
-                #     mel_length = int(mel_input_length[bib].item() / 2)
-
-                #     random_start = np.random.randint(0, mel_length - mel_len)
-                #     en.append(asr[bib, :, random_start:random_start+mel_len])
-                #     gt.append(mels[bib, :, (random_start * 2):((random_start+mel_len) * 2)])
-                #     y = waves[bib][(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
-                #     wav.append(torch.from_numpy(y).to('cuda'))
 
                 wav = torch.stack(wav).float().detach()
 
@@ -514,6 +491,19 @@ def main(config_path):
                                     diffusion_steps=5,
                                     embedding_scale=1,
                                     device=device)
+            # Save pre-TMA model
+            if epoch == tma_epoch - 1:
+                # Prepare model state fo saving
+                state = {
+                    'net':  {key: model[key].state_dict() for key in model}, 
+                    'optimizer': optimizer.state_dict(),
+                    'iters': iters,
+                    'val_loss': loss_test / iters_test,
+                    'epoch': epoch,
+                }
+                save_path = osp.join(log_dir, 'pre-tma.pth')
+                torch.save(state, save_path)
+                print('Pre-TMA model saved')
 
     if accelerator.is_main_process:
         state = {
