@@ -77,7 +77,7 @@ def main(config_path):
     # JMa: gradient clipping support
     grad_clip = config.get('grad_clip', None)
     # JMa: gradient accumulation
-    grad_accum_steps = config.get('grad_accum_steps', 4)
+    grad_accum_steps = config.get('grad_accum_steps', 1)
 
     # load data
     train_list, val_list = get_data_path_list(train_path, val_path)
@@ -279,7 +279,8 @@ def main(config_path):
             if epoch >= tma_epoch:
                 d_loss = dl(wav.detach().unsqueeze(1).float(), y_rec.detach()).mean()
                 d_loss = d_loss / grad_accum_steps  # JMa: normalize loss
-                accelerator.backward(d_loss)
+                # JMa: Compute gradients only for discriminators
+                accelerator.backward(d_loss, inputs=list(model.mpd.parameters()) + list(model.msd.parameters()))
                 # JMa: Gradient accumulation
                 if (i + 1) % grad_accum_steps == 0:
                     # JMa: gradient clipping
@@ -320,7 +321,11 @@ def main(config_path):
                 g_loss = loss_mel
             
             g_loss = g_loss / grad_accum_steps  # JMa: normalize loss
-            accelerator.backward(g_loss)
+            # JMa: Compute gradients only for generator
+            inputs = list(model.decoder.parameters())+list(model.style_encoder.parameters())+list(model.text_encoder.parameters())
+            if epoch >= tma_epoch:
+                inputs += list(model.text_aligner.parameters())
+            accelerator.backward(g_loss, inputs=inputs)
 
             running_loss += accelerator.gather(loss_mel).mean().item()
 
@@ -333,16 +338,19 @@ def main(config_path):
                 optimizer.step('text_encoder')
                 optimizer.step('style_encoder')
                 optimizer.step('decoder')
-                optimizer.zero_grad('text_encoder')
-                optimizer.zero_grad('style_encoder')
-                optimizer.zero_grad('decoder')
+                # optimizer.zero_grad('text_encoder')
+                # optimizer.zero_grad('style_encoder')
+                # optimizer.zero_grad('decoder')
 
                 if epoch >= tma_epoch:
                     optimizer.step('text_aligner')
                     # JMa: pitch extractor should not be updated, see:
                     # https://github.com/yl4579/StyleTTS2/issues/10#issuecomment-1783701686
                     # optimizer.step('pitch_extractor')
-                    optimizer.zero_grad('text_aligner')
+                    # optimizer.zero_grad('text_aligner')
+                # Zero all gradients
+
+                optimizer.zero_grad()
 
             iters = iters + 1
 
@@ -395,9 +403,7 @@ def main(config_path):
                 mel_input_length_all = accelerator.gather(mel_input_length) # for balanced load
                 mel_len = min([int(mel_input_length.min().item() / 2 - 1), max_len // 2])
 
-                en = []
-                gt = []
-                wav = []
+                en, gt, wav = [], [], []
                 for idx, (mel_input_length_item, wave_item) in enumerate(zip(mel_input_length, waves)):
                     mel_length = int(mel_input_length_item.item() / 2)
 
@@ -461,7 +467,7 @@ def main(config_path):
                             scipy.io.wavfile.write(filename=os.path.join(test_audio_dir, out_file),
                                                    rate=config['preprocess_params']['sr'],
                                                    data=wav)
-
+                    # Use up to 6 validation samples
                     if idx >= 6:
                         break
 
