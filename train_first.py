@@ -58,7 +58,7 @@ def main(config_path):
     epochs = config.get('epochs_1st', 200)
     log_interval = config.get('log_interval', 10)
     saving_epoch = config.get('save_freq', 2)
-    max_saved_models = config.get('max_saved_models', 3)
+    max_saved_models = config.get('max_saved_models', 2)
 
     data_params = config.get('data_params', None)
     sr = config['preprocess_params'].get('sr', 24000)
@@ -192,7 +192,7 @@ def main(config_path):
     # Train model
     for epoch in range(start_epoch, epochs):
         running_loss = 0
-        # start_time = time.time()
+        start_time = time.time()
 
         # Set all models to train mode
         _ = [model[key].train() for key in model]
@@ -322,7 +322,9 @@ def main(config_path):
             
             g_loss = g_loss / grad_accum_steps  # JMa: normalize loss
             # JMa: Compute gradients only for generator
-            inputs = list(model.decoder.parameters())+list(model.style_encoder.parameters())+list(model.text_encoder.parameters())
+            inputs = list(model.decoder.parameters()) + \
+                     list(model.style_encoder.parameters()) + \
+                     list(model.text_encoder.parameters())
             if epoch >= tma_epoch:
                 inputs += list(model.text_aligner.parameters())
             accelerator.backward(g_loss, inputs=inputs)
@@ -363,7 +365,7 @@ def main(config_path):
                 writer.add_scalar('train/mono_loss', loss_mono, iters)
                 writer.add_scalar('train/s2s_loss', loss_s2s, iters)
                 writer.add_scalar('train/slm_loss', loss_slm, iters)
-                # print('Time elapsed:', time.time()-start_time)
+                print('Time elapsed:', time.time()-start_time)
                 running_loss = 0
 
         # Validation
@@ -475,12 +477,12 @@ def main(config_path):
                 curr_loss = loss_test / iters_test
                 if curr_loss < best_loss:
                     best_loss = curr_loss
-                # Prepare model state fo saving
+                # Prepare model state for saving
                 state = {
                     'net':  {key: model[key].state_dict() for key in model}, 
                     'optimizer': optimizer.state_dict(),
                     'iters': iters,
-                    'val_loss': loss_test / iters_test,
+                    'val_loss': curr_loss,
                     'epoch': epoch,
                 }
                 # Save model
@@ -507,7 +509,7 @@ def main(config_path):
                     'val_loss': loss_test / iters_test,
                     'epoch': epoch,
                 }
-                save_path = osp.join(log_dir, 'pre-tma.pth')
+                save_path = osp.join(log_dir, f'pre-tma_1st_{epoch:0>5}.pth')
                 torch.save(state, save_path)
                 print('Pre-TMA model saved')
 
