@@ -74,7 +74,7 @@ def log_print(message, logger):
     logger.info(message)
     print(message)
 
-# JMa: Infere a single sentence
+# JMa: Infere a single sentence written in phonemes
 def inference(sentence,
               model,
               textcleaner,
@@ -127,7 +127,7 @@ def inference(sentence,
                             f0_pred, n_pred, ref.squeeze().unsqueeze(0))
         return out.squeeze().cpu().numpy()
 
-# JMa: Synthesize test files
+# JMa: Synthesize test files written in phonemes
 def synth_test_files(model,
                      test_sentences,
                      outdir,
