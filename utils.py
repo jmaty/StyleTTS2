@@ -82,7 +82,13 @@ def inference(sentence,
               noise,
               diffusion_steps=5,
               embedding_scale=1,
+              phonemizer=None,
               device='cuda'):
+    # Phonemize text if phonemizer is given;
+    # otherwise phonemes expected at the input
+    if phonemizer:
+        sentence = sentence.strip()
+        ps = phonemizer.phonemize([sentence])
     ps = word_tokenize(sentence)
     ps = ' '.join(ps)
     tokens = textcleaner(ps)
