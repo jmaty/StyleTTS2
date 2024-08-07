@@ -80,15 +80,13 @@ def inference(sentence,
               textcleaner,
               sampler,
               noise,
+              ref_spk=None,
+              alpha=0.3,
+              beta=0.7,
               diffusion_steps=5,
               embedding_scale=1,
-              phonemizer=None,
               device='cuda'):
-    # Phonemize text if phonemizer is given;
-    # otherwise phonemes expected at the input
-    if phonemizer:
-        sentence = sentence.strip()
-        ps = phonemizer.phonemize([sentence])
+    # Phoneme string expected at the input
     ps = word_tokenize(sentence)
     ps = ' '.join(ps)
     tokens = textcleaner(ps)
@@ -103,13 +101,27 @@ def inference(sentence,
         bert_dur = model.bert(tokens, attention_mask=(~text_mask).int())
         d_en = model.bert_encoder(bert_dur).transpose(-1, -2)
 
-        s_pred = sampler(noise,
-                         embedding=bert_dur[0].unsqueeze(0),
-                         num_steps=diffusion_steps,
-                         embedding_scale=embedding_scale).squeeze(0)
+        if ref_spk is not None:
+            s_pred = sampler(
+                noise,
+                embedding=bert_dur[0].unsqueeze(0),
+                embedding_scale=embedding_scale,
+                # reference from the same speaker as the embedding
+                features=ref_spk,
+                num_steps=diffusion_steps).squeeze(0)
+        else:
+            s_pred = sampler(
+                noise,
+                embedding=bert_dur[0].unsqueeze(0),
+                embedding_scale=embedding_scale,
+                num_steps=diffusion_steps).squeeze(0)
 
         s = s_pred[:, 128:]
         ref = s_pred[:, :128]
+
+        if ref_spk is not None:
+            ref = alpha * ref + (1 - alpha)  * ref_spk[:, :128]
+            s = beta * s + (1 - beta)  * ref_spk[:, 128:]
 
         d = model.predictor.text_encoder(d_en, s, input_lengths, text_mask)
 
@@ -127,11 +139,26 @@ def inference(sentence,
             c_frame += int(pred_dur[i].data)
 
         # encode prosody
-        en = (d.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0).to(device))
+        en = d.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0).to(device)
+
+        # if model_params.decoder.type == "hifigan":
+        #     asr_new = torch.zeros_like(en)
+        #     asr_new[:, :, 0] = en[:, :, 0]
+        #     asr_new[:, :, 1:] = en[:, :, 0:-1]
+        #     en = asr_new
+
         f0_pred, n_pred = model.predictor.F0Ntrain(en, s)
-        out = model.decoder((t_en @ pred_aln_trg.unsqueeze(0).to(device)),
-                            f0_pred, n_pred, ref.squeeze().unsqueeze(0))
+        asr = t_en @ pred_aln_trg.unsqueeze(0).to(device)
+        # if model_params.decoder.type == "hifigan":
+        #     asr_new = torch.zeros_like(asr)
+        #     asr_new[:, :, 0] = asr[:, :, 0]
+        #     asr_new[:, :, 1:] = asr[:, :, 0:-1]
+        #     asr = asr_new
+
+        out = model.decoder(asr, f0_pred, n_pred, ref.squeeze().unsqueeze(0))
         return out.squeeze().cpu().numpy()
+        # weird pulse at the end of the model, need to be fixed later
+        # return out.squeeze().cpu().numpy()[..., :-50]
 
 # JMa: Synthesize test files written in phonemes
 def synth_test_files(model,
@@ -161,9 +188,9 @@ def synth_test_files(model,
                         textcleaner,
                         sampler,
                         noise,
-                        diffusion_steps,
-                        embedding_scale,
-                        device)
+                        diffusion_steps=diffusion_steps,
+                        embedding_scale=embedding_scale,
+                        device=device)
         outfile = f'{outfile_template}-{idx}.wav'
         scipy.io.wavfile.write(filename=os.path.join(outdir, outfile),
                                rate=sr,
