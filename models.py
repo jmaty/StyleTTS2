@@ -1,8 +1,8 @@
 #coding:utf-8
 import math
+import os
 from collections import OrderedDict
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -743,3 +743,26 @@ def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_module
         epoch, iters = 0, 0
 
     return model, optimizer, epoch, iters
+
+# JMa: Save model and delete old models
+def save_checkpoint(model_state, stage, epoch, save_dir, max_saved_models=3):
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    # Save the model
+    filename = f"epoch_{stage}_{epoch:05d}.pth"
+    filepath = os.path.join(save_dir, filename)
+    torch.save(model_state, filepath)
+    print(f"New model saved to {filepath}")
+
+    # Get list of all saved models and sort by epoch number
+    saved_models = sorted(
+        [f for f in os.listdir(save_dir) if f.startswith(f"epoch_{stage}") and f.endswith(".pth")],
+        key=lambda x: int(x.split('_')[2].split('.')[0])
+    )
+
+    # Remove old models if exceeding max_saved_models
+    while len(saved_models) > max_saved_models:
+        old_model = saved_models.pop(0)
+        os.remove(os.path.join(save_dir, old_model))
+        print(f"Old model {old_model} removed")
