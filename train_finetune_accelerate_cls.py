@@ -312,18 +312,27 @@ class StyleTTS2Finetune():
 
     def eval_mode(self, key=None):
         if key is not None:
-            pass
+            self.model[key].eval()
         else:
             # Set all models to eval mode
-            _ = [self.model[key].eval() for key in self.model]
+            _ = [self.model[k].eval() for k in self.model]
 
 
     def train_mode(self, key=None):
         if key is not None:
-            pass
+            self.model[key].train()
         else:
             # Set all models to eval mode
-            _ = [self.model[key].train() for key in self.model]
+            _ = [self.model[k].train() for k in self.model]
+
+
+    def clip_grad_norm(self, key=None):
+        if key is not None:
+            self.accelerator.clip_grad_norm_(self.model[key].parameters(), self.grad_clip)
+        else:
+            # Set clip all model parameters
+            _ = [self.accelerator.clip_grad_norm_(self.model[k].parameters(), self.grad_clip) \
+                 for k in self.model]
 
 
     def finetune(self):
@@ -349,7 +358,8 @@ class StyleTTS2Finetune():
                         self.test_audio_dir,
                         f'epoch_2nd_{epoch:0>5}_test',
                         self.sr,
-                        sampler=None,
+                        # sampler=None,
+                        sampler=self.sampler,
                         diffusion_steps=5,
                         embedding_scale=1,
                         device=self.device
@@ -361,7 +371,7 @@ class StyleTTS2Finetune():
         self.train_mode('text_aligner')
         self.train_mode('text_encoder')
         self.train_mode('predictor')
-        self.train_mode('bert_predictor')
+        self.train_mode('bert_encoder')
         self.train_mode('bert')
         self.train_mode('msd')
         self.train_mode('mpd')
@@ -465,7 +475,6 @@ class StyleTTS2Finetune():
             else:
                 loss_sty, loss_diff = 0, 0
 
-            s_loss = 0
             d, p = self.model.predictor(d_en, s_dur, input_lengths, s2s_attn_mono, text_mask)
 
             mel_len_st = int(mel_input_length.min().item()/2 - 1)
@@ -525,8 +534,8 @@ class StyleTTS2Finetune():
             self.accelerator.backward(d_loss)
             # JMa: gradient clipping
             if self.grad_clip:
-                self.accelerator.clip_grad_norm_(self.model.msd.parameters(), self.grad_clip)
-                self.accelerator.clip_grad_norm_(self.model.mpd.parameters(), self.grad_clip)
+                self.clip_grad_norm('msd')
+                self.clip_grad_norm('mpd')
             self.optimizer.step('msd')
             self.optimizer.step('mpd')
 
@@ -566,7 +575,7 @@ class StyleTTS2Finetune():
                      self.loss_params['lambda_F0'] * loss_f0_rec + \
                      self.loss_params['lambda_ce'] * loss_ce + \
                      self.loss_params['lambda_norm'] * loss_norm_rec + \
-                     self.loss_params['ambda_dur'] * loss_dur + \
+                     self.loss_params['lambda_dur'] * loss_dur + \
                      self.loss_params['lambda_gen'] * loss_gen_all + \
                      self.loss_params['lambda_slm'] * loss_lm + \
                      self.loss_params['lambda_sty'] * loss_sty + \
@@ -578,29 +587,14 @@ class StyleTTS2Finetune():
             self.accelerator.backward(g_loss)
             # JMa: gradient clipping
             if self.grad_clip:
-                self.accelerator.clip_grad_norm_(
-                    self.model.bert_encoder.parameters(),
-                    self.grad_clip
-                )
-                self.accelerator.clip_grad_norm_(self.model.bert.parameters(), self.grad_clip)
-                self.accelerator.clip_grad_norm_(self.model.predictor.parameters(), self.grad_clip)
-                self.accelerator.clip_grad_norm_(
-                    self.model.predictor_encoder.parameters(),
-                    self.grad_clip
-                )
-                self.accelerator.clip_grad_norm_(
-                    self.model.style_encoder.parameters(),
-                    self.grad_clip
-                )
-                self.accelerator.clip_grad_norm_(self.model.decoder.parameters(), self.grad_clip)
-                self.accelerator.clip_grad_norm_(
-                    self.model.text_encoder.parameters(),
-                    self.grad_clip
-                )
-                self.accelerator.clip_grad_norm_(
-                    self.model.text_aligner.parameters(),
-                    self.grad_clip
-                )
+                self.clip_grad_norm('bert_encoder')
+                self.clip_grad_norm('bert')
+                self.clip_grad_norm('predictor')
+                self.clip_grad_norm('predictor_encoder')
+                self.clip_grad_norm('style_encoder')
+                self.clip_grad_norm('decoder')
+                self.clip_grad_norm('text_encoder')
+                self.clip_grad_norm('text_aligner')
             if torch.isnan(g_loss):
                 set_trace()
 
@@ -615,10 +609,7 @@ class StyleTTS2Finetune():
 
             if epoch >= self.diff_epoch:
                 if self.grad_clip:
-                    self.accelerator.clip_grad_norm_(
-                        self.model.diffusion.parameters(),
-                        self.grad_clip
-                )
+                    self.clip_grad_norm('diffusion')
                 self.optimizer.step('diffusion')
 
             d_loss_slm, loss_gen_lm = 0, 0
@@ -651,7 +642,10 @@ class StyleTTS2Finetune():
                     self.accelerator.backward(loss_gen_lm)
                     # JMa: gradient clipping
                     if self.grad_clip:
-                        _ = [self.accelerator.clip_grad_norm_(self.model[k].parameters(), self.grad_clip) for k in self.model]
+                        self.clip_grad_norm('bert_encoder')
+                        self.clip_grad_norm('bert')
+                        self.clip_grad_norm('predictor')
+                        self.clip_grad_norm('diffusion')
 
                     # compute the gradient norm
                     total_norm = self.grad_norm()
@@ -669,14 +663,14 @@ class StyleTTS2Finetune():
                         self.accelerator.backward(d_loss_slm)
                         # JMa: gradient clipping
                         if self.grad_clip:
-                            _ = [self.accelerator.clip_grad_norm_(self.model.wd.parameters(), self.grad_clip) for k in self.model]
+                            self.clip_grad_norm('wd')
                         self.optimizer.step('wd')
 
             self.iters += 1
 
             if (i+1) % self.log_interval == 0:
                 mel_loss = running_loss / self.log_interval
-                logger.info(f'Epoch [{epoch+1:3}/{self.epochs}], Step [{i+1:4}/{self.tot_num_steps}], Mel Loss: {mel_loss:.5f}, Disc Loss: {d_loss:.5f}, Dur Loss: {loss_dur:.5f}, CE Loss: {loss_ce:.5f}, Norm Loss: {loss_norm_rec:.5f}, F0 Loss: {loss_f0_rec:.5f}, LM Loss: {loss_lm:.5f}, Gen Loss: {loss_gen_all:.5f}, Sty Loss: {loss_sty:.5f}, Diff Loss: {loss_diff:.5f}, DiscLM Loss: {d_loss_slm:.5f}, GenLM Loss: {loss_gen_lm:.5f}, SLoss: {s_loss:.5f}, S2S Loss: {loss_s2s:.5f}, Mono Loss: {loss_mono:5f}')  
+                logger.info(f'Epoch [{epoch+1:3}/{self.epochs}], Step [{i+1:4}/{self.tot_num_steps}], Mel Loss: {mel_loss:.5f}, Disc Loss: {d_loss:.5f}, Dur Loss: {loss_dur:.5f}, CE Loss: {loss_ce:.5f}, Norm Loss: {loss_norm_rec:.5f}, F0 Loss: {loss_f0_rec:.5f}, LM Loss: {loss_lm:.5f}, Gen Loss: {loss_gen_all:.5f}, Sty Loss: {loss_sty:.5f}, Diff Loss: {loss_diff:.5f}, DiscLM Loss: {d_loss_slm:.5f}, GenLM Loss: {loss_gen_lm:.5f}, S2S Loss: {loss_s2s:.5f}, Mono Loss: {loss_mono:5f}')  
                 self.writer.add_scalar('train/mel_loss', mel_loss, self.iters)
                 self.writer.add_scalar('train/gen_loss', loss_gen_all, self.iters)
                 self.writer.add_scalar('train/d_loss', d_loss, self.iters)
@@ -700,6 +694,7 @@ class StyleTTS2Finetune():
 
         with torch.no_grad():
             iters_test = 0
+
             for _, batch in enumerate(self.val_dataloader):
                 self.optimizer.zero_grad()
 
@@ -759,7 +754,7 @@ class StyleTTS2Finetune():
                         en.append(asr[idx, :, random_start:random_start+mel_len])
                         p_en.append(p[idx, :, random_start:random_start+mel_len])
 
-                        gt.append(mels[bib, :, (random_start * 2):((random_start+mel_len) * 2)])
+                        gt.append(mels[idx, :, (random_start * 2):((random_start+mel_len) * 2)])
                         y = w[(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
                         wav.append(torch.from_numpy(y).to(self.device))
 
@@ -777,8 +772,8 @@ class StyleTTS2Finetune():
                         _s2s_pred = _s2s_pred[:_text_length, :]
                         _text_input = _text_input[:_text_length].long()
                         _s2s_trg = torch.zeros_like(_s2s_pred)
-                        for bib in range(_s2s_trg.shape[0]):
-                            _s2s_trg[bib, :_text_input[bib]] = 1
+                        for idx in range(_s2s_trg.shape[0]):
+                            _s2s_trg[idx, :_text_input[idx]] = 1
                         _dur_pred = torch.sigmoid(_s2s_pred).sum(axis=1)
                         loss_dur += F.l1_loss(
                             _dur_pred[1:_text_length-1],
@@ -804,12 +799,14 @@ class StyleTTS2Finetune():
                 except Exception:
                     continue
 
-        print('Epochs:', epoch + 1)
+        avg_loss_test = loss_test/iters_test
+        avg_dur_loss = loss_align/iters_test
+        avg_f_loss = loss_f/iters_test
         logger.info('Validation loss: %.3f, Dur loss: %.3f, F0 loss: %.3f',
-                    loss_test/iters_test, loss_align/iters_test, loss_f/iters_test)
-        self.writer.add_scalar('eval/mel_loss', loss_test / iters_test, epoch + 1)
-        self.writer.add_scalar('eval/dur_loss', loss_test / iters_test, epoch + 1)
-        self.writer.add_scalar('eval/F0_loss', loss_f / iters_test, epoch + 1)
+                    avg_loss_test, avg_dur_loss, avg_f_loss)
+        self.writer.add_scalar('eval/mel_loss', avg_loss_test, epoch + 1)
+        self.writer.add_scalar('eval/dur_loss', avg_dur_loss, epoch + 1)
+        self.writer.add_scalar('eval/F0_loss', avg_f_loss, epoch + 1)
 
         return loss_test, iters_test
 
@@ -818,7 +815,6 @@ class StyleTTS2Finetune():
         curr_loss = loss_test / iters_test
         if curr_loss < self.best_loss:
             self.best_loss = curr_loss
-        print(f'Saving to epoch_2nd_{epoch:0>5}.pth...')
         state = {
             'net':  {key: self.model[key].state_dict() for key in self.model}, 
             'optimizer': self.optimizer.state_dict(),
@@ -829,8 +825,8 @@ class StyleTTS2Finetune():
         # Save model
         save_checkpoint(state, '2nd', epoch, self.log_dir, self.max_saved_models)
 
-        # if estimate sigma, save the estimated simga
-        if self.model_params.diffusion.dist.estimate_sigma_data:
+        # if estimate sigma, save the estimated sigma
+        if self.config['model_params']['diffusion']['dist']['estimate_sigma_data']:
             self.config['model_params']['diffusion']['dist']['sigma_data'] = \
                 float(np.mean(self.running_std))
 
@@ -1017,4 +1013,4 @@ def main(config_path):
 
 
 if __name__=="__main__":
-    main('Configs/config_ft.yml')
+    main(None)
