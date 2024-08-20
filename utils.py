@@ -140,8 +140,7 @@ def inference(sentence,
 
         # encode prosody
         en = d.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0).to(device)
-
-        # if model_params.decoder.type == "hifigan":
+        # if model.decoder.type == "hifigan":
         #     asr_new = torch.zeros_like(en)
         #     asr_new[:, :, 0] = en[:, :, 0]
         #     asr_new[:, :, 1:] = en[:, :, 0:-1]
@@ -149,7 +148,7 @@ def inference(sentence,
 
         f0_pred, n_pred = model.predictor.F0Ntrain(en, s)
         asr = t_en @ pred_aln_trg.unsqueeze(0).to(device)
-        # if model_params.decoder.type == "hifigan":
+        # if model.decoder.type == "hifigan":
         #     asr_new = torch.zeros_like(asr)
         #     asr_new[:, :, 0] = asr[:, :, 0]
         #     asr_new[:, :, 1:] = asr[:, :, 0:-1]
@@ -176,12 +175,12 @@ def synth_test_files(model,
     # Set up sampler
     if not sampler:
         sampler = DiffusionSampler(
-        model.diffusion.diffusion,
-        sampler=ADPM2Sampler(),
-        # empirical parameters
-        sigma_schedule=KarrasSchedule(sigma_min=0.0001, sigma_max=3.0, rho=9.0),
-        clamp=False
-    )
+            model.diffusion.diffusion,
+            sampler=ADPM2Sampler(),
+            # empirical parameters
+            sigma_schedule=KarrasSchedule(sigma_min=0.0001, sigma_max=3.0, rho=9.0),
+            clamp=False,
+        )
     for idx, snt in enumerate(test_sentences):
         wav = inference(snt,
                         model,
@@ -192,9 +191,10 @@ def synth_test_files(model,
                         embedding_scale=embedding_scale,
                         device=device)
         outfile = f'{outfile_template}-{idx}.wav'
-        scipy.io.wavfile.write(filename=os.path.join(outdir, outfile),
-                               rate=sr,
-                               data=wav,
+        scipy.io.wavfile.write(
+            filename=os.path.join(outdir, outfile),
+            rate=sr,
+            data=wav,
         )
 
 # # JMa: Save model and delete old models

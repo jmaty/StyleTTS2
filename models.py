@@ -4,10 +4,10 @@ import os
 from collections import OrderedDict
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import yaml
 from munch import Munch
+from torch import nn
 from torch.nn.utils import spectral_norm, weight_norm
 
 from Modules.diffusion.diffusion import AudioDiffusionConditional
@@ -28,9 +28,26 @@ class LearnedDownSample(nn.Module):
         if self.layer_type == 'none':
             self.conv = nn.Identity()
         elif self.layer_type == 'timepreserve':
-            self.conv = spectral_norm(nn.Conv2d(dim_in, dim_in, kernel_size=(3, 1), stride=(2, 1), groups=dim_in, padding=(1, 0)))
+            self.conv = spectral_norm(
+                nn.Conv2d(
+                    dim_in,
+                    dim_in,
+                    kernel_size=(3, 1),
+                    stride=(2, 1),
+                    groups=dim_in, padding=(1, 0)
+                )
+            )
         elif self.layer_type == 'half':
-            self.conv = spectral_norm(nn.Conv2d(dim_in, dim_in, kernel_size=(3, 3), stride=(2, 2), groups=dim_in, padding=1))
+            self.conv = spectral_norm(
+                nn.Conv2d(
+                    dim_in,
+                    dim_in,
+                    kernel_size=(3, 3),
+                    stride=(2, 2),
+                    groups=dim_in,
+                    padding=1
+                )
+            )
         else:
             raise RuntimeError(f'Got unexpected donwsampletype {self.layer_type}, expected is [none, timepreserve, half]')
 
@@ -45,15 +62,33 @@ class LearnedUpSample(nn.Module):
         if self.layer_type == 'none':
             self.conv = nn.Identity()
         elif self.layer_type == 'timepreserve':
-            self.conv = nn.ConvTranspose2d(dim_in, dim_in, kernel_size=(3, 1), stride=(2, 1), groups=dim_in, output_padding=(1, 0), padding=(1, 0))
+            self.conv = nn.ConvTranspose2d(
+                dim_in,
+                dim_in,
+                kernel_size=(3, 1),
+                stride=(2, 1),
+                groups=dim_in,
+                output_padding=(1, 0),
+                padding=(1, 0)
+            )
         elif self.layer_type == 'half':
-            self.conv = nn.ConvTranspose2d(dim_in, dim_in, kernel_size=(3, 3), stride=(2, 2), groups=dim_in, output_padding=1, padding=1)
+            self.conv = nn.ConvTranspose2d(
+                dim_in,
+                dim_in,
+                kernel_size=(3, 3),
+                stride=(2, 2),
+                groups=dim_in,
+                output_padding=1,
+                padding=1
+            )
         else:
-            raise RuntimeError(f'Got unexpected upsampletype {self.layer_type}, expected is [none, timepreserve, half]')
+            raise RuntimeError(f'Got unexpected upsampletype {self.layer_type}, \
+                               expected is [none, timepreserve, half]')
 
 
     def forward(self, x):
         return self.conv(x)
+
 
 class DownSample(nn.Module):
     def __init__(self, layer_type):
@@ -69,7 +104,8 @@ class DownSample(nn.Module):
             if x.shape[-1] % 2 != 0:
                 x = torch.cat([x, x[..., -1].unsqueeze(-1)], dim=-1)
             return F.avg_pool2d(x, 2)
-        raise RuntimeError(f'Got unexpected donwsampletype {self.layer_type}, expected is [none, timepreserve, half]')
+        raise RuntimeError(f'Got unexpected donwsampletype {self.layer_type}, \
+                           expected is [none, timepreserve, half]')
 
 
 class UpSample(nn.Module):
@@ -85,7 +121,8 @@ class UpSample(nn.Module):
         elif self.layer_type == 'half':
             return F.interpolate(x, scale_factor=2, mode='nearest')
         else:
-            raise RuntimeError(f'Got unexpected upsampletype {self.layer_type}, expected is [none, timepreserve, half]')
+            raise RuntimeError(f'Got unexpected upsampletype {self.layer_type}, \
+                               expected is [none, timepreserve, half]')
 
 
 class ResBlk(nn.Module):
@@ -131,6 +168,7 @@ class ResBlk(nn.Module):
         x = self._shortcut(x) + self._residual(x)
         return x / math.sqrt(2)  # unit variance
 
+
 class StyleEncoder(nn.Module):
     def __init__(self, dim_in=48, style_dim=48, max_conv_dim=384):
         super().__init__()
@@ -157,6 +195,7 @@ class StyleEncoder(nn.Module):
         s = self.unshared(h)
         return s
 
+
 class LinearNorm(torch.nn.Module):
     def __init__(self, in_dim, out_dim, bias=True, w_init_gain='linear'):
         super().__init__()
@@ -168,6 +207,7 @@ class LinearNorm(torch.nn.Module):
 
     def forward(self, x):
         return self.linear_layer(x)
+
 
 class Discriminator2d(nn.Module):
     def __init__(self, dim_in=48, num_domains=1, max_conv_dim=384, repeat_num=4):
@@ -200,6 +240,7 @@ class Discriminator2d(nn.Module):
         out, features = self.get_feature(x)
         out = out.squeeze()  # (batch)
         return out, features
+
 
 class ResBlk1d(nn.Module):
     def __init__(self, dim_in, dim_out, actv=nn.LeakyReLU(0.2),
@@ -264,6 +305,7 @@ class ResBlk1d(nn.Module):
         x = self._shortcut(x) + self._residual(x)
         return x / math.sqrt(2)  # unit variance
 
+
 class LayerNorm(nn.Module):
     def __init__(self, channels, eps=1e-5):
         super().__init__()
@@ -276,6 +318,7 @@ class LayerNorm(nn.Module):
         x = x.transpose(1, -1)
         x = F.layer_norm(x, (self.channels,), self.gamma, self.beta, self.eps)
         return x.transpose(1, -1)
+
 
 class TextEncoder(nn.Module):
     def __init__(self, channels, kernel_size, depth, n_symbols, actv=nn.LeakyReLU(0.2)):
@@ -341,7 +384,6 @@ class TextEncoder(nn.Module):
         mask = torch.arange(lengths.max()).unsqueeze(0).expand(lengths.shape[0], -1).type_as(lengths)
         mask = torch.gt(mask+1, lengths.unsqueeze(1))
         return mask
-
 
 
 class AdaIN1d(nn.Module):
