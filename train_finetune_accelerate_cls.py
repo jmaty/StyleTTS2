@@ -11,6 +11,7 @@ from logging import StreamHandler
 
 import click
 import numpy as np
+import scipy
 import torch
 import torch.nn.functional as F
 import yaml
@@ -30,9 +31,9 @@ from Modules.diffusion.sampler import (ADPM2Sampler, DiffusionSampler,
                                        KarrasSchedule)
 from Modules.slmadv import SLMAdversarialLoss
 from optimizers import build_optimizer
-from utils import (get_data_path_list, length_to_mask, log_norm, maximum_path,
-                   recursive_munch, synth_test_files)
-from Utils.PLBERT.util import load_plbert
+from utils import (get_data_path_list, get_image, length_to_mask, log_norm,
+                   maximum_path, recursive_munch, synth_test_files)
+from Utils.PLBERT_mlng.util import load_plbert
 
 warnings.simplefilter('ignore')
 
@@ -343,12 +344,15 @@ class StyleTTS2Finetune():
         for epoch in range(self.start_epoch, self.epochs):
             # Set all models to eval mode
             self.eval_mode()
+            
             # Training loop
             self._training_loop(epoch)
+
             # Validation loop
             loss_test, iters_test = self._validation_loop(epoch)
+            
             # Save progress
-            if (epoch + 1) % self.save_freq == 0:
+            if (epoch+1) % self.save_freq == 0:
                 self._save_progress(epoch, loss_test, iters_test)
                 # JMa: synthesize test audios
                 if self.save_test_audio:
@@ -356,13 +360,31 @@ class StyleTTS2Finetune():
                         self.model,
                         self.test_sentences,
                         self.test_audio_dir,
-                        f'epoch_2nd_{epoch:0>5}_test',
+                        f'epoch_2nd_{epoch+1:0>5}_test',
                         self.sr,
                         sampler=None,
                         diffusion_steps=5,
                         embedding_scale=1,
                         device=self.device
                     )
+
+            # Save milestone models
+            if epoch == self.diff_epoch - 1:
+                self._save_model(
+                    osp.join(self.log_dir, f'pre-diff_{epoch+1:05d}.pth'),
+                    epoch,
+                    loss_test,
+                    iters_test
+                )
+                logger.info('Pre-diffusion model saved at epoch %d', epoch+1)
+            if epoch == self.joint_epoch - 1:
+                self._save_model(
+                    osp.join(self.log_dir, f'pre-joint_{epoch+1:05d}.pth'),
+                    epoch,
+                    loss_test,
+                    iters_test
+                )
+                logger.info('Pre-joint model saved at epoch %d', epoch+1)
 
 
     def _training_loop(self, epoch):
@@ -398,7 +420,8 @@ class StyleTTS2Finetune():
                 s2s_attn = s2s_attn.transpose(-1, -2)
                 s2s_attn = s2s_attn[..., 1:]
                 s2s_attn = s2s_attn.transpose(-1, -2)
-            except Exception:
+            except Exception as e:
+                print(f"[!] Error: {e}")
                 continue    # skip batch
 
             mask_st = mask_from_lens(s2s_attn, input_lengths, mel_input_length // (2**self.n_down))
@@ -780,33 +803,73 @@ class StyleTTS2Finetune():
                         )
 
                     loss_dur /= texts.size(0)
-
                     s = self.model.style_encoder(gt.unsqueeze(1))
 
                     y_rec = self.model.decoder(en, f0_fake, n_fake, s)
                     loss_mel = self.stft_loss(y_rec.squeeze(), wav.detach())
-
                     f0_real, _, _ = self.model.pitch_extractor(gt.unsqueeze(1))
-
                     loss_f0 = F.l1_loss(f0_real, f0_fake) / 10
-
                     loss_test += (loss_mel).mean()
                     loss_align += (loss_dur).mean()
                     loss_f += (loss_f0).mean()
 
                     iters_test += 1
-                except Exception:
-                    continue
+
+                except Exception as e:
+                    print(f"[!] Error: {e}")
+                    continue    # skip batch
 
         avg_loss_test = loss_test/iters_test
         avg_dur_loss = loss_align/iters_test
         avg_f_loss = loss_f/iters_test
         logger.info('Validation loss: %.3f, Dur loss: %.3f, F0 loss: %.3f',
                     avg_loss_test, avg_dur_loss, avg_f_loss)
-        self.writer.add_scalar('eval/mel_loss', avg_loss_test, epoch + 1)
-        self.writer.add_scalar('eval/dur_loss', avg_dur_loss, epoch + 1)
-        self.writer.add_scalar('eval/F0_loss', avg_f_loss, epoch + 1)
+        self.writer.add_scalar('eval/mel_loss', avg_loss_test, epoch+1)
+        self.writer.add_scalar('eval/dur_loss', avg_dur_loss, epoch+1)
+        self.writer.add_scalar('eval/F0_loss', avg_f_loss, epoch+1)
+        attn_image = get_image(s2s_attn[0].cpu().numpy().squeeze())
+        self.writer.add_figure('eval/attn', attn_image, epoch+1)
 
+        # Generate validation samples
+        with torch.no_grad():
+            # Use up to 5 validation samples
+            for idx in range(min(len(mel_input_length), 5)):
+                mel_length = int(mel_input_length[idx].item())
+                gt = mels[idx, :, :mel_length].unsqueeze(0)
+                en = asr[idx, :, :mel_length // 2].unsqueeze(0)
+                s = self.model.style_encoder(gt.unsqueeze(1))
+
+                # f0_real, _, _ = self.model.pitch_extractor(gt.unsqueeze(1))
+                # f0_real = f0_real.unsqueeze(0)
+                # real_norm = log_norm(gt.unsqueeze(1)).squeeze(1)
+                # y_rec = self.model.decoder(en, f0_real, real_norm, s)
+
+                p_en = p[idx, :, :mel_length // 2].unsqueeze(0)
+                f0_fake, n_fake = self.model.predictor.F0Ntrain(p_en, s)
+                y_rec = self.model.decoder(en, f0_fake, n_fake, s)
+
+                # Write and save val audio
+                wav = y_rec.cpu().numpy().squeeze()
+                self.writer.add_audio('eval/y' + str(idx), wav, epoch+1, sample_rate=self.sr)
+                if self.save_val_audio and (epoch+1) % self.save_freq == 0:
+                    outfile_template = f'epoch_2nd_{epoch+1:0>5}'
+                    out_file = f'{outfile_template}_val-{idx}.wav'
+                    scipy.io.wavfile.write(
+                        filename=os.path.join(self.test_audio_dir, out_file),
+                        rate=self.sr,
+                        data=wav,
+                    )
+                # Write and save ground-truth audio
+                if epoch == 0:
+                    wav = waves[idx].squeeze()
+                    self.writer.add_audio('gt/y' + str(idx), wav, epoch+1, sample_rate=self.sr)
+                    if self.save_val_audio:
+                        out_file = f'{outfile_template}_gt-{idx}.wav'
+                        scipy.io.wavfile.write(
+                            filename=os.path.join(self.test_audio_dir, out_file),
+                            rate=self.sr,
+                            data=wav,
+                        )
         return loss_test, iters_test
 
 
@@ -836,6 +899,17 @@ class StyleTTS2Finetune():
             ) as outfile:
                 yaml.dump(self.config, outfile, default_flow_style=True)
 
+    # Save model
+    def _save_model(self, path, epoch, loss_test, iters_test):
+        # Prepare model state fo saving
+        state = {
+            'net':  {key: self.model[key].state_dict() for key in self.model}, 
+            'optimizer': self.optimizer.state_dict(),
+            'iters': self.iters,
+            'val_loss': loss_test / iters_test,
+            'epoch': epoch,
+        }
+        torch.save(state, path)
 
     @property
     def log_dir(self):
@@ -856,6 +930,10 @@ class StyleTTS2Finetune():
     @property
     def loss_params(self):
         return self.config['loss_params']
+    
+    @property
+    def preprocess_params(self):
+        return self.config['preprocess_params']
 
     @property
     def diff_epoch(self):
