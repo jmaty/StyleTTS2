@@ -358,8 +358,7 @@ class StyleTTS2Finetune():
                         self.test_audio_dir,
                         f'epoch_2nd_{epoch:0>5}_test',
                         self.sr,
-                        # sampler=None,
-                        sampler=self.sampler,
+                        sampler=None,
                         diffusion_steps=5,
                         embedding_scale=1,
                         device=self.device
