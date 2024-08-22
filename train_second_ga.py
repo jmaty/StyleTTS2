@@ -551,7 +551,7 @@ def main(config_path):
                 if slm_out is None:
                     continue
 
-                d_loss_slm, loss_gen_lm, y_pred = slm_out
+                d_loss_slm, loss_gen_lm, _ = slm_out
 
                 # SLM generator loss
                 # optimizer.zero_grad()
