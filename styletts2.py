@@ -278,13 +278,14 @@ class StyleTTS2Finetune():
     # compute the gradient norm
     def grad_norm(self):
         total_norm = {}
-        for key in self.model.keys():
-            total_norm[key] = 0
-            parameters = [p for p in self.model[key].parameters() if p.grad is not None and p.requires_grad]
+        for k in self.model.keys():
+            total_norm[k] = 0
+            parameters = [p for p in self.model[k].parameters()\
+                          if p.grad is not None and p.requires_grad]
             for p in parameters:
                 param_norm = p.grad.detach().data.norm(2)
-                total_norm[key] += param_norm.item() ** 2
-            total_norm[key] = total_norm[key] ** 0.5
+                total_norm[k] += param_norm.item() ** 2
+            total_norm[k] = total_norm[k] ** 0.5
         return total_norm
 
 
@@ -342,13 +343,13 @@ class StyleTTS2Finetune():
         for epoch in range(self.start_epoch, self.epochs):
             # Set all models to eval mode
             self.eval_mode()
-            
+
             # Training loop
             self._training_loop(epoch)
 
             # Validation loop
             loss_test, iters_test = self._validation_loop(epoch)
-            
+
             # Save progress
             if (epoch+1) % self.save_freq == 0:
                 self._save_progress(epoch, loss_test, iters_test)
@@ -368,21 +369,23 @@ class StyleTTS2Finetune():
 
             # Save milestone models
             if epoch == self.diff_epoch - 1:
+                save_path = osp.join(self.log_dir, f'pre-diff_{epoch:05d}.pth')
                 self._save_model(
-                    osp.join(self.log_dir, f'pre-diff_{epoch+1:05d}.pth'),
+                    save_path,
                     epoch,
                     loss_test,
                     iters_test
                 )
-                logger.info('Pre-diffusion model saved at epoch %d', epoch+1)
+                logger.info('Pre-diffusion model saved at epoch %d to %s', epoch+1, save_path)
             if epoch == self.joint_epoch - 1:
+                save_path = osp.join(self.log_dir, f'pre-joint_{epoch:05d}.pth')
                 self._save_model(
-                    osp.join(self.log_dir, f'pre-joint_{epoch+1:05d}.pth'),
+                    save_path,
                     epoch,
                     loss_test,
                     iters_test
                 )
-                logger.info('Pre-joint model saved at epoch %d', epoch+1)
+                logger.info('Pre-joint model saved at epoch %d to %s', epoch+1, save_path)
 
 
     def _training_loop(self, epoch):
@@ -662,7 +665,8 @@ class StyleTTS2Finetune():
                     self.accelerator.backward(loss_gen_lm)
                     # JMa: gradient clipping
                     if self.grad_clip:
-                        self.clip_grad_norm('bert_encoder')
+                        self.clip_g
+                        rad_norm('bert_encoder')
                         self.clip_grad_norm('bert')
                         self.clip_grad_norm('predictor')
                         self.clip_grad_norm('diffusion')
@@ -715,7 +719,7 @@ class StyleTTS2Finetune():
         with torch.no_grad():
             iters_test = 0
 
-            for _, batch in enumerate(self.val_dataloader):
+            for val_idx, batch in enumerate(self.val_dataloader):
                 self.optimizer.zero_grad()
 
                 try:
@@ -814,6 +818,26 @@ class StyleTTS2Finetune():
                     loss_align += (loss_dur).mean()
                     loss_f += (loss_f0).mean()
 
+                    # Generate validation sample (up to the defined number)
+                    if val_idx < self.n_val_audios:
+                        self._create_val_sample(
+                            val_idx,
+                            epoch,
+                            mel_input_length,
+                            mels,
+                            asr,
+                            p,
+                            idx_in_batch=0,
+                        )
+                    # Generate ground-truth sample only at the beginning
+                    if epoch == 0 and val_idx < self.n_val_audios:
+                        self._create_gt_sample(
+                            val_idx,
+                            epoch,
+                            waves,
+                            idx_in_batch=0,
+                        )
+
                     iters_test += 1
 
                 except Exception as e:
@@ -831,47 +855,102 @@ class StyleTTS2Finetune():
         attn_image = get_image(s2s_attn[0].cpu().numpy().squeeze())
         self.writer.add_figure('eval/attn', attn_image, epoch+1)
 
-        # Generate validation samples
-        with torch.no_grad():
-            # Use up to 5 validation samples from the last batch
-            for idx in range(min(len(mel_input_length), 5)):
-                mel_length = int(mel_input_length[idx].item())
-                gt = mels[idx, :, :mel_length].unsqueeze(0)
-                en = asr[idx, :, :mel_length // 2].unsqueeze(0)
-                s = self.model.style_encoder(gt.unsqueeze(1))
+        # # Generate validation samples
+        # with torch.no_grad():
+        #     # Use up to 5 validation samples from the last batch
+        #     for idx in range(min(len(mel_input_length), 5)):
+        #         mel_length = int(mel_input_length[idx].item())
+        #         gt = mels[idx, :, :mel_length].unsqueeze(0)
+        #         en = asr[idx, :, :mel_length // 2].unsqueeze(0)
+        #         s = self.model.style_encoder(gt.unsqueeze(1))
 
-                # f0_real, _, _ = self.model.pitch_extractor(gt.unsqueeze(1))
-                # f0_real = f0_real.unsqueeze(0)
-                # real_norm = log_norm(gt.unsqueeze(1)).squeeze(1)
-                # y_rec = self.model.decoder(en, f0_real, real_norm, s)
+        #         # f0_real, _, _ = self.model.pitch_extractor(gt.unsqueeze(1))
+        #         # f0_real = f0_real.unsqueeze(0)
+        #         # real_norm = log_norm(gt.unsqueeze(1)).squeeze(1)
+        #         # y_rec = self.model.decoder(en, f0_real, real_norm, s)
 
-                p_en = p[idx, :, :mel_length // 2].unsqueeze(0)
-                f0_fake, n_fake = self.model.predictor.F0Ntrain(p_en, s)
-                y_rec = self.model.decoder(en, f0_fake, n_fake, s)
+        #         p_en = p[idx, :, :mel_length // 2].unsqueeze(0)
+        #         f0_fake, n_fake = self.model.predictor.F0Ntrain(p_en, s)
+        #         y_rec = self.model.decoder(en, f0_fake, n_fake, s)
 
-                # Write and save val audio
-                wav = y_rec.cpu().numpy().squeeze()
-                self.writer.add_audio('eval/y' + str(idx), wav, epoch+1, sample_rate=self.sr)
-                if self.save_val_audio and (epoch+1) % self.save_freq == 0:
-                    outfile_template = f'epoch_2nd_{epoch+1:0>5}'
-                    out_file = f'{outfile_template}_val-{idx}.wav'
-                    scipy.io.wavfile.write(
-                        filename=os.path.join(self.test_audio_dir, out_file),
-                        rate=self.sr,
-                        data=wav,
-                    )
-                # Write and save ground-truth audio
-                if epoch == 0:
-                    wav = waves[idx].squeeze()
-                    self.writer.add_audio('gt/y' + str(idx), wav, epoch+1, sample_rate=self.sr)
-                    if self.save_val_audio:
-                        out_file = f'{outfile_template}_gt-{idx}.wav'
-                        scipy.io.wavfile.write(
-                            filename=os.path.join(self.test_audio_dir, out_file),
-                            rate=self.sr,
-                            data=wav,
-                        )
+        #         # Write and save val audio
+        #         wav = y_rec.cpu().numpy().squeeze()
+        #         self.writer.add_audio('eval/y' + str(idx), wav, epoch+1, sample_rate=self.sr)
+        #         if self.save_val_audio and (epoch+1) % self.save_freq == 0:
+        #             outfile_template = f'epoch_2nd_{epoch+1:0>5}'
+        #             out_file = f'{outfile_template}_val-{idx}.wav'
+        #             scipy.io.wavfile.write(
+        #                 filename=os.path.join(self.test_audio_dir, out_file),
+        #                 rate=self.sr,
+        #                 data=wav,
+        #             )
+        #         # Write and save ground-truth audio
+        #         if epoch == 0:
+        #             wav = waves[idx].squeeze()
+        #             self.writer.add_audio('gt/y' + str(idx), wav, epoch+1, sample_rate=self.sr)
+        #             if self.save_val_audio:
+        #                 out_file = f'{outfile_template}_gt-{idx}.wav'
+        #                 scipy.io.wavfile.write(
+        #                     filename=os.path.join(self.test_audio_dir, out_file),
+        #                     rate=self.sr,
+        #                     data=wav,
+        #                 )
         return loss_test, iters_test
+
+
+    # Create 1 validation sample for the validation batch (typically the first one (0))
+    # Skipping if desired number of validation samples was reached
+    def _create_val_sample(self,
+                           val_idx,
+                           epoch,
+                           mel_input_length,
+                           mels,
+                           asr,
+                           p,
+                           idx_in_batch=0):
+        # Compute for the whole utterance
+        mel_length = int(mel_input_length[idx_in_batch].item())
+        gt = mels[idx_in_batch, :, :mel_length].unsqueeze(0)
+        en = asr[idx_in_batch, :, :mel_length // 2].unsqueeze(0)
+        s = self.model.style_encoder(gt.unsqueeze(1))
+
+        # Use real characteristics
+        # f0_real, _, _ = self.model.pitch_extractor(gt.unsqueeze(1))
+        # f0_real = f0_real.unsqueeze(0)
+        # real_norm = log_norm(gt.unsqueeze(1)).squeeze(1)
+        # y_rec = self.model.decoder(en, f0_real, real_norm, s)
+
+        # Use predicted characteristics
+        p_en = p[idx_in_batch, :, :mel_length // 2].unsqueeze(0)
+        f0_fake, n_fake = self.model.predictor.F0Ntrain(p_en, s)
+        y_rec = self.model.decoder(en, f0_fake, n_fake, s)
+
+        # Write and save val audio
+        wav = y_rec.cpu().numpy().squeeze()
+        self.writer.add_audio('eval/y' + str(val_idx), wav, epoch+1, sample_rate=self.sr)
+        if self.save_val_audio and (epoch+1) % self.save_freq == 0:
+            outfile_template = f'epoch_2nd_{epoch+1:0>5}'
+            out_file = f'{outfile_template}_val-{val_idx}.wav'
+            scipy.io.wavfile.write(
+                filename=os.path.join(self.test_audio_dir, out_file),
+                rate=self.sr,
+                data=wav,
+            )
+
+    # Create 1 ground-truth sample for the validation batch (typically the first one (0))
+    # Skipping if desired number of validation samples was reached
+    # Do it only once at the very beginning (epoch 0)
+    def _create_gt_sample(self, val_idx, epoch, waves, idx_in_batch=0):
+        wav = waves[idx_in_batch].squeeze()
+        self.writer.add_audio('gt/y' + str(val_idx), wav, epoch+1, sample_rate=self.sr)
+        if self.save_val_audio:
+            outfile_template = f'epoch_2nd_{epoch+1:0>5}'
+            out_file = f'{outfile_template}_gt-{val_idx}.wav'
+            scipy.io.wavfile.write(
+                filename=os.path.join(self.test_audio_dir, out_file),
+                rate=self.sr,
+                data=wav,
+            )
 
 
     def _save_progress(self, epoch, loss_test, iters_test):
@@ -1005,6 +1084,10 @@ class StyleTTS2Finetune():
     @property
     def save_val_audio(self):
         return self.config['data_params'].get('save_val_audio', False)
+    
+    @property
+    def n_val_audios(self):
+        return self.config['data_params'].get('n_val_audios', 5)
 
     @property
     def save_test_audio(self):
