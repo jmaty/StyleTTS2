@@ -40,7 +40,7 @@ class SLMAdversarialLoss(torch.nn.Module):
                 ref_s=None):
         text_mask = length_to_mask(ref_lengths).to(ref_text.device)
         bert_dur = self.model.bert(ref_text, attention_mask=(~text_mask).int())
-        d_en = self.model.bert_encoder(bert_dur).transpose(-1, -2) 
+        d_en = self.model.bert_encoder(bert_dur).transpose(-1, -2)
 
         if use_ind and np.random.rand() < 0.5:
             s_preds = s_trg

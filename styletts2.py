@@ -665,8 +665,7 @@ class StyleTTS2Finetune():
                     self.accelerator.backward(loss_gen_lm)
                     # JMa: gradient clipping
                     if self.grad_clip:
-                        self.clip_g
-                        rad_norm('bert_encoder')
+                        self.clip_grad_norm('bert_encoder')
                         self.clip_grad_norm('bert')
                         self.clip_grad_norm('predictor')
                         self.clip_grad_norm('diffusion')
