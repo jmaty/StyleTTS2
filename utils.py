@@ -140,19 +140,19 @@ def inference(sentence,
 
         # encode prosody
         en = d.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0).to(device)
-        # if model.decoder.type == "hifigan":
-        #     asr_new = torch.zeros_like(en)
-        #     asr_new[:, :, 0] = en[:, :, 0]
-        #     asr_new[:, :, 1:] = en[:, :, 0:-1]
-        #     en = asr_new
+        if model.decoder.type == "hifigan":
+            asr_new = torch.zeros_like(en)
+            asr_new[:, :, 0] = en[:, :, 0]
+            asr_new[:, :, 1:] = en[:, :, 0:-1]
+            en = asr_new
 
         f0_pred, n_pred = model.predictor.F0Ntrain(en, s)
         asr = t_en @ pred_aln_trg.unsqueeze(0).to(device)
-        # if model.decoder.type == "hifigan":
-        #     asr_new = torch.zeros_like(asr)
-        #     asr_new[:, :, 0] = asr[:, :, 0]
-        #     asr_new[:, :, 1:] = asr[:, :, 0:-1]
-        #     asr = asr_new
+        if model.decoder.type == "hifigan":
+            asr_new = torch.zeros_like(asr)
+            asr_new[:, :, 0] = asr[:, :, 0]
+            asr_new[:, :, 1:] = asr[:, :, 0:-1]
+            asr = asr_new
 
         out = model.decoder(asr, f0_pred, n_pred, ref.squeeze().unsqueeze(0))
         return out.squeeze().cpu().numpy()
@@ -196,26 +196,3 @@ def synth_test_files(model,
             rate=sr,
             data=wav,
         )
-
-# # JMa: Save model and delete old models
-# def save_model(model_state, stage, epoch, save_dir, max_saved_models=3):
-#     if not os.path.exists(save_dir):
-#         os.makedirs(save_dir)
-
-#     # Save the model
-#     filename = f"epoch_{stage}_{epoch:05d}.pth"
-#     filepath = os.path.join(save_dir, filename)
-#     torch.save(model_state, filepath)
-#     print(f"New model saved to {filepath}")
-
-#     # Get list of all saved models and sort by epoch number
-#     saved_models = sorted(
-#         [f for f in os.listdir(save_dir) if f.startswith(f"epoch_{stage}") and f.endswith(".pth")],
-#         key=lambda x: int(x.split('_')[2].split('.')[0])
-#     )
-
-#     # Remove old models if exceeding max_saved_models
-#     while len(saved_models) > max_saved_models:
-#         old_model = saved_models.pop(0)
-#         os.remove(os.path.join(save_dir, old_model))
-#         print(f"Old model {old_model} removed")
