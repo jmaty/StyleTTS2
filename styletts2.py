@@ -355,11 +355,14 @@ class StyleTTS2Finetune():
                 self._save_progress(epoch, loss_test, iters_test)
                 # JMa: synthesize test audios
                 if self.save_test_audio:
+                    logger.info("Synthesizing %d test sentences to %s",
+                                len(self.test_sentences),
+                                self.test_audio_dir)
                     synth_test_files(
                         self.model,
                         self.test_sentences,
                         self.test_audio_dir,
-                        f'epoch_2nd_{epoch+1:0>5}_test',
+                        f'epoch_2nd_{epoch:0>5}_test',
                         self.sr,
                         sampler=None,
                         diffusion_steps=5,
@@ -369,23 +372,23 @@ class StyleTTS2Finetune():
 
             # Save milestone models
             if epoch == self.diff_epoch - 1:
-                save_path = osp.join(self.log_dir, f'pre-diff_{epoch:05d}.pth')
-                self._save_model(
-                    save_path,
-                    epoch,
-                    loss_test,
-                    iters_test
-                )
-                logger.info('Pre-diffusion model saved at epoch %d to %s', epoch+1, save_path)
+                state = {
+                    'net':  {key: self.model[key].state_dict() for key in self.model}, 
+                    'optimizer': self.optimizer.state_dict(),
+                    'iters': self.iters,
+                    'val_loss': loss_test / iters_test,
+                    'epoch': epoch,
+                }
+                save_checkpoint(state, 'pre-diff', epoch, self.log_dir)
             if epoch == self.joint_epoch - 1:
-                save_path = osp.join(self.log_dir, f'pre-joint_{epoch:05d}.pth')
-                self._save_model(
-                    save_path,
-                    epoch,
-                    loss_test,
-                    iters_test
-                )
-                logger.info('Pre-joint model saved at epoch %d to %s', epoch+1, save_path)
+                state = {
+                    'net':  {key: self.model[key].state_dict() for key in self.model}, 
+                    'optimizer': self.optimizer.state_dict(),
+                    'iters': self.iters,
+                    'val_loss': loss_test / iters_test,
+                    'epoch': epoch,
+                }
+                save_checkpoint(state, 'pre-joint', epoch, self.log_dir)
 
 
     def _training_loop(self, epoch):
@@ -693,7 +696,42 @@ class StyleTTS2Finetune():
 
             if (i+1) % self.log_interval == 0:
                 mel_loss = running_loss / self.log_interval
-                logger.info(f'Epoch [{epoch+1:3}/{self.epochs}], Step [{i+1:4}/{self.tot_num_steps}], Mel Loss: {mel_loss:.5f}, Disc Loss: {d_loss:.5f}, Dur Loss: {loss_dur:.5f}, CE Loss: {loss_ce:.5f}, Norm Loss: {loss_norm_rec:.5f}, F0 Loss: {loss_f0_rec:.5f}, LM Loss: {loss_lm:.5f}, Gen Loss: {loss_gen_all:.5f}, Sty Loss: {loss_sty:.5f}, Diff Loss: {loss_diff:.5f}, DiscLM Loss: {d_loss_slm:.5f}, GenLM Loss: {loss_gen_lm:.5f}, S2S Loss: {loss_s2s:.5f}, Mono Loss: {loss_mono:5f}')  
+                logger.info(
+                    'Epoch [%d/%d], ' \
+                    'Step [%d/%d], ' \
+                    'Mel Loss: %.5f, ' \
+                    'Disc Loss: %.5f, ' \
+                    'Dur Loss: %.5f, ' \
+                    'CE Loss: %.5f, '  \
+                    'Norm Loss: %.5f, ' \
+                    'F0 Loss: %.5f, ' \
+                    'LM Loss: %.5f, ' \
+                    'Gen Loss: %.5f, ' \
+                    'Sty Loss: %.5f, ' \
+                    'Diff Loss: %.5f, ' \
+                    'DiscLM Loss: %.5f, ' \
+                    'GenLM Loss: %.5f, ' \
+                    'S2S Loss: %.5f, ' \
+                    'Mono Loss: %.5f',
+                    epoch+1,
+                    self.epochs,
+                    i+1,
+                    self.tot_num_steps,
+                    mel_loss,
+                    d_loss,
+                    loss_dur,
+                    loss_ce,
+                    loss_norm_rec,
+                    loss_f0_rec,
+                    loss_lm,
+                    loss_gen_all,
+                    loss_sty,
+                    loss_diff,
+                    d_loss_slm,
+                    loss_gen_lm,
+                    loss_s2s,
+                    loss_mono,
+                )
                 self.writer.add_scalar('train/mel_loss', mel_loss, self.iters)
                 self.writer.add_scalar('train/gen_loss', loss_gen_all, self.iters)
                 self.writer.add_scalar('train/d_loss', d_loss, self.iters)
@@ -818,7 +856,7 @@ class StyleTTS2Finetune():
                     loss_f += (loss_f0).mean()
 
                     # Generate validation sample (up to the defined number)
-                    if val_idx < self.n_val_audios:
+                    if self.save_val_audio and val_idx < self.n_val_audios:
                         self._create_val_sample(
                             val_idx,
                             epoch,
@@ -829,7 +867,7 @@ class StyleTTS2Finetune():
                             idx_in_batch=0,
                         )
                     # Generate ground-truth sample only at the beginning
-                    if epoch == 0 and val_idx < self.n_val_audios:
+                    if epoch == 0 and val_idx < self.n_val_audios and self.save_val_audio:
                         self._create_gt_sample(
                             val_idx,
                             epoch,
@@ -854,46 +892,6 @@ class StyleTTS2Finetune():
         attn_image = get_image(s2s_attn[0].cpu().numpy().squeeze())
         self.writer.add_figure('eval/attn', attn_image, epoch+1)
 
-        # # Generate validation samples
-        # with torch.no_grad():
-        #     # Use up to 5 validation samples from the last batch
-        #     for idx in range(min(len(mel_input_length), 5)):
-        #         mel_length = int(mel_input_length[idx].item())
-        #         gt = mels[idx, :, :mel_length].unsqueeze(0)
-        #         en = asr[idx, :, :mel_length // 2].unsqueeze(0)
-        #         s = self.model.style_encoder(gt.unsqueeze(1))
-
-        #         # f0_real, _, _ = self.model.pitch_extractor(gt.unsqueeze(1))
-        #         # f0_real = f0_real.unsqueeze(0)
-        #         # real_norm = log_norm(gt.unsqueeze(1)).squeeze(1)
-        #         # y_rec = self.model.decoder(en, f0_real, real_norm, s)
-
-        #         p_en = p[idx, :, :mel_length // 2].unsqueeze(0)
-        #         f0_fake, n_fake = self.model.predictor.F0Ntrain(p_en, s)
-        #         y_rec = self.model.decoder(en, f0_fake, n_fake, s)
-
-        #         # Write and save val audio
-        #         wav = y_rec.cpu().numpy().squeeze()
-        #         self.writer.add_audio('eval/y' + str(idx), wav, epoch+1, sample_rate=self.sr)
-        #         if self.save_val_audio and (epoch+1) % self.save_freq == 0:
-        #             outfile_template = f'epoch_2nd_{epoch+1:0>5}'
-        #             out_file = f'{outfile_template}_val-{idx}.wav'
-        #             scipy.io.wavfile.write(
-        #                 filename=os.path.join(self.test_audio_dir, out_file),
-        #                 rate=self.sr,
-        #                 data=wav,
-        #             )
-        #         # Write and save ground-truth audio
-        #         if epoch == 0:
-        #             wav = waves[idx].squeeze()
-        #             self.writer.add_audio('gt/y' + str(idx), wav, epoch+1, sample_rate=self.sr)
-        #             if self.save_val_audio:
-        #                 out_file = f'{outfile_template}_gt-{idx}.wav'
-        #                 scipy.io.wavfile.write(
-        #                     filename=os.path.join(self.test_audio_dir, out_file),
-        #                     rate=self.sr,
-        #                     data=wav,
-        #                 )
         return loss_test, iters_test
 
 
@@ -927,7 +925,7 @@ class StyleTTS2Finetune():
         # Write and save val audio
         wav = y_rec.cpu().numpy().squeeze()
         self.writer.add_audio('eval/y' + str(val_idx), wav, epoch+1, sample_rate=self.sr)
-        if self.save_val_audio and (epoch+1) % self.save_freq == 0:
+        if (epoch+1) % self.save_freq == 0:
             outfile_template = f'epoch_2nd_{epoch+1:0>5}'
             out_file = f'{outfile_template}_val-{val_idx}.wav'
             scipy.io.wavfile.write(
@@ -942,14 +940,13 @@ class StyleTTS2Finetune():
     def _create_gt_sample(self, val_idx, epoch, waves, idx_in_batch=0):
         wav = waves[idx_in_batch].squeeze()
         self.writer.add_audio('gt/y' + str(val_idx), wav, epoch+1, sample_rate=self.sr)
-        if self.save_val_audio:
-            outfile_template = f'epoch_2nd_{epoch+1:0>5}'
-            out_file = f'{outfile_template}_gt-{val_idx}.wav'
-            scipy.io.wavfile.write(
-                filename=os.path.join(self.test_audio_dir, out_file),
-                rate=self.sr,
-                data=wav,
-            )
+        outfile_template = f'epoch_2nd_{epoch+1:0>5}'
+        out_file = f'{outfile_template}_gt-{val_idx}.wav'
+        scipy.io.wavfile.write(
+            filename=os.path.join(self.test_audio_dir, out_file),
+            rate=self.sr,
+            data=wav,
+        )
 
 
     def _save_progress(self, epoch, loss_test, iters_test):
@@ -978,17 +975,17 @@ class StyleTTS2Finetune():
             ) as outfile:
                 yaml.dump(self.config, outfile, default_flow_style=True)
 
-    # Save model
-    def _save_model(self, path, epoch, loss_test, iters_test):
-        # Prepare model state fo saving
-        state = {
-            'net':  {key: self.model[key].state_dict() for key in self.model}, 
-            'optimizer': self.optimizer.state_dict(),
-            'iters': self.iters,
-            'val_loss': loss_test / iters_test,
-            'epoch': epoch,
-        }
-        torch.save(state, path)
+    # # Save model
+    # def _save_model(self, path, epoch, loss_test, iters_test):
+    #     # Prepare model state fo saving
+    #     state = {
+    #         'net':  {key: self.model[key].state_dict() for key in self.model}, 
+    #         'optimizer': self.optimizer.state_dict(),
+    #         'iters': self.iters,
+    #         'val_loss': loss_test / iters_test,
+    #         'epoch': epoch,
+    #     }
+    #     torch.save(state, path)
 
     @property
     def log_dir(self):
