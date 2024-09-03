@@ -8,6 +8,7 @@ import shutil
 import time
 import warnings
 from logging import StreamHandler
+import nvidia_smi
 
 import numpy as np
 import scipy
@@ -95,6 +96,18 @@ class StyleTTS2Finetune():
         self.best_loss = float('inf')
         self.stft_loss = MultiResolutionSTFTLoss().to(self.device)
         self.running_std = []
+
+        # Init NVLM
+        nvidia_smi.nvmlInit()
+        self.n_gpus = nvidia_smi.nvmlDeviceGetCount()
+        logger.info('NVLM initialized')
+
+
+    def shutdown(self):
+        # Ending work with NVIDIA NVLM
+        nvidia_smi.nvmlShutdown()
+        logger.info('NVLM shutdown')
+
 
     # Init model
     def init_model(self):
@@ -746,6 +759,10 @@ class StyleTTS2Finetune():
                 self.writer.add_scalar('train/gen_loss_slm', loss_gen_lm, self.iters)
 
                 running_loss = 0
+                for device_idx in range(self.n_gpus):
+                    handle = nvidia_smi.nvmlDeviceGetHandleByIndex(device_idx)
+                    info = nvidia_smi.nvmlDeviceGetMemoryInfo(handle)
+                    print(f'Device {device_idx} VRAM usage: {info.used>>30}/{info.total>>30} GB ({info.used/info.total:.2%})')
                 print('Time elapsed:', time.time()-start_time)
 
 

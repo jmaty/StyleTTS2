@@ -45,6 +45,9 @@ def main():
     # Start finetuning
     ft.finetune()
 
+    # Clean
+    ft.shutdown()
+
 
 if __name__=="__main__":
     main()
