@@ -212,7 +212,9 @@ def main(config_path):
     if load_pretrained:
         model, optimizer, start_epoch, iters = load_checkpoint(model,  optimizer, config['pretrained_model'],
                                     load_only_params=config.get('load_only_params', True))
-        
+        # advance start epoch or we'd re-train and rewrite the last epoch file
+        start_epoch += 1
+        print('\nmodel data loaded, starting training epoch %05d\n' % start_epoch)
     n_down = model.text_aligner.n_down
 
     best_loss = float('inf')  # best test loss

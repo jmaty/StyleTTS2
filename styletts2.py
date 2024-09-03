@@ -180,6 +180,8 @@ class StyleTTS2Finetune():
             self.config['pretrained_model'],
             load_only_params=self.config.get('load_only_params', True)
         )
+        # advance start epoch or we'd re-train and rewrite the last epoch file
+        self.start_epoch += 1
         print(f'Loading pre-trained model: {self.config["pretrained_model"]}')
         print(f'Starting epoch:      {self.start_epoch}')
         print(f'Starting iterations: {self.iters}')
