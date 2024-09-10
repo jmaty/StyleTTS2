@@ -710,7 +710,8 @@ def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_module
                 model[key].load_state_dict(new_state_dict, strict=False)
 
     if not load_only_params:
-        epoch = state["epoch"]
+        # advance start epoch or we'd re-train and rewrite the last epoch file
+        epoch = state["epoch"] + 1
         iters = state["iters"]
         optimizer.load_state_dict(state["optimizer"])
     else:

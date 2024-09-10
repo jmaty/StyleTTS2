@@ -178,10 +178,11 @@ class StyleTTS2Finetune():
             self.model,
             self.optimizer,
             self.config['pretrained_model'],
-            load_only_params=self.config.get('load_only_params', True)
+            load_only_params=self.load_only_params
         )
-        # advance start epoch or we'd re-train and rewrite the last epoch file
-        self.start_epoch += 1
+        # # advance start epoch or we'd re-train and rewrite the last epoch file
+        # if not self.load_only_params:
+        #     self.start_epoch += 1
         print(f'Loading pre-trained model: {self.config["pretrained_model"]}')
         print(f'Starting epoch:      {self.start_epoch}')
         print(f'Starting iterations: {self.iters}')
@@ -351,7 +352,8 @@ class StyleTTS2Finetune():
 
 
     def finetune(self):
-        self.iters = 0
+        self.iters = 0  # !!! Should it be resetting?
+        # !!! Load best loss from previously saved model when continuing in training?
         self.best_loss = float('inf')   # Init best loss
         self.running_std = []
 
@@ -976,7 +978,7 @@ class StyleTTS2Finetune():
             'net':  {key: self.model[key].state_dict() for key in self.model}, 
             'optimizer': self.optimizer.state_dict(),
             'iters': self.iters,
-            'val_loss': loss_test / iters_test,
+            'val_loss': curr_loss,
             'epoch': epoch,
         }
         # Save model
@@ -1056,6 +1058,10 @@ class StyleTTS2Finetune():
     def load_pretrained_for_stage2(self):
         return self.config.get('pretrained_model', '') != '' \
             and self.config.get('second_stage_load_pretrained', False)
+    
+    @property
+    def load_only_params(self):
+        return self.config.get('load_only_params', True)
 
     @property
     def sr(self):
