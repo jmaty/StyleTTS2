@@ -388,24 +388,25 @@ class StyleTTS2Finetune():
                     )
 
             # Save milestone models
-            if epoch == self.diff_epoch - 1:
-                state = {
-                    'net':  {key: self.model[key].state_dict() for key in self.model}, 
-                    'optimizer': self.optimizer.state_dict(),
-                    'iters': self.iters,
-                    'val_loss': loss_test / iters_test,
-                    'epoch': epoch,
-                }
-                save_checkpoint(state, 'pre-diff', epoch, self.log_dir)
-            if epoch == self.joint_epoch - 1:
-                state = {
-                    'net':  {key: self.model[key].state_dict() for key in self.model}, 
-                    'optimizer': self.optimizer.state_dict(),
-                    'iters': self.iters,
-                    'val_loss': loss_test / iters_test,
-                    'epoch': epoch,
-                }
-                save_checkpoint(state, 'pre-joint', epoch, self.log_dir)
+            if self.save_milestones:
+                if epoch == self.diff_epoch - 1:
+                    state = {
+                        'net':  {key: self.model[key].state_dict() for key in self.model}, 
+                        'optimizer': self.optimizer.state_dict(),
+                        'iters': self.iters,
+                        'val_loss': loss_test / iters_test,
+                        'epoch': epoch,
+                    }
+                    save_checkpoint(state, 'pre-diff', epoch, self.log_dir)
+                if epoch == self.joint_epoch - 1:
+                    state = {
+                        'net':  {key: self.model[key].state_dict() for key in self.model}, 
+                        'optimizer': self.optimizer.state_dict(),
+                        'iters': self.iters,
+                        'val_loss': loss_test / iters_test,
+                        'epoch': epoch,
+                    }
+                    save_checkpoint(state, 'pre-joint', epoch, self.log_dir)
 
 
     def _training_loop(self, epoch):
@@ -1074,6 +1075,10 @@ class StyleTTS2Finetune():
     @property
     def max_saved_models(self):
         return self.config.get('max_saved_models', 2)
+    
+    @property
+    def save_milestones(self):
+        return self.config.get('save_milestones', False)
 
     @property
     def log_interval(self):

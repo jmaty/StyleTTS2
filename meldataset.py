@@ -13,35 +13,38 @@ import torch.nn.functional as F
 import torchaudio
 from torch import nn
 from torch.utils.data import DataLoader
+from text_utils import TextCleaner
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
+# _pad = "$"
+# _punctuation = ';:,.!?¡¿—…"«»“” '
+# _letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+# _letters_ipa = "ɑɐɒæɓʙβɔɕçɗɖðʤəɘɚɛɜɝɞɟʄɡɠɢʛɦɧħɥʜɨɪʝɭɬɫɮʟɱɯɰŋɳɲɴøɵɸθœɶʘɹɺɾɻʀʁɽʂʃʈʧʉʊʋⱱʌɣɤʍχʎʏʑʐʒʔʡʕʢǀǁǂǃˈˌːˑʼʴʰʱʲʷˠˤ˞↓↑→↗↘'̩'ᵻ"
+# # _special_ipa_list = ['ɔ̃', 'œ̃', 'ɑ̃']
+# _special_ipa_list = ['~']
 
-_pad = "$"
-_punctuation = ';:,.!?¡¿—…"«»“” '
-_letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
-_letters_ipa = "ɑɐɒæɓʙβɔɕçɗɖðʤəɘɚɛɜɝɞɟʄɡɠɢʛɦɧħɥʜɨɪʝɭɬɫɮʟɱɯɰŋɳɲɴøɵɸθœɶʘɹɺɾɻʀʁɽʂʃʈʧʉʊʋⱱʌɣɤʍχʎʏʑʐʒʔʡʕʢǀǁǂǃˈˌːˑʼʴʰʱʲʷˠˤ˞↓↑→↗↘'̩'ᵻ"
+# # Export all symbols:
+# symbols = [_pad] + list(_punctuation) + list(_letters) + list(_letters_ipa) + _special_ipa_list
 
-# Export all symbols:
-symbols = [_pad] + list(_punctuation) + list(_letters) + list(_letters_ipa)
+# dicts = {}
+# for i, s in enumerate(symbols):
+#     dicts[s] = i
 
-dicts = {}
-for i, s in enumerate(symbols):
-    dicts[s] = i
-
-class TextCleaner:
-    def __init__(self, dummy=None):
-        self.word_index_dictionary = dicts
-    def __call__(self, text):
-        indexes = []
-        for char in text:
-            try:
-                indexes.append(self.word_index_dictionary[char])
-            except KeyError:
-                # JMa:
-                print(f'[!] Character [{char}] not defined! ({text})')
-        return indexes
+# class TextCleaner:
+#     def __init__(self, dummy=None):
+#         self.word_index_dictionary = dicts
+    
+#     def __call__(self, text):
+#         indexes = []
+#         for char in text:
+#             try:
+#                 indexes.append(self.word_index_dictionary[char])
+#             except KeyError:
+#                 # JMa:
+#                 print(f'[!] Character\t{char} not defined!\n    Utterance: {text}')
+#         return indexes
 
 np.random.seed(1)
 random.seed(1)
