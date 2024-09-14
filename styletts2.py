@@ -260,18 +260,24 @@ class StyleTTS2Finetune():
 
 
     def build_dataloaders(self):
-        self.train_dataloader = build_dataloader(
+        dataset_config={
+                'pad': self.pad,
+                'punctuation': self.punctuation,
+                'letters': self.letters,
+                'ipa_phones': self.ipa_phones,
+        }
+        self.train_dataloader, self.text_cleaner = build_dataloader(
             self.train_list,
             self.root_path,
             OOD_data=self.ood_data,
             min_length=self.min_length,
             batch_size=self.batch_size,
             num_workers=2,
-            dataset_config={},
+            dataset_config=dataset_config,
             device=self.device
         )
 
-        self.val_dataloader = build_dataloader(
+        self.val_dataloader, _ = build_dataloader(
             self.val_list,
             self.root_path,
             OOD_data=self.ood_data,
@@ -279,7 +285,7 @@ class StyleTTS2Finetune():
             batch_size=self.batch_size,
             validation=True,
             num_workers=0,
-            dataset_config={},
+            dataset_config=dataset_config,
             device=self.device
         )
 
@@ -381,6 +387,7 @@ class StyleTTS2Finetune():
                         self.test_audio_dir,
                         f'epoch_2nd_{epoch:0>5}_test',
                         self.sr,
+                        text_cleaner=self.text_cleaner,
                         sampler=None,
                         diffusion_steps=5,
                         embedding_scale=1,
@@ -1122,6 +1129,22 @@ class StyleTTS2Finetune():
     @property
     def test_sentences(self):
         return self.config['data_params'].get('test_sentences', [])
+    
+    @property
+    def pad(self):
+        return self.config['data_params'].get('pad', ['$'])
+    
+    @property
+    def punctuation(self):
+        return self.config['data_params'].get('punctuation', [])
+    
+    @property
+    def letters(self):
+        return self.config['data_params'].get('letters', [])
+    
+    @property
+    def ipa_phones(self):
+        return self.config['data_params'].get('ipa_phones', [])
 
     @property
     def test_audio_dir(self):

@@ -165,11 +165,13 @@ def synth_test_files(model,
                      outdir,
                      outfile_template,
                      sr,
+                     text_cleaner=None,
                      sampler=None,
                      diffusion_steps=5,
                      embedding_scale=1,
                      device='cuda'):
-    textcleaner = TextCleaner()
+    if text_cleaner is None:
+        text_cleaner = TextCleaner()
     # Generate noise
     noise = torch.randn(1,1,256).to(device)
     # Set up sampler
@@ -184,7 +186,7 @@ def synth_test_files(model,
     for idx, snt in enumerate(test_sentences):
         wav = inference(snt,
                         model,
-                        textcleaner,
+                        text_cleaner,
                         sampler,
                         noise,
                         diffusion_steps=diffusion_steps,

@@ -76,6 +76,10 @@ class FilePathDataset(torch.utils.data.Dataset):
                  validation=False,
                  OOD_data="Data/OOD_texts.txt",
                  min_length=50,
+                 pad='$',
+                 punctuation=None,
+                 letters=None,
+                 ipa_phones=None,
                  ):
 
         # spect_params = SPECT_PARAMS     # TODO: not reading from config!?
@@ -84,7 +88,12 @@ class FilePathDataset(torch.utils.data.Dataset):
         _data_list = [l.strip().split('|') for l in data_list]
         self.data_list = [data if len(data) == 3 else (*data, 0) for data in _data_list]
 
-        self.text_cleaner = TextCleaner()
+        self.text_cleaner = TextCleaner(
+            pad=pad,
+            punctuation=punctuation if punctuation is not None else [],
+            letters=letters if letters is not None else [],
+            ipa_phones=ipa_phones if ipa_phones is not None else [],
+        )
         self.sr = sr
 
         self.df = pd.DataFrame(self.data_list)
@@ -168,7 +177,9 @@ class FilePathDataset(torch.utils.data.Dataset):
             mel_tensor = mel_tensor[:, random_start:random_start + self.max_mel_length]
 
         return mel_tensor, speaker_id
-
+    
+    def get_text_cleaner(self):
+        return self.text_cleaner
 
 class Collater(object):
     """
@@ -253,7 +264,7 @@ def build_dataloader(path_list,
         OOD_data=OOD_data,
         min_length=min_length,
         validation=validation,
-        **dataset_config
+        **dataset_config,
     )
     collate_fn = Collater(**collate_config)
     data_loader = DataLoader(
@@ -266,4 +277,4 @@ def build_dataloader(path_list,
         pin_memory=(device != 'cpu')
     )
 
-    return data_loader
+    return data_loader, dataset.get_text_cleaner()
