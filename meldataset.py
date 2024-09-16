@@ -18,34 +18,6 @@ from text_utils import TextCleaner
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-# _pad = "$"
-# _punctuation = ';:,.!?¡¿—…"«»“” '
-# _letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
-# _letters_ipa = "ɑɐɒæɓʙβɔɕçɗɖðʤəɘɚɛɜɝɞɟʄɡɠɢʛɦɧħɥʜɨɪʝɭɬɫɮʟɱɯɰŋɳɲɴøɵɸθœɶʘɹɺɾɻʀʁɽʂʃʈʧʉʊʋⱱʌɣɤʍχʎʏʑʐʒʔʡʕʢǀǁǂǃˈˌːˑʼʴʰʱʲʷˠˤ˞↓↑→↗↘'̩'ᵻ"
-# # _special_ipa_list = ['ɔ̃', 'œ̃', 'ɑ̃']
-# _special_ipa_list = ['~']
-
-# # Export all symbols:
-# symbols = [_pad] + list(_punctuation) + list(_letters) + list(_letters_ipa) + _special_ipa_list
-
-# dicts = {}
-# for i, s in enumerate(symbols):
-#     dicts[s] = i
-
-# class TextCleaner:
-#     def __init__(self, dummy=None):
-#         self.word_index_dictionary = dicts
-    
-#     def __call__(self, text):
-#         indexes = []
-#         for char in text:
-#             try:
-#                 indexes.append(self.word_index_dictionary[char])
-#             except KeyError:
-#                 # JMa:
-#                 print(f'[!] Character\t{char} not defined!\n    Utterance: {text}')
-#         return indexes
-
 np.random.seed(1)
 random.seed(1)
 SPECT_PARAMS = {
@@ -71,15 +43,12 @@ class FilePathDataset(torch.utils.data.Dataset):
     def __init__(self,
                  data_list,
                  root_path,
+                 text_cleaner,
                  sr=24000,
                  data_augmentation=False,
                  validation=False,
                  OOD_data="Data/OOD_texts.txt",
                  min_length=50,
-                 pad='$',
-                 punctuation=None,
-                 letters=None,
-                 ipa_phones=None,
                  ):
 
         # spect_params = SPECT_PARAMS     # TODO: not reading from config!?
@@ -88,12 +57,7 @@ class FilePathDataset(torch.utils.data.Dataset):
         _data_list = [l.strip().split('|') for l in data_list]
         self.data_list = [data if len(data) == 3 else (*data, 0) for data in _data_list]
 
-        self.text_cleaner = TextCleaner(
-            pad=pad,
-            punctuation=punctuation if punctuation is not None else [],
-            letters=letters if letters is not None else [],
-            ipa_phones=ipa_phones if ipa_phones is not None else [],
-        )
+        self.text_cleaner = text_cleaner
         self.sr = sr
 
         self.df = pd.DataFrame(self.data_list)
@@ -245,6 +209,7 @@ class Collater(object):
 
 def build_dataloader(path_list,
                      root_path,
+                     text_cleaner,
                      validation=False,
                      OOD_data="Data/OOD_texts.txt",
                      min_length=50,
@@ -261,6 +226,7 @@ def build_dataloader(path_list,
     dataset = FilePathDataset(
         path_list,
         root_path,
+        text_cleaner,
         OOD_data=OOD_data,
         min_length=min_length,
         validation=validation,
@@ -277,4 +243,4 @@ def build_dataloader(path_list,
         pin_memory=(device != 'cpu')
     )
 
-    return data_loader, dataset.get_text_cleaner()
+    return data_loader

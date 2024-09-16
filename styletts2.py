@@ -20,6 +20,7 @@ from monotonic_align import mask_from_lens
 # from munch import Munch
 # from torch import nn
 from torch.utils.tensorboard import SummaryWriter
+from text_utils import TextCleaner
 
 from losses import (DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss,
                     WavLMLoss)
@@ -78,11 +79,14 @@ class StyleTTS2Finetune():
         self.init_model()
         self.sampler = None
         self.slmadv = None
+        self.text_cleaner = None
+        self._init_symbols()
 
         self.train_list, self.val_list = get_data_path_list(
             self.train_path,
             self.val_path
         )
+
         self.build_dataloaders()
 
         # Init losses
@@ -107,6 +111,15 @@ class StyleTTS2Finetune():
         # Ending work with NVIDIA NVLM
         nvidia_smi.nvmlShutdown()
         logger.info('NVLM shutdown')
+
+
+    def _init_symbols(self):
+        self.text_cleaner = TextCleaner(
+            pad=self.pad,
+            punctuation=self.punctuation,
+            letters=self.letters,
+            ipa_phones=self.ipa_phones,
+        )
 
 
     # Init model
@@ -260,32 +273,28 @@ class StyleTTS2Finetune():
 
 
     def build_dataloaders(self):
-        dataset_config={
-                'pad': self.pad,
-                'punctuation': self.punctuation,
-                'letters': self.letters,
-                'ipa_phones': self.ipa_phones,
-        }
-        self.train_dataloader, self.text_cleaner = build_dataloader(
+        self.train_dataloader = build_dataloader(
             self.train_list,
             self.root_path,
+            self.text_cleaner,
             OOD_data=self.ood_data,
             min_length=self.min_length,
             batch_size=self.batch_size,
             num_workers=2,
-            dataset_config=dataset_config,
+            dataset_config={},
             device=self.device
         )
 
-        self.val_dataloader, _ = build_dataloader(
+        self.val_dataloader = build_dataloader(
             self.val_list,
             self.root_path,
+            self.text_cleaner,
             OOD_data=self.ood_data,
             min_length=self.min_length,
             batch_size=self.batch_size,
             validation=True,
             num_workers=0,
-            dataset_config=dataset_config,
+            dataset_config={},
             device=self.device
         )
 
@@ -1129,19 +1138,22 @@ class StyleTTS2Finetune():
     @property
     def test_sentences(self):
         return self.config['data_params'].get('test_sentences', [])
-    
+
     @property
     def pad(self):
-        return self.config['data_params'].get('pad', ['$'])
-    
+        pad_symb = self.config['data_params'].get('pad', ['$'])
+        if not isinstance(pad_symb, list):
+            pad_symb = list(pad_symb)
+        return pad_symb
+
     @property
     def punctuation(self):
         return self.config['data_params'].get('punctuation', [])
-    
+
     @property
     def letters(self):
         return self.config['data_params'].get('letters', [])
-    
+
     @property
     def ipa_phones(self):
         return self.config['data_params'].get('ipa_phones', [])

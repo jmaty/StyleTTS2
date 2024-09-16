@@ -20,17 +20,19 @@ class TextCleaner:
                  pad='$',
                  punctuation=None,
                  letters=None,
-                 ipa_phones=None, 
+                 ipa_phones=None,
                  ):
+        if not isinstance(pad, list):
+            pad = list(pad)
         if punctuation is None:
             punctuation = []
         if letters is None:
             letters = []
         if ipa_phones is None:
             ipa_phones = []
-        self.symbols = list(pad) + punctuation + letters + ipa_phones
+        self.symbols = pad + punctuation + letters + ipa_phones
         self._make_word_index_dict()
-    
+
     def __call__(self, text):
         chars = []
         for char in text:
@@ -38,7 +40,7 @@ class TextCleaner:
                 chars[-1] += char
             else:
                 chars.append(char)
-        
+
         indexes = []
         for char in chars:
             try:
@@ -47,7 +49,7 @@ class TextCleaner:
                 # JMa:
                 print(f'[!] Character  {char} not defined!\n    Utterance: {text}')
         return indexes
-    
+
     def _make_word_index_dict(self):
         self.word_index_dict = {}
         for i, s in enumerate(self.symbols):
