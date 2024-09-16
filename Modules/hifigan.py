@@ -457,7 +457,7 @@ class Decoder(nn.Module):
         
         F0 = self.F0_conv(F0_curve.unsqueeze(1))
         N = self.N_conv(N.unsqueeze(1))
-        
+
         x = torch.cat([asr, F0, N], axis=1)
         x = self.encode(x, s)
         

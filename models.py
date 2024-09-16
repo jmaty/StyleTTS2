@@ -1,16 +1,13 @@
 #coding:utf-8
 
 import os
-import os.path as osp
-
-import copy
+from collections import OrderedDict
 import math
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.utils import weight_norm, remove_weight_norm, spectral_norm
+from torch.nn.utils import weight_norm, spectral_norm #, remove_weight_norm
 
 from Utils.ASR.models import ASRCNN
 from Utils.JDC.model import JDCNet
@@ -181,7 +178,7 @@ class Discriminator2d(nn.Module):
         blocks = []
         blocks += [spectral_norm(nn.Conv2d(1, dim_in, 3, 1, 1))]
 
-        for lid in range(repeat_num):
+        for _ in range(repeat_num):
             dim_out = min(dim_in*2, max_conv_dim)
             blocks += [ResBlk(dim_in, dim_out, downsample='half')]
             dim_in = dim_out
@@ -693,21 +690,57 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     
     return nets
 
-def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_modules=[]):
+
+def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_modules=None):
+    if ignore_modules is None:
+        ignore_modules = []
     state = torch.load(path, map_location='cpu')
     params = state['net']
     for key in model:
         if key in params and key not in ignore_modules:
-            print('%s loaded' % key)
-            model[key].load_state_dict(params[key], strict=False)
-    _ = [model[key].eval() for key in model]
-    
+            print(f'{key} loaded')
+            try:
+                model[key].load_state_dict(params[key], strict=False)
+            except RuntimeError:
+                state_dict = params[key]
+                new_state_dict = OrderedDict()
+                # print(f'{key} key length: {len(model[key].state_dict().keys())}, state_dict length: {len(state_dict.keys())}')
+                for (k_m, _), (_, v_c) in zip(model[key].state_dict().items(), state_dict.items()):
+                    new_state_dict[k_m] = v_c
+                model[key].load_state_dict(new_state_dict, strict=False)
+
     if not load_only_params:
-        epoch = state["epoch"]
+        # advance start epoch or we'd re-train and rewrite the last epoch file
+        epoch = state["epoch"] + 1
         iters = state["iters"]
         optimizer.load_state_dict(state["optimizer"])
     else:
         epoch = 0
         iters = 0
-        
+
     return model, optimizer, epoch, iters
+
+
+# JMa: Save model and delete old models
+def save_checkpoint(model_state, stage, epoch, save_dir, max_saved_models=None):
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    # Save the model
+    filename = f"epoch_{stage}_{epoch:05d}.pth"
+    filepath = os.path.join(save_dir, filename)
+    torch.save(model_state, filepath)
+    print(f"New model saved to {filepath}")
+
+    if max_saved_models:
+        # Get list of all saved models and sort by epoch number
+        saved_models = sorted(
+            [f for f in os.listdir(save_dir) if f.startswith(f"epoch_{stage}") and f.endswith(".pth")],
+            key=lambda x: int(x.split('_')[2].split('.')[0])
+        )
+
+        # Remove old models if exceeding max_saved_models
+        while len(saved_models) > max_saved_models:
+            old_model = saved_models.pop(0)
+            os.remove(os.path.join(save_dir, old_model))
+            print(f"Old model {old_model} removed")
