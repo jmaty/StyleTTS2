@@ -2,7 +2,6 @@
 import logging
 import os.path as osp
 import random
-import time
 
 import librosa
 import numpy as np
@@ -13,7 +12,6 @@ import torch.nn.functional as F
 import torchaudio
 from torch import nn
 from torch.utils.data import DataLoader
-from text_utils import TextCleaner
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -79,11 +77,12 @@ class FilePathDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.data_list)
 
-    def __getitem__(self, idx):        
-        data = self.data_list[idx]
+    def __getitem__(self, idx):  
+        data = self.data_list[idx]  # [wavfile, phonetic_string, speaker_id]
         path = data[0]
 
         wave, text_tensor, speaker_id = self._load_tensor(data)
+        # text_tensor is a list of phoneme IDs corresponding to the input phonetic string
 
         mel_tensor = preprocess(wave).squeeze()
 
@@ -94,18 +93,18 @@ class FilePathDataset(torch.utils.data.Dataset):
         # get reference sample
         ref_data = (self.df[self.df[2] == str(speaker_id)]).sample(n=1).iloc[0].tolist()
         ref_mel_tensor, ref_label = self._load_data(ref_data[:3])
+        # ref_label = speaker ID
 
         # get OOD text
         ps = ""
-
         while len(ps) < self.min_length:
             rand_idx = np.random.randint(0, len(self.ptexts) - 1)
-            ps = self.ptexts[rand_idx]
+            ps = self.ptexts[rand_idx]  # random phonetic sentence from OOD texts
 
+            # Encode phonetic string as a list of phoneme IDs
             text = self.text_cleaner(ps)
-            text.insert(0, 0)
+            text.insert(0, 0)   # 0 means phoneme ID of [$] (pad symbol)
             text.append(0)
-
             ref_text = torch.LongTensor(text)
 
         return speaker_id, acoustic_feature, text_tensor, ref_text, ref_mel_tensor, ref_label, path, wave
@@ -122,11 +121,10 @@ class FilePathDataset(torch.utils.data.Dataset):
 
         wave = np.concatenate([np.zeros([5000]), wave, np.zeros([5000])], axis=0)
 
+        # Encode phonetic string as a list of phoneme IDs
         text = self.text_cleaner(text)
-
-        text.insert(0, 0)
+        text.insert(0, 0)   # 0 means phoneme ID of [$] (pad symbol)
         text.append(0)
-
         text = torch.LongTensor(text)
 
         return wave, text, speaker_id
@@ -141,9 +139,7 @@ class FilePathDataset(torch.utils.data.Dataset):
             mel_tensor = mel_tensor[:, random_start:random_start + self.max_mel_length]
 
         return mel_tensor, speaker_id
-    
-    def get_text_cleaner(self):
-        return self.text_cleaner
+
 
 class Collater(object):
     """

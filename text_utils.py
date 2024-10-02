@@ -7,7 +7,11 @@ class TextCleaner:
                  letters='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz',
                  ipa_phones="ɑɐɒæɓʙβɔɕçɗɖðʤəɘɚɛɜɝɞɟʄɡɠɢʛɦɧħɥʜɨɪʝɭɬɫɮʟɱɯɰŋɳɲɴøɵɸθœɶʘɹɺɾɻʀʁɽʂʃʈʧʉʊʋⱱʌɣɤʍχʎʏʑʐʒʔʡʕʢǀǁǂǃˈˌːˑʼʴʰʱʲʷˠˤ˞↓↑→↗↘'̩'ᵻ",
                  ):
-        self.symbols = list(dict.fromkeys(list(pad) + list(punctuation) + list(letters) + list(ipa_phones)))
+        # Make a unique list of symbols
+        self._symbols = list(dict.fromkeys(list(pad) + list(punctuation) + list(letters) + list(ipa_phones)))
+
+        assert len(self) == 178, f'Number of symbols must be 178 but it is {len(self)}'
+
         self._make_word_index_dict()
 
     def __call__(self, text):
@@ -22,8 +26,15 @@ class TextCleaner:
 
     def _make_word_index_dict(self):
         self.word_index_dict = {}
-        for i, s in enumerate(self.symbols):
+        for i, s in enumerate(self._symbols):
             self.word_index_dict[s] = i
-    
+
+    def declean(self, indexes):
+        return ''.join([self._symbols[i] for i in indexes])
+
     def __len__(self):
-        return len(self.symbols)
+        return len(self._symbols)
+
+    @property
+    def symbols(self):
+        return self._symbols
