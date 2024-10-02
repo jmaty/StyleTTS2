@@ -7,7 +7,7 @@ class TextCleaner:
                  letters='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz',
                  ipa_phones="ɑɐɒæɓʙβɔɕçɗɖðʤəɘɚɛɜɝɞɟʄɡɠɢʛɦɧħɥʜɨɪʝɭɬɫɮʟɱɯɰŋɳɲɴøɵɸθœɶʘɹɺɾɻʀʁɽʂʃʈʧʉʊʋⱱʌɣɤʍχʎʏʑʐʒʔʡʕʢǀǁǂǃˈˌːˑʼʴʰʱʲʷˠˤ˞↓↑→↗↘'̩'ᵻ",
                  ):
-        self.symbols = list(pad) + list(punctuation) + list(letters) + list(ipa_phones)
+        self.symbols = list(dict.fromkeys(list(pad) + list(punctuation) + list(letters) + list(ipa_phones)))
         self._make_word_index_dict()
 
     def __call__(self, text):
@@ -24,3 +24,6 @@ class TextCleaner:
         self.word_index_dict = {}
         for i, s in enumerate(self.symbols):
             self.word_index_dict[s] = i
+    
+    def __len__(self):
+        return len(self.symbols)
