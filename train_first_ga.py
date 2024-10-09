@@ -7,6 +7,7 @@ import time
 import warnings
 import numpy as np
 import scipy
+import nvidia_smi
 
 import click
 import torch
@@ -18,14 +19,15 @@ from monotonic_align import mask_from_lens
 from munch import Munch
 from torch.utils.tensorboard import SummaryWriter
 
+from text_utils import TextCleaner
 from losses import *
 from meldataset import build_dataloader
 from models import *
 from optimizers import build_optimizer
 from utils import (get_data_path_list, get_image, length_to_mask, log_norm,
-                   log_print, maximum_path, recursive_munch, save_model,
+                   log_print, maximum_path, recursive_munch,
                    synth_test_files)
-from Utils.PLBERT.util import load_plbert
+from Utils.PLBERT_cs.util import load_plbert
 
 warnings.simplefilter('ignore')
 
@@ -74,6 +76,18 @@ def main(config_path):
 
     max_len = config.get('max_len', 200)
 
+    text_cleaner = TextCleaner(
+        pad=data_params['pad'],
+        punctuation=data_params['punctuation'],
+        letters=data_params['letters'],
+        ipa_phones=data_params['ipa_phones'],
+    )
+
+    # Init NVLM
+    nvidia_smi.nvmlInit()
+    n_gpus = nvidia_smi.nvmlDeviceGetCount()
+    logger.info('NVLM initialized')
+
     # JMa: gradient clipping support
     grad_clip = config.get('grad_clip', None)
     # JMa: gradient accumulation
@@ -84,6 +98,7 @@ def main(config_path):
 
     train_dataloader = build_dataloader(train_list,
                                         root_path,
+                                        text_cleaner=text_cleaner,
                                         OOD_data=ood_data,
                                         min_length=min_length,
                                         batch_size=batch_size,
@@ -93,6 +108,7 @@ def main(config_path):
 
     val_dataloader = build_dataloader(val_list,
                                       root_path,
+                                      text_cleaner=text_cleaner,
                                       OOD_data=ood_data,
                                       min_length=min_length,
                                       batch_size=batch_size,
@@ -254,7 +270,7 @@ def main(config_path):
 
                 y = wave_item[(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
                 wav.append(torch.from_numpy(y).to(device))
- 
+
                 # style reference (better to be different from the GT)
                 random_start = np.random.randint(0, mel_length - mel_len_st)
                 st.append(mels[idx, :, (random_start * 2):((random_start+mel_len_st) * 2)])
@@ -367,6 +383,10 @@ def main(config_path):
                 writer.add_scalar('train/mono_loss', loss_mono, iters)
                 writer.add_scalar('train/s2s_loss', loss_s2s, iters)
                 writer.add_scalar('train/slm_loss', loss_slm, iters)
+                for device_idx in range(n_gpus):
+                    handle = nvidia_smi.nvmlDeviceGetHandleByIndex(device_idx)
+                    info = nvidia_smi.nvmlDeviceGetMemoryInfo(handle)
+                    print(f'Device {device_idx} VRAM usage: {info.used>>30}/{info.total>>30} GB ({info.used/info.total:.2%})')
                 print('Time elapsed:', time.time()-start_time)
                 running_loss = 0
 
@@ -497,6 +517,7 @@ def main(config_path):
                                      test_audio_dir,
                                     f'epoch_1st_{epoch:0>5}_test',
                                     sr,
+                                    text_cleaner=text_cleaner,
                                     sampler=None,
                                     diffusion_steps=5,
                                     embedding_scale=1,
@@ -526,6 +547,10 @@ def main(config_path):
         save_path = osp.join(log_dir, config.get('first_stage_path', 'first_stage.pth'))
         torch.save(state, save_path)
         print('Final first-stage model saved')
+        
+        # Ending work with NVIDIA NVLM
+        nvidia_smi.nvmlShutdown()
+        logger.info('NVLM shutdown')
 
 
 if __name__=="__main__":
