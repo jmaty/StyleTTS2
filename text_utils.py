@@ -10,8 +10,6 @@ class TextCleaner:
         # Make a unique list of symbols
         self._symbols = list(dict.fromkeys(list(pad) + list(punctuation) + list(letters) + list(ipa_phones)))
 
-        assert len(self) == 178, f'Number of symbols must be 178 but it is {len(self)}'
-
         self._make_word_index_dict()
 
     def __call__(self, text):

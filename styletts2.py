@@ -81,6 +81,8 @@ class StyleTTS2Finetune():
         self.slmadv = None
         self.text_cleaner = None
         self._init_symbols()
+        print(f'Number of symbols: {len(self.text_cleaner)}')
+        assert len(self.text_cleaner) == 178, f'Number of symbols must be 178 but it is {len(self)}'
 
         self.train_list, self.val_list = get_data_path_list(
             self.train_path,
@@ -487,8 +489,14 @@ class StyleTTS2Finetune():
             gs = torch.stack(gs).squeeze() # global acoustic styles
             s_trg = torch.cat([gs, s_dur], dim=-1).detach() # ground truth for denoiser
 
+            # print(texts[0], len(texts[0]))
+            # print(self.text_cleaner.declean(texts[0]), len(self.text_cleaner.declean(texts[0])))
+            # print((~text_mask[0]).int())
+
             bert_dur = self.model.bert(texts, attention_mask=(~text_mask).int())
             d_en = self.model.bert_encoder(bert_dur).transpose(-1, -2)
+
+            # print(d_en[0])
 
             # denoiser training
             if epoch >= self.diff_epoch:
@@ -672,6 +680,7 @@ class StyleTTS2Finetune():
                     self.clip_grad_norm('diffusion')
                 self.optimizer.step('diffusion')
 
+            # joint training with SLM
             d_loss_slm, loss_gen_lm = 0, 0
             if epoch >= self.joint_epoch:
                 # randomly pick whether to use in-distribution text
