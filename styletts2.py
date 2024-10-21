@@ -247,6 +247,7 @@ class StyleTTS2Finetune():
             "epochs": self.epochs,
             "steps_per_epoch": self.steps_per_epoch,
         }
+
         scheduler_params_dict= {key: scheduler_params.copy() for key in self.model}
         scheduler_params_dict['bert']['max_lr'] = optimizer_params['bert_lr'] * 2
         scheduler_params_dict['decoder']['max_lr'] = optimizer_params['ft_lr'] * 2
@@ -254,7 +255,9 @@ class StyleTTS2Finetune():
 
         self.optimizer = build_optimizer(
             {key: self.model[key].parameters() for key in self.model},
-            scheduler_params_dict=scheduler_params_dict, lr=optimizer_params['lr'])
+            scheduler_params_dict=scheduler_params_dict,
+            lr=optimizer_params['lr'],
+        )
 
         # adjust BERT learning rate
         for g in self.optimizer.optimizers['bert'].param_groups:
@@ -450,6 +453,7 @@ class StyleTTS2Finetune():
                 text_mask = length_to_mask(input_lengths).to(texts.device)
 
                 # compute reference styles
+                ref = None
                 if self.multispeaker and epoch >= self.diff_epoch:
                     ref_ss = self.model.style_encoder(ref_mels.unsqueeze(1))
                     ref_sp = self.model.predictor_encoder(ref_mels.unsqueeze(1))
@@ -837,7 +841,7 @@ class StyleTTS2Finetune():
                         mel = mels[idx, :, :m]
                         s = self.model.predictor_encoder(mel.unsqueeze(0).unsqueeze(1))
                         ss.append(s)
-                        s = self.model.style_encoder(mel.unsqueeze(0).unsqueeze(1))
+                        # s = self.model.style_encoder(mel.unsqueeze(0).unsqueeze(1))
 
                     # JMa: Fix: remove explicitly 2nd dimension
                     # otherwise all dimensions of size 1 are removed
@@ -1053,7 +1057,7 @@ class StyleTTS2Finetune():
     @property
     def loss_params(self):
         return self.config['loss_params']
-    
+
     @property
     def preprocess_params(self):
         return self.config['preprocess_params']
@@ -1084,7 +1088,7 @@ class StyleTTS2Finetune():
     def load_pretrained_for_stage2(self):
         return self.config.get('pretrained_model', '') != '' \
             and self.config.get('second_stage_load_pretrained', False)
-    
+
     @property
     def load_only_params(self):
         return self.config.get('load_only_params', True)
@@ -1100,7 +1104,7 @@ class StyleTTS2Finetune():
     @property
     def max_saved_models(self):
         return self.config.get('max_saved_models', 2)
-    
+
     @property
     def save_milestones(self):
         return self.config.get('save_milestones', False)
@@ -1135,7 +1139,7 @@ class StyleTTS2Finetune():
     @property
     def save_val_audio(self):
         return self.config['data_params'].get('save_val_audio', False)
-    
+
     @property
     def n_val_audios(self):
         return self.config['data_params'].get('n_val_audios', 5)

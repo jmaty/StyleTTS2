@@ -1,4 +1,5 @@
 # load packages
+import argparse
 import copy
 import logging
 import os
@@ -9,8 +10,9 @@ import traceback
 import warnings
 from logging import StreamHandler
 
-import click
 import numpy as np
+import scipy
+import nvidia_smi
 import torch
 import torch.nn.functional as F
 import yaml
@@ -20,15 +22,17 @@ from munch import Munch
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 
-from losses import *
+from text_utils import TextCleaner
+from losses import GeneratorLoss, WavLMLoss, DiscriminatorLoss, MultiResolutionSTFTLoss
 from meldataset import build_dataloader
-from models import *
+from models import load_ASR_models, load_F0_models, build_model, load_checkpoint, save_checkpoint
 from Modules.diffusion.sampler import (ADPM2Sampler, DiffusionSampler,
                                        KarrasSchedule)
 from Modules.slmadv import SLMAdversarialLoss
 from optimizers import build_optimizer
-from utils import *
-from Utils.PLBERT.util import load_plbert
+from utils import (get_data_path_list, length_to_mask, log_norm,
+                   maximum_path, recursive_munch, synth_test_files)
+from Utils.PLBERT_cs.util import load_plbert
 
 warnings.simplefilter('ignore')
 
@@ -46,17 +50,27 @@ handler = StreamHandler()
 handler.setLevel(logging.DEBUG)
 logger.addHandler(handler)
 
-@click.command()
-@click.option('-p', '--config_path', default='Configs/config.yml', type=str)
-def main(config_path):
-    with open(config_path, encoding="utf-8") as fr:
+
+def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="StyleTTS2 finetuning")
+    parser.add_argument('config_path', type=str, help='path to config')
+    parser.add_argument('-w', '--num_workers', type=int, default=0, help='number of workers')
+    args = parser.parse_args()
+
+    with open(args.config_path, encoding="utf-8") as fr:
         config = yaml.safe_load(fr)
 
     log_dir = config['log_dir']
     if not osp.exists(log_dir):
         os.makedirs(log_dir, exist_ok=True)
-    shutil.copy(config_path, osp.join(log_dir, osp.basename(config_path)))
+    shutil.copy(args.config_path, osp.join(log_dir, osp.basename(args.config_path)))
     writer = SummaryWriter(log_dir + "/tensorboard")
+
+    # Init NVLM
+    nvidia_smi.nvmlInit()
+    n_gpus = nvidia_smi.nvmlDeviceGetCount()
+    logger.info('NVLM initialized')
 
     # write logs
     file_handler = logging.FileHandler(osp.join(log_dir, 'train.log'))
@@ -70,6 +84,7 @@ def main(config_path):
     log_interval = config.get('log_interval', 10)
     saving_epoch = config.get('save_freq', 2)
     max_saved_models = config.get('max_saved_models', 2)
+    save_milestones = config.get('save_milestones', False)
 
     data_params = config.get('data_params', None)
     sr = config['preprocess_params'].get('sr', 24000)
@@ -79,6 +94,7 @@ def main(config_path):
     min_length = data_params['min_length']
     ood_data = data_params['OOD_data']
     save_val_audio = data_params.get('save_val_audio', False)
+    n_val_audios = config['data_params'].get('n_val_audios', 3)
     save_test_audio = data_params.get('save_test_audio', False)
     test_sentences = data_params.get('test_sentences', [])
     test_audio_dir = os.path.join(
@@ -98,27 +114,43 @@ def main(config_path):
 
     optimizer_params = Munch(config['optimizer_params'])
 
+    text_cleaner = TextCleaner(
+        pad=data_params['pad'],
+        punctuation=data_params['punctuation'],
+        letters=data_params['letters'],
+        ipa_phones=data_params['ipa_phones'],
+    )
+    print(f'Number of symbols: {len(text_cleaner)}')
+    assert len(text_cleaner) == 178, f'Number of symbols must be 178 but it is {len(text_cleaner)}'
+
+    # Load data & dataloaders
     train_list, val_list = get_data_path_list(train_path, val_path)
-    device = 'cuda'
+    device = config.get('cuda', 'cuda')
 
-    train_dataloader = build_dataloader(train_list,
-                                        root_path,
-                                        OOD_data=ood_data,
-                                        min_length=min_length,
-                                        batch_size=batch_size,
-                                        num_workers=2,
-                                        dataset_config={},
-                                        device=device)
+    train_dataloader = build_dataloader(
+        train_list,
+        root_path,
+        text_cleaner=text_cleaner,
+        OOD_data=ood_data,
+        min_length=min_length,
+        batch_size=batch_size,
+        num_workers=args.num_workers,
+        dataset_config={},
+        device=device
+    )
 
-    val_dataloader = build_dataloader(val_list,
-                                      root_path,
-                                      OOD_data=ood_data,
-                                      min_length=min_length,
-                                      batch_size=batch_size,
-                                      validation=True,
-                                      num_workers=0,
-                                      device=device,
-                                      dataset_config={})
+    val_dataloader = build_dataloader(
+        val_list,
+        root_path,
+        text_cleaner=text_cleaner,
+        OOD_data=ood_data,
+        min_length=min_length,
+        batch_size=batch_size,
+        validation=True,
+        num_workers=0,
+        device=device,
+        dataset_config={}
+    )
 
     # load pretrained ASR model
     asr_config = config.get('ASR_config', False)
@@ -137,6 +169,8 @@ def main(config_path):
     model_params = recursive_munch(config['model_params'])
     multispeaker = model_params.multispeaker
     model = build_model(model_params, text_aligner, pitch_extractor, plbert)
+
+    # Move models to device (cuda)
     _ = [model[key].to(device) for key in model]
 
     # DP
@@ -147,13 +181,15 @@ def main(config_path):
     start_epoch = 0
     iters = 0
 
-    load_pretrained = config.get('pretrained_model', '') != '' and config.get('second_stage_load_pretrained', False)
+    load_pretrained = config.get('pretrained_model', '') != '' and \
+        config.get('second_stage_load_pretrained', False)
 
     if not load_pretrained:
         if config.get('first_stage_path', '') != '':
             first_stage_path = osp.join(log_dir, config.get('first_stage_path', 'first_stage.pth'))
             print(f'Loading the first stage model at {first_stage_path} ...')
-            model, _, start_epoch, iters = load_checkpoint(model,
+            model, _, start_epoch, iters = load_checkpoint(
+                model,
                 None,
                 first_stage_path,
                 load_only_params=True,
@@ -167,7 +203,8 @@ def main(config_path):
                     'mpd',
                     'wd',
                     'diffusion'
-                ])
+                ],
+            )
 
             # these epochs should be counted from the start epoch
             diff_epoch += start_epoch
@@ -183,7 +220,8 @@ def main(config_path):
         model_params.slm.model,
         model.wd,
         sr,
-        model_params.slm.sr).to(device)
+        model_params.slm.sr
+    ).to(device)
 
     gl = MyDataParallel(gl)
     dl = MyDataParallel(dl)
@@ -210,7 +248,9 @@ def main(config_path):
 
     optimizer = build_optimizer(
         {key: model[key].parameters() for key in model},
-        scheduler_params_dict=scheduler_params_dict, lr=optimizer_params.lr)
+        scheduler_params_dict=scheduler_params_dict,
+        lr=optimizer_params.lr
+    )
 
     # adjust BERT learning rate
     for g in optimizer.optimizers['bert'].param_groups:
@@ -235,14 +275,16 @@ def main(config_path):
             model,
             optimizer,
             config['pretrained_model'],
-            load_only_params=config.get('load_only_params', True))
+            load_only_params=config.get('load_only_params', True),
+        )
         # # advance start epoch or we'd re-train and rewrite the last epoch file
         # start_epoch += 1
-        print('\nmodel data loaded, starting training epoch %05d\n' % start_epoch)
+        print(f'\nmodel data loaded, starting training epoch {start_epoch:05d}\n')
+
     n_down = model.text_aligner.n_down
 
     best_loss = float('inf')  # best test loss
-    iters = 0
+    iters = 0   # !!! Should it be resetting?
 
     # criterion = nn.L1Loss() # F0 loss (regression)
     torch.cuda.empty_cache()
@@ -281,6 +323,7 @@ def main(config_path):
         # Set all models to eval mode
         _ = [model[key].eval() for key in model]
 
+        # Set following models to train mode
         model.predictor.train()
         model.bert_encoder.train()
         model.bert.train()
@@ -305,7 +348,8 @@ def main(config_path):
                     s2s_attn = s2s_attn.transpose(-1, -2)
                     s2s_attn = s2s_attn[..., 1:]
                     s2s_attn = s2s_attn.transpose(-1, -2)
-                except Exception:
+                except Exception as e:
+                    print(f"[!] Error: {e}")
                     continue    # skip batch
 
                 mask_st = mask_from_lens(s2s_attn, input_lengths, mel_input_length // (2 ** n_down))
@@ -318,7 +362,7 @@ def main(config_path):
                 d_gt = s2s_attn_mono.sum(axis=-1).detach()
 
                 # compute reference styles
-                if multispeaker and epoch >= diff_epoch:
+                if multispeaker and start_ds:
                     ref_ss = model.style_encoder(ref_mels.unsqueeze(1))
                     ref_sp = model.predictor_encoder(ref_mels.unsqueeze(1))
                     ref = torch.cat([ref_ss, ref_sp], dim=1)
@@ -327,27 +371,27 @@ def main(config_path):
             # this operation cannot be done in batch because of the avgpool layer
             # (may need to work on masked avgpool)
             ss, gs = [], []
-            for idx, mel_input_length_item in enumerate(mel_input_length):
-                mel_length = int(mel_input_length_item.item())
-                mel = mels[idx, :, :mel_input_length_item]
-                s = model.predictor_encoder(mel.unsqueeze(0).unsqueeze(1))
-                ss.append(s)
-                s = model.style_encoder(mel.unsqueeze(0).unsqueeze(1))
-                gs.append(s)
+            for idx, m in enumerate(mel_input_length):
+                mel_length = int(m.item())
+                mel = mels[idx, :, :m]
+                ss.append(model.predictor_encoder(mel.unsqueeze(0).unsqueeze(1)))
+                gs.append(model.style_encoder(mel.unsqueeze(0).unsqueeze(1)))
 
             s_dur = torch.stack(ss).squeeze()  # global prosodic styles
             gs = torch.stack(gs).squeeze() # global acoustic styles
             s_trg = torch.cat([gs, s_dur], dim=-1).detach() # ground truth for denoiser
 
             bert_dur = model.bert(texts, attention_mask=(~text_mask).int())
-            d_en = model.bert_encoder(bert_dur).transpose(-1, -2) 
+            d_en = model.bert_encoder(bert_dur).transpose(-1, -2)
 
             # denoiser training
-            if epoch >= diff_epoch:
+            if start_ds:
                 num_steps = np.random.randint(3, 5)
 
                 if model_params.diffusion.dist.estimate_sigma_data:
                     # batch-wise std estimation
+                    # model.diffusion.diffusion.sigma_data = s_trg.std(axis=-1).mean().item()
+                    # running_std.append(model.diffusion.sigma_data)
                     model.diffusion.module.diffusion.sigma_data = s_trg.std(axis=-1).mean().item()
                     running_std.append(model.diffusion.module.diffusion.sigma_data)
 
@@ -358,25 +402,30 @@ def main(config_path):
                         embedding_scale=1,
                         features=ref, # reference from the same speaker as the embedding
                         embedding_mask_proba=0.1,
-                        num_steps=num_steps).squeeze(1)
+                        num_steps=num_steps
+                    ).squeeze(1)
                     # EDM loss
                     loss_diff = model.diffusion(
                         s_trg.unsqueeze(1),
                         embedding=bert_dur,
-                        features=ref).mean()
+                        features=ref
+                    ).mean()
                     # style reconstruction loss
                     loss_sty = F.l1_loss(s_preds, s_trg.detach())
-                else:
+                else:   # single-speaker
                     s_preds = sampler(
                         noise=torch.randn_like(s_trg).unsqueeze(1).to(device),
                         embedding=bert_dur,
                         embedding_scale=1,
                         embedding_mask_proba=0.1,
-                        num_steps=num_steps).squeeze(1)
+                        num_steps=num_steps
+                    ).squeeze(1)
                     # EDM loss
                     loss_diff = model.diffusion.module.diffusion(
+                    # loss_diff = model.diffusion.diffusion(
                         s_trg.unsqueeze(1),
-                        embedding=bert_dur).mean()
+                        embedding=bert_dur
+                    ).mean()
                     # style reconstruction loss
                     loss_sty = F.l1_loss(s_preds, s_trg.detach())
             else:
@@ -388,14 +437,16 @@ def main(config_path):
             mel_len_st = int(mel_input_length.min().item() / 2 - 1)
             en, gt, st, p_en, wav = [], [], [], [], []
 
-            for idx, (mel_input_length_item, wave_item) in enumerate(zip(mel_input_length, waves)):
-                mel_length = int(mel_input_length_item.item() / 2)
+            for idx, (m, w) in enumerate(zip(mel_input_length, waves)):
+                mel_length = int(m.item() / 2)
                 random_start = np.random.randint(0, mel_length - mel_len)
                 en.append(asr[idx, :, random_start:random_start+mel_len])
                 p_en.append(p[idx, :, random_start:random_start+mel_len])
                 gt.append(mels[idx, :, (random_start * 2):((random_start+mel_len) * 2)])
-                y = wave_item[(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
+
+                y = w[(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
                 wav.append(torch.from_numpy(y).to(device))
+
                 # style reference (better to be different from the GT)
                 random_start = np.random.randint(0, mel_length - mel_len_st)
                 st.append(mels[idx, :, (random_start * 2):((random_start+mel_len_st) * 2)])
@@ -429,7 +480,6 @@ def main(config_path):
                     wav = y_rec_gt_pred # use reconstruction since decoder is fixed
 
             f0_fake, n_fake = model.predictor.F0Ntrain(p_en, s_dur)
-
             y_rec = model.decoder(en, f0_fake, n_fake, s)
 
             loss_f0_rec =  (F.smooth_l1_loss(f0_real, f0_fake)) / 10
@@ -503,7 +553,7 @@ def main(config_path):
             optimizer.step('predictor')
             optimizer.step('predictor_encoder')
 
-            if epoch >= diff_epoch:
+            if start_ds:
                 if grad_clip:
                     nn.utils.clip_grad_norm_(model.diffusion.parameters(), grad_clip)
                 optimizer.step('diffusion')
@@ -529,7 +579,9 @@ def main(config_path):
                     waves,
                     mel_input_length,
                     ref_texts,
-                    ref_lengths, use_ind, s_trg.detach(),
+                    ref_lengths,
+                    use_ind,
+                    s_trg.detach(),
                     ref if multispeaker else None
                 )
 
@@ -589,7 +641,6 @@ def main(config_path):
                     d_loss_slm.backward(retain_graph=True)
                     # JMa: gradient clipping
                     if grad_clip:
-                        # _ = [nn.utils.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
                         nn.utils.clip_grad_norm_(model.wd.parameters(), grad_clip)
                     optimizer.step('wd')
 
@@ -598,9 +649,40 @@ def main(config_path):
 
             iters += 1
 
-            if (i+1)%log_interval == 0:
+            if (i+1) % log_interval == 0:
                 mel_loss = running_loss / log_interval
-                logger.info(f'Epoch [{epoch+1:3}/{epochs}], Step [{i+1:4}/{tot_num_steps}], Mel Loss: {mel_loss:.5f}, Disc Loss: {d_loss:.5f}, Dur Loss: {loss_dur:.5f}, CE Loss: {loss_ce:.5f}, Norm Loss: {loss_norm_rec:.5f}, F0 Loss: {loss_f0_rec:.5f}, LM Loss: {loss_lm:.5f}, Gen Loss: {loss_gen_all:.5f}, Sty Loss: {loss_sty:.5f}, Diff Loss: {loss_diff:.5f}, DiscLM Loss: {d_loss_slm:.5f}, GenLM Loss: {loss_gen_lm:.5f}')
+                logger.info(
+                    'Epoch [%d/%d], ' \
+                    'Step [%d/%d], ' \
+                    'Mel Loss: %.5f, ' \
+                    'Disc Loss: %.5f, ' \
+                    'Dur Loss: %.5f, ' \
+                    'CE Loss: %.5f, '  \
+                    'Norm Loss: %.5f, ' \
+                    'F0 Loss: %.5f, ' \
+                    'LM Loss: %.5f, ' \
+                    'Gen Loss: %.5f, ' \
+                    'Sty Loss: %.5f, ' \
+                    'Diff Loss: %.5f, ' \
+                    'DiscLM Loss: %.5f, ' \
+                    'GenLM Loss: %.5f',
+                    epoch+1,
+                    epochs,
+                    i+1,
+                    tot_num_steps,
+                    mel_loss,
+                    d_loss,
+                    loss_dur,
+                    loss_ce,
+                    loss_norm_rec,
+                    loss_f0_rec,
+                    loss_lm,
+                    loss_gen_all,
+                    loss_sty,
+                    loss_diff,
+                    d_loss_slm,
+                    loss_gen_lm,
+                )
                 writer.add_scalar('train/mel_loss', mel_loss, iters)
                 writer.add_scalar('train/gen_loss', loss_gen_all, iters)
                 writer.add_scalar('train/d_loss', d_loss, iters)
@@ -615,7 +697,10 @@ def main(config_path):
                 writer.add_scalar('train/gen_loss_slm', loss_gen_lm, iters)
 
                 running_loss = 0
-
+                for device_idx in range(n_gpus):
+                    handle = nvidia_smi.nvmlDeviceGetHandleByIndex(device_idx)
+                    info = nvidia_smi.nvmlDeviceGetMemoryInfo(handle)
+                    print(f'Device {device_idx} VRAM usage: {info.used>>30}/{info.total>>30} GB ({info.used/info.total:.2%})')
                 print('Time elapsed:', time.time()-start_time)
 
         # Validation
@@ -633,7 +718,7 @@ def main(config_path):
                     batch = [b.to(device) for b in batch[1:]]
                     texts, input_lengths, ref_texts, ref_lengths, mels, mel_input_length, ref_mels = batch
                     with torch.no_grad():
-                        mask = length_to_mask(mel_input_length // (2 ** n_down)).to('cuda')
+                        mask = length_to_mask(mel_input_length // (2 ** n_down)).to(device)
                         text_mask = length_to_mask(input_lengths).to(texts.device)
 
                         _, _, s2s_attn = model.text_aligner(mels, mask, texts)
@@ -654,21 +739,23 @@ def main(config_path):
                         d_gt = s2s_attn_mono.sum(axis=-1).detach()
 
                     ss, gs = [], []
+                    for idx, m in enumerate(mel_input_length):
+                        mel_length = int(m.item())
+                        mel = mels[idx, :, :m]
+                        ss.append(model.predictor_encoder(mel.unsqueeze(0).unsqueeze(1)))
+                        gs.append(model.style_encoder(mel.unsqueeze(0).unsqueeze(1)))
 
-                    for idx, mel_input_length_item in enumerate(mel_input_length):
-                        mel_length = int(mel_input_length_item.item())
-                        mel = mels[idx, :, :mel_input_length_item]
-                        s = model.predictor_encoder(mel.unsqueeze(0).unsqueeze(1))
-                        ss.append(s)
-                        s = model.style_encoder(mel.unsqueeze(0).unsqueeze(1))
-                        gs.append(s)
-
+                    # JMa: Fix: remove explicitly 2nd dimension
+                    # otherwise all dimensions of size 1 are removed
+                    # (resulting in error when current batch size is 1)
                     s = torch.stack(ss).squeeze()
-                    gs = torch.stack(gs).squeeze()
-                    s_trg = torch.cat([s, gs], dim=-1).detach()
+                    # s = torch.stack(ss).squeeze(dim=-1)
+                    # gs = torch.stack(gs).squeeze()              # !!! JMa: not used anymore?
+                    # # gs = torch.stack(gs).squeeze(dim=-1)        # !!! JMa: not used anymore?
+                    # s_trg = torch.cat([s, gs], dim=-1).detach() # !!! JMa: not used anymore?
 
                     bert_dur = model.bert(texts, attention_mask=(~text_mask).int())
-                    d_en = model.bert_encoder(bert_dur).transpose(-1, -2) 
+                    d_en = model.bert_encoder(bert_dur).transpose(-1, -2)
                     d, p = model.predictor(
                         d_en,
                         s,
@@ -678,18 +765,17 @@ def main(config_path):
                     )
                     # get clips
                     mel_len = int(mel_input_length.min().item() / 2 - 1)
-                    en, gt, p_en, wav = [], [], [], []
 
-                    for idx, (mel_input_length_item, wav_item) in enumerate(zip(mel_input_length, waves)):
-                        mel_length = int(mel_input_length_item.item() / 2)
+                    en, gt, p_en, wav = [], [], [], []
+                    for idx, (m, w) in enumerate(zip(mel_input_length, waves)):
+                        mel_length = int(m.item() / 2)
 
                         random_start = np.random.randint(0, mel_length - mel_len)
                         en.append(asr[idx, :, random_start:random_start+mel_len])
                         p_en.append(p[idx, :, random_start:random_start+mel_len])
 
                         gt.append(mels[idx, :, (random_start * 2):((random_start+mel_len) * 2)])
-
-                        y = wav_item[(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
+                        y = w[(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
                         wav.append(torch.from_numpy(y).to(device))
 
                     wav = torch.stack(wav).float().detach()
@@ -697,7 +783,6 @@ def main(config_path):
                     en = torch.stack(en)
                     p_en = torch.stack(p_en)
                     gt = torch.stack(gt).detach()
-
                     s = model.predictor_encoder(gt.unsqueeze(1))
 
                     f0_fake, n_fake = model.predictor.F0Ntrain(p_en, s)
@@ -711,47 +796,66 @@ def main(config_path):
                             _s2s_trg[bib, :_text_input[bib]] = 1
                         _dur_pred = torch.sigmoid(_s2s_pred).sum(axis=1)
                         loss_dur += F.l1_loss(
-                            _dur_pred[1:_text_length-1], 
+                            _dur_pred[1:_text_length-1],
                             _text_input[1:_text_length-1]
                         )
 
                     loss_dur /= texts.size(0)
-
                     s = model.style_encoder(gt.unsqueeze(1))
 
                     y_rec = model.decoder(en, f0_fake, n_fake, s)
                     loss_mel = stft_loss(y_rec.squeeze(), wav.detach())
-
-                    f0_real, _, f0 = model.pitch_extractor(gt.unsqueeze(1)) 
-
+                    f0_real, _, f0 = model.pitch_extractor(gt.unsqueeze(1))
                     loss_f0 = F.l1_loss(f0_real, f0_fake) / 10
-
                     loss_test += (loss_mel).mean()
                     loss_align += (loss_dur).mean()
                     loss_f += (loss_f0).mean()
 
+                    # # Generate validation sample (up to the defined number)
+                    # if save_val_audio and val_idx < n_val_audios:
+                    #     create_val_sample(
+                    #         val_idx,
+                    #         epoch,
+                    #         mel_input_length,
+                    #         mels,
+                    #         asr,
+                    #         p,
+                    #         idx_in_batch=0,
+                    #     )
+                    # # Generate ground-truth sample only at the beginning
+                    # if epoch == 0 and val_idx < n_val_audios and save_val_audio:
+                    #     create_gt_sample(
+                    #         val_idx,
+                    #         epoch,
+                    #         waves,
+                    #         idx_in_batch=0,
+                    #     )
+
                     iters_test += 1
+
                 except Exception as e:
-                    print(f"run into exception", e)
+                    print(f"[!] Error: {e}")
                     traceback.print_exc()
                     continue
 
-        print('Epochs:', epoch + 1)
-        logger.info('Validation loss: %.3f, Dur loss: %.3f, F0 loss: %.3f' % \
-                    loss_test/iters_test, loss_align/iters_test, loss_f/iters_test)
+        # print('Epochs:', epoch + 1)
+        avg_loss_test = loss_test / iters_test
+        avg_dur_loss = loss_align / iters_test
+        avg_f_loss = loss_f / iters_test
+        logger.info('Validation loss: %.3f, Dur loss: %.3f, F0 loss: %.3f',
+                    avg_loss_test, avg_dur_loss, avg_f_loss)
         # print('\n\n\n')
-        writer.add_scalar('eval/mel_loss', loss_test / iters_test, epoch + 1)
-        writer.add_scalar('eval/dur_loss', loss_align / iters_test, epoch + 1)
-        writer.add_scalar('eval/F0_loss', loss_f / iters_test, epoch + 1)
+        writer.add_scalar('eval/mel_loss', avg_loss_test, epoch+1)
+        writer.add_scalar('eval/dur_loss', avg_dur_loss, epoch+1)
+        writer.add_scalar('eval/F0_loss', avg_f_loss, epoch+1)
 
         if epoch < joint_epoch:
-            # generating reconstruction examples with GT duration
+            # Generating reconstruction examples with GT duration
             with torch.no_grad():
-                for idx, mel_input_length_item in enumerate(mel_input_length):
-                    mel_length = int(mel_input_length_item.item())
+                for idx, m in enumerate(mel_input_length):
+                    mel_length = int(m.item())
                     gt = mels[idx, :, :mel_length].unsqueeze(0)
                     en = asr[idx, :, :mel_length // 2].unsqueeze(0)
-
                     f0_real, _, _ = model.pitch_extractor(gt.unsqueeze(1))
                     f0_real = f0_real.unsqueeze(0)
                     s = model.style_encoder(gt.unsqueeze(1))
@@ -761,18 +865,18 @@ def main(config_path):
 
                     # Write and save val audio
                     wav = y_rec.cpu().numpy().squeeze()
-                    writer.add_audio(f'eval/y{idx}', wav, epoch, sample_rate=sr)
-                    if save_val_audio and epoch % saving_epoch == 0:
-                        outfile_template = f'epoch_2nd_{epoch:0>5}'
+                    writer.add_audio(f'eval/y{idx}', wav, epoch+1, sample_rate=sr)
+                    if save_val_audio and (epoch+1) % saving_epoch == 0:
+                        outfile_template = f'epoch_2nd_{epoch+1:0>5}'
                         out_file = f'{outfile_template}_val-{idx}.wav'
                         scipy.io.wavfile.write(
                             filename=os.path.join(test_audio_dir, out_file),
-                            rate=config['preprocess_params']['sr'],
+                            rate=sr,
                             data=wav
                         )
 
                     s_dur = model.predictor_encoder(gt.unsqueeze(1))
-                    p_en = p[bib, :, :mel_length // 2].unsqueeze(0)
+                    p_en = p[idx, :, :mel_length // 2].unsqueeze(0)
 
                     f0_fake, n_fake = model.predictor.F0Ntrain(p_en, s_dur)
 
@@ -780,26 +884,37 @@ def main(config_path):
                     writer.add_audio(
                         f'pred/y{idx}',
                         y_pred.cpu().numpy().squeeze(),
-                        epoch,
+                        epoch+1,
                         sample_rate=sr
                     )
 
+                    # Save ground truth
                     if epoch == 0:
+                        wav = waves[idx].squeeze()
+                        if save_val_audio:
+                            outfile_template = f'epoch_2nd_{epoch+1:0>5}'
+                            out_file = f'{outfile_template}_gt-{idx}.wav'
+                            scipy.io.wavfile.write(
+                                filename=os.path.join(test_audio_dir, out_file),
+                                rate=sr,
+                                data=wav
+                            )
                         writer.add_audio(
                             f'gt/y{idx}',
-                            waves[idx].squeeze(),
-                            epoch,
+                            wav,
+                            epoch+1,
                             sample_rate=sr
                     )
 
                     # Use up to 5 validation samples
-                    if idx >= 5:
+                    if idx >= n_val_audios:
                         break
         else:
             # generating sampled speech from text directly
             with torch.no_grad():
                 # compute reference styles
-                if multispeaker and epoch >= diff_epoch:
+                ref_s = None
+                if multispeaker and start_ds:
                     ref_ss = model.style_encoder(ref_mels.unsqueeze(1))
                     ref_sp = model.predictor_encoder(ref_mels.unsqueeze(1))
                     ref_s = torch.cat([ref_ss, ref_sp], dim=1)
@@ -812,22 +927,24 @@ def main(config_path):
                             embedding_scale=1,
                             # reference from the same speaker as the embedding
                             features=ref_s[idx].unsqueeze(0),
-                            num_steps=5).squeeze(1)
+                            num_steps=5
+                        ).squeeze(1)
                     else:
                         s_pred = sampler(
                             noise=torch.randn((1, 256)).unsqueeze(1).to(texts.device),
                             embedding=bert_dur[idx].unsqueeze(0),
                             embedding_scale=1,
-                            num_steps=5).squeeze(1)
+                            num_steps=5
+                        ).squeeze(1)
 
                     s = s_pred[:, 128:]
                     ref = s_pred[:, :128]
 
                     d = model.predictor.text_encoder(
-                        d_en[idx, :, :input_lengths[bib]].unsqueeze(0), 
+                        d_en[idx, :, :input_lengths[idx]].unsqueeze(0), 
                         s,
-                        input_lengths[bib, ...].unsqueeze(0),
-                        text_mask[bib, :input_lengths[bib]].unsqueeze(0)
+                        input_lengths[idx, ...].unsqueeze(0),
+                        text_mask[idx, :input_lengths[idx]].unsqueeze(0)
                     )
 
                     x, _ = model.predictor.lstm(d)
@@ -848,7 +965,7 @@ def main(config_path):
                     en = d.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0).to(texts.device)
                     f0_pred, n_pred = model.predictor.F0Ntrain(en, s)
                     out = model.decoder(
-                        t_en[bib, :, :input_lengths[bib]].unsqueeze(0) @ pred_aln_trg.unsqueeze(0).to(texts.device),
+                        t_en[idx, :, :input_lengths[idx]].unsqueeze(0) @ pred_aln_trg.unsqueeze(0).to(texts.device),
                         f0_pred,
                         n_pred,
                         ref.squeeze().unsqueeze(0)
@@ -857,19 +974,20 @@ def main(config_path):
                     # Write and save val audio
                     wav = out.cpu().numpy().squeeze()
                     writer.add_audio('pred/y' + str(idx), wav, epoch, sample_rate=sr)
-                    if save_val_audio and epoch % saving_epoch == 0:
-                        outfile_template = f'epoch_2nd_{epoch:0>5}'
+                    if save_val_audio and (epoch+1) % saving_epoch == 0:
+                        outfile_template = f'epoch_2nd_{epoch+1:0>5}'
                         out_file = f'{outfile_template}_val-{idx}.wav'
                         scipy.io.wavfile.write(
                             filename=os.path.join(test_audio_dir, out_file),
-                            rate=config['preprocess_params']['sr'],
+                            rate=sr,
                             data=wav
                         )
                     # Use up to 5 validation samples
-                    if idx >= 5:
+                    if idx >= n_val_audios:
                         break
 
-        if epoch % saving_epoch == 0:
+        # Save progress
+        if (epoch+1) % saving_epoch == 0:
             curr_loss = loss_test / iters_test
             if curr_loss < best_loss:
                 best_loss = curr_loss
@@ -882,46 +1000,54 @@ def main(config_path):
                 'epoch': epoch,
             }
             # Save model
-            save_model(state, '2nd', epoch, log_dir, max_saved_models)
+            save_checkpoint(state, '2nd', epoch, log_dir, max_saved_models)
+            # save_checkpoint2(model, optimizer, '2nd', epoch, iters, curr_loss, log_dir, max_saved_models)
 
             # if estimate sigma, save the estimated simga
             if model_params.diffusion.dist.estimate_sigma_data:
                 config['model_params']['diffusion']['dist']['sigma_data'] = float(np.mean(running_std))
 
-                cfg_path = osp.join(log_dir, osp.basename(config_path))
+                cfg_path = osp.join(log_dir, osp.basename(args.config_path))
                 with open(cfg_path, 'w', encoding='utf-8') as outfile:
                     yaml.dump(config, outfile, default_flow_style=True)
 
             # JMa: synthesize test audios
             if save_test_audio:
-                synth_test_files(model,
-                                test_sentences,
-                                test_audio_dir,
-                                f'epoch_2nd_{epoch:0>5}_test',
-                                sr,
-                                sampler=None,
-                                diffusion_steps=5,
-                                embedding_scale=1,
-                                device=device)
+                synth_test_files(
+                    model,
+                    test_sentences,
+                    test_audio_dir,
+                    f'epoch_2nd_{epoch:0>5}_test',
+                    sr,
+                    text_cleaner=text_cleaner,
+                    sampler=None,
+                    diffusion_steps=5,
+                    embedding_scale=1,
+                    device=device
+                )
 
-        # Save auxiliary models
-        if epoch in (diff_epoch-1, joint_epoch-1):
-            # Prepare model state fo saving
-            state = {
-                'net':  {key: model[key].state_dict() for key in model}, 
-                'optimizer': optimizer.state_dict(),
-                'iters': iters,
-                'val_loss': loss_test / iters_test,
-                'epoch': epoch,
-            }
-            if epoch == diff_epoch-1:
-                save_path = osp.join(log_dir, f'pre-diff_2nd_{epoch:0>5}.pth')
-                phase = 'Pre-diffusion'
-            else:
-                save_path = osp.join(log_dir, f'pre-joint_2nd_{epoch:0>5}.pth')
-                phase = 'Pre-joint'
-            torch.save(state, save_path)
-            print(f'{phase} phase model saved (epoch) {epoch}')
+        # Save milestone models
+        if save_milestones:
+            if epoch == diff_epoch - 1:
+                state = {
+                    'net':  {key: model[key].state_dict() for key in model}, 
+                    'optimizer': optimizer.state_dict(),
+                    'iters': iters,
+                    'val_loss': loss_test / iters_test,
+                    'epoch': epoch,
+                }
+                save_checkpoint(state, 'pre-diff', epoch, log_dir)
+                # save_checkpoint2(model, optimizer, 'pre-diff', epoch, iters, loss_test/iters_test, log_dir)
+            if epoch == joint_epoch - 1:
+                state = {
+                    'net':  {key: model[key].state_dict() for key in model}, 
+                    'optimizer': optimizer.state_dict(),
+                    'iters': iters,
+                    'val_loss': loss_test / iters_test,
+                    'epoch': epoch,
+                }
+                save_checkpoint(state, 'pre-joint', epoch, log_dir)
+                # save_checkpoint2(model, optimizer, 'pre-joint', epoch, iters, loss_test/iters_test, log_dir)
 
 if __name__=="__main__":
-    main('Configs/config.yml')
+    main()

@@ -15,6 +15,8 @@ MODELS=""
 # QSUB ARGUMENTS
 MEM=64gb
 LSCRATCH=20gb
+NCPUS=8
+NGPUS=2
 
 if [[ "$#" -lt 2 ]]; then
      echo "Usage: run_train_jupyter.sh cfg notebook [specification: iti<0-1> dgx gpu<0-3>] [hours] [runs] [jobid]"
@@ -92,7 +94,7 @@ fi
 [[ $HOURS -gt 24 ]] && [[ $SPEC == gpu? ]] && QUEUE="${QUEUE}_long"
 
 # Select argument
-SELECT="-l select=1:ncpus=2:mem=$MEM:scratch_local=$LSCRATCH:ngpus=1$CLUSTER"
+SELECT="-l select=1:ncpus=$NCPUS:mem=$MEM:scratch_local=$LSCRATCH:ngpus=$NGPUS$CLUSTER"
 # Walltime argument
 WALLTIME="-l walltime=$HOURS:00:00"
 

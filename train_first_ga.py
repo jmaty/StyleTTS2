@@ -9,7 +9,7 @@ import numpy as np
 import scipy
 import nvidia_smi
 
-import click
+import argparse
 import torch
 import torch.nn.functional as F
 import yaml
@@ -20,9 +20,9 @@ from munch import Munch
 from torch.utils.tensorboard import SummaryWriter
 
 from text_utils import TextCleaner
-from losses import *
+from losses import GeneratorLoss, WavLMLoss, DiscriminatorLoss, MultiResolutionSTFTLoss
 from meldataset import build_dataloader
-from models import *
+from models import load_ASR_models, load_F0_models, build_model, load_checkpoint, save_checkpoint
 from optimizers import build_optimizer
 from utils import (get_data_path_list, get_image, length_to_mask, log_norm,
                    log_print, maximum_path, recursive_munch,
@@ -33,16 +33,23 @@ warnings.simplefilter('ignore')
 
 logger = get_logger(__name__, log_level="DEBUG")
 
-@click.command()
-@click.option('-p', '--config_path', default='Configs/config.yml', type=str)
-def main(config_path):
-    with open(config_path, encoding="utf-8") as fr:
+def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="StyleTTS2 finetuning")
+    parser.add_argument('config_path', type=str, help='path to config')
+    parser.add_argument('-w', '--num_workers', type=int, default=0, help='number of workers')
+    args = parser.parse_args()
+
+    with open(args.config_path, encoding="utf-8") as fr:
         config = yaml.safe_load(fr)
 
     log_dir = config['log_dir']
     if not osp.exists(log_dir):
         os.makedirs(log_dir, exist_ok=True)
-    shutil.copy(config_path, osp.join(log_dir, osp.basename(config_path)))
+    shutil.copy(args.config_path, osp.join(log_dir, osp.basename(args.config_path)))
+    writer = None
+
+    # Distrinuted computing
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(project_dir=log_dir, split_batches=True, kwargs_handlers=[ddp_kwargs])    
     if accelerator.is_main_process:
@@ -54,7 +61,7 @@ def main(config_path):
     file_handler.setFormatter(logging.Formatter('%(levelname)s:%(asctime)s: %(message)s'))
     logger.logger.addHandler(file_handler)
 
-    batch_size = config.get('batch_size', 10)
+    batch_size = config.get('batch_size', 4)
     device = accelerator.device
 
     epochs = config.get('epochs_1st', 200)
@@ -547,11 +554,11 @@ def main(config_path):
         save_path = osp.join(log_dir, config.get('first_stage_path', 'first_stage.pth'))
         torch.save(state, save_path)
         print('Final first-stage model saved')
-        
+
         # Ending work with NVIDIA NVLM
         nvidia_smi.nvmlShutdown()
         logger.info('NVLM shutdown')
 
 
 if __name__=="__main__":
-    main(None)
+    main()

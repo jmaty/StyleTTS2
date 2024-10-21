@@ -486,7 +486,6 @@ class ProsodyPredictor(nn.Module):
         x = x_pad.to(x.device)
                 
         duration = self.duration_proj(nn.functional.dropout(x, 0.5, training=self.training))
-        
         en = (d.transpose(-1, -2) @ alignment)
 
         return duration.squeeze(-1), en
@@ -610,7 +609,7 @@ def load_ASR_models(ASR_MODEL_PATH, ASR_MODEL_CONFIG):
 
 def build_model(args, text_aligner, pitch_extractor, bert):
     assert args.decoder.type in ['istftnet', 'hifigan'], 'Decoder type unknown'
-    
+
     if args.decoder.type == "istftnet":
         from Modules.istftnet import Decoder
         decoder = Decoder(dim_in=args.hidden_dim, style_dim=args.style_dim, dim_out=args.n_mels,
@@ -619,7 +618,7 @@ def build_model(args, text_aligner, pitch_extractor, bert):
                 upsample_initial_channel=args.decoder.upsample_initial_channel,
                 resblock_dilation_sizes=args.decoder.resblock_dilation_sizes,
                 upsample_kernel_sizes=args.decoder.upsample_kernel_sizes, 
-                gen_istft_n_fft=args.decoder.gen_istft_n_fft, gen_istft_hop_size=args.decoder.gen_istft_hop_size) 
+                gen_istft_n_fft=args.decoder.gen_istft_n_fft, gen_istft_hop_size=args.decoder.gen_istft_hop_size)
     else:
         from Modules.hifigan import Decoder
         decoder = Decoder(dim_in=args.hidden_dim, style_dim=args.style_dim, dim_out=args.n_mels,
@@ -628,7 +627,7 @@ def build_model(args, text_aligner, pitch_extractor, bert):
                 upsample_initial_channel=args.decoder.upsample_initial_channel,
                 resblock_dilation_sizes=args.decoder.resblock_dilation_sizes,
                 upsample_kernel_sizes=args.decoder.upsample_kernel_sizes) 
-        
+
     text_encoder = TextEncoder(channels=args.hidden_dim, kernel_size=5, depth=args.n_layer, n_symbols=args.n_token)
     
     predictor = ProsodyPredictor(style_dim=args.style_dim, d_hid=args.hidden_dim, nlayers=args.n_layer, max_dur=args.max_dur, dropout=args.dropout)
@@ -687,27 +686,37 @@ def build_model(args, text_aligner, pitch_extractor, bert):
             # slm discriminator head
             wd = WavLMDiscriminator(args.slm.hidden, args.slm.nlayers, args.slm.initial_channel),
        )
-    
+
     return nets
 
 
-def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_modules=None):
+def load_checkpoint2(model, optimizer, path, load_only_params=True, ignore_modules=None, n_gpus=1):
+    # Modified to deal with inconsistent key names between first and second training stages
+    # => see https://github.com/yl4579/StyleTTS2/issues/121
     if ignore_modules is None:
         ignore_modules = []
     state = torch.load(path, map_location='cpu')
     params = state['net']
     for key in model:
         if key in params and key not in ignore_modules:
-            print(f'{key} loaded')
+            print(f'== {key} loaded')
             try:
-                model[key].load_state_dict(params[key], strict=False)
-            except RuntimeError:
+                model[key].load_state_dict(params[key], strict=True)
+            except RuntimeError: # DataParallel module. mismatch
+                print(model[key].state_dict().keys())
                 state_dict = params[key]
                 new_state_dict = OrderedDict()
-                # print(f'{key} key length: {len(model[key].state_dict().keys())}, state_dict length: {len(state_dict.keys())}')
-                for (k_m, _), (_, v_c) in zip(model[key].state_dict().items(), state_dict.items()):
-                    new_state_dict[k_m] = v_c
+                for k, v in state_dict.items():
+                    name = k
+                    if n_gpus == 1 and k.startswith("module."):
+                        name = k[7:]  # remove `module.`
+                    elif not k.startswith("module."):
+                        name = 'module.' + k
+                    print(f"{k} => {name}")
+                    new_state_dict[name] = v
+                # load params
                 model[key].load_state_dict(new_state_dict, strict=False)
+    _ = [model[key].eval() for key in model]
 
     if not load_only_params:
         # advance start epoch or we'd re-train and rewrite the last epoch file
@@ -720,6 +729,119 @@ def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_module
 
     return model, optimizer, epoch, iters
 
+def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_modules=None):
+    # Modified to deal with inconsistent key names between first and second training stages
+    # => see https://github.com/yl4579/StyleTTS2/issues/254,
+    # https://github.com/yl4579/StyleTTS2/issues/21#issue-1962579727
+    # https://github.com/pytorch/pytorch/issues/9176#issuecomment-403570715
+    if ignore_modules is None:
+        ignore_modules = []
+    state = torch.load(path, map_location='cpu')
+    params = state['net']
+    for key in model:
+        if key in params and key not in ignore_modules:
+            print(f'{key} loaded')
+            try:
+                model[key].load_state_dict(params[key], strict=True)
+            except RuntimeError:    # DataParallel module. mismatch
+                state_dict = params[key]
+                new_state_dict = OrderedDict()
+                # print(f'{key} key length: {len(model[key].state_dict().keys())}, state_dict length: {len(state_dict.keys())}')
+                # print("model", len(model[key].state_dict().items()))
+                # print("state", len(state_dict.items()))
+                for k_m, _ in model[key].state_dict().items():
+                    k_fix, v_c = None, None
+                    if k_m in state_dict:
+                        v_c = state_dict[k_m]
+                        k_fix = k_m[7:]
+                    if k_fix:
+                        new_state_dict[k_fix] = v_c
+                        # print(f'=> {k_m} => {k_fix}')
+                model[key].load_state_dict(new_state_dict, strict=False)
+    _ = [model[key].eval() for key in model]
+
+    if not load_only_params:
+        # advance start epoch or we'd re-train and rewrite the last epoch file
+        epoch = state["epoch"] + 1
+        iters = state["iters"]
+        optimizer.load_state_dict(state["optimizer"])
+    else:
+        epoch = 0
+        iters = 0
+
+    return model, optimizer, epoch, iters
+
+# def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_modules=None, n_gpus=1):
+#     # Modified to deal with inconsistent key names between first and second training stages
+#     # => see https://github.com/yl4579/StyleTTS2/issues/254,
+#     # https://github.com/yl4579/StyleTTS2/issues/21#issue-1962579727
+#     # https://github.com/pytorch/pytorch/issues/9176#issuecomment-403570715
+#     if ignore_modules is None:
+#         ignore_modules = []
+#     state = torch.load(path, map_location='cpu')
+#     params = state['net']
+#     for key in model:
+#         if key in params and key not in ignore_modules:
+#             print(f'{key} loaded')
+#             try:
+#                 model[key].load_state_dict(params[key], strict=True)
+#             except RuntimeError:    # DataParallel module. mismatch
+#                 state_dict = params[key]
+#                 new_state_dict = OrderedDict()
+#                 # print(f'{key} key length: {len(model[key].state_dict().keys())}, state_dict length: {len(state_dict.keys())}')
+#                 for (k_m, v_m), (k_c, v_c) in zip(model[key].state_dict().items(), state_dict.items()):
+#                     print(f'{k_c} vs. {k_m}')
+#                     # For single-GPU training: remove "module."
+#                     if n_gpus == 1 and k_c.startswith("module."):
+#                         k_m = k_c[7:]
+#                     elif not k_c.startswith("module.") and not k_m.startswith("module."):
+#                         k_m = 'module.' + k_m
+#                     new_state_dict[k_m] = v_c
+#                     print(f'  => {k_c} => {k_m}')
+#                 model[key].load_state_dict(new_state_dict, strict=False)
+#     _ = [model[key].eval() for key in model]
+
+#     if not load_only_params:
+#         # advance start epoch or we'd re-train and rewrite the last epoch file
+#         epoch = state["epoch"] + 1
+#         iters = state["iters"]
+#         optimizer.load_state_dict(state["optimizer"])
+#     else:
+#         epoch = 0
+#         iters = 0
+
+#     return model, optimizer, epoch, iters
+
+# def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_modules=[]):
+#     state = torch.load(path, map_location='cpu')
+#     params = state['net']
+#     for key in model:
+#         new_state_dict = OrderedDict()
+#         for k, v in params[key].items():
+#             name = 'module.' + k # add `module.`
+#             new_state_dict[name] = v
+
+#         if key in ['mpd', 'msd', 'wd']:
+#             new_state_dict = params[key]
+
+#         if key in params and key not in ignore_modules:
+#             print('%s loaded' % key)
+#             #model[key].load_state_dict(params[key])
+#             model[key].load_state_dict(new_state_dict)
+
+#     _ = [model[key].eval() for key in model]
+
+#     if not load_only_params:
+#         # advance start epoch or we'd re-train and rewrite the last epoch file
+#         epoch = state["epoch"] + 1
+#         iters = state["iters"]
+#         optimizer.load_state_dict(state["optimizer"])
+#     else:
+#         epoch = 0
+#         iters = 0
+
+#     return model, optimizer, epoch, iters
+
 
 # JMa: Save model and delete old models
 def save_checkpoint(model_state, stage, epoch, save_dir, max_saved_models=None):
@@ -730,6 +852,48 @@ def save_checkpoint(model_state, stage, epoch, save_dir, max_saved_models=None):
     filename = f"epoch_{stage}_{epoch:05d}.pth"
     filepath = os.path.join(save_dir, filename)
     torch.save(model_state, filepath)
+    print(f"New model saved to {filepath}")
+
+    if max_saved_models:
+        # Get list of all saved models and sort by epoch number
+        saved_models = sorted(
+            [f for f in os.listdir(save_dir) if f.startswith(f"epoch_{stage}") and f.endswith(".pth")],
+            key=lambda x: int(x.split('_')[2].split('.')[0])
+        )
+
+        # Remove old models if exceeding max_saved_models
+        while len(saved_models) > max_saved_models:
+            old_model = saved_models.pop(0)
+            os.remove(os.path.join(save_dir, old_model))
+            print(f"Old model {old_model} removed")
+
+
+# JMa: Save model and delete old models
+def save_checkpoint2(model, optimizer, stage, epoch, iters, loss, save_dir, max_saved_models=None):
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    # Net
+    net_dict = {}
+    for k in model:
+        try:    # DP/DDP trick
+            net_dict[k] = model[k].module.state_dict()
+        except AttributeError:
+            net_dict[k] = model[k].state_dict()
+
+    # Prepare model state for saving
+    state_dict = {
+        'net':  net_dict, 
+        'optimizer': optimizer.state_dict(),
+        'iters': iters,
+        'val_loss': loss,
+        'epoch': epoch,
+    }
+
+    # Save the model
+    filename = f"epoch_{stage}_{epoch:05d}.pth"
+    filepath = os.path.join(save_dir, filename)
+    torch.save(state_dict, filepath)
     print(f"New model saved to {filepath}")
 
     if max_saved_models:

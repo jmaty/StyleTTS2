@@ -103,7 +103,7 @@ class FilePathDataset(torch.utils.data.Dataset):
 
             # Encode phonetic string as a list of phoneme IDs
             text = self.text_cleaner(ps)
-            text.insert(0, 0)   # 0 means phoneme ID of [$] (pad symbol)
+            text.insert(0, 0)   # 0 means phoneme ID of pad symbol
             text.append(0)
             ref_text = torch.LongTensor(text)
 
@@ -123,7 +123,7 @@ class FilePathDataset(torch.utils.data.Dataset):
 
         # Encode phonetic string as a list of phoneme IDs
         text = self.text_cleaner(text)
-        text.insert(0, 0)   # 0 means phoneme ID of [$] (pad symbol)
+        text.insert(0, 0)   # 0 means phoneme ID of pad symbol
         text.append(0)
         text = torch.LongTensor(text)
 

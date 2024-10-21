@@ -60,7 +60,6 @@ def define_scheduler(optimizer, params):
         div_factor=1,
         final_div_factor=1
     )
-
     return scheduler
 
 def build_optimizer(parameters_dict, scheduler_params_dict, lr):
