@@ -51,6 +51,14 @@ handler.setLevel(logging.DEBUG)
 logger.addHandler(handler)
 
 
+# def log_gpu_usage(logger, n_gpus):
+#     for device_idx in range(n_gpus):
+#         device = torch.cuda.get_device_properties(device_idx)
+#         memory_allocated = torch.cuda.memory_allocated(device_idx) / (1024**3)
+#         memory_total = torch.cuda.get_device_properties(device_idx).total_memory / (1024**3)
+#         logger.info(f'Device {device_idx} VRAM usage: {memory_allocated:.2f}/{memory_total:.2f} GB ({memory_allocated/memory_total:.2%})')
+
+
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="StyleTTS2 finetuning")
@@ -294,8 +302,6 @@ def main():
     print('BERT', optimizer.optimizers['bert'])
     print('decoder', optimizer.optimizers['decoder'])
 
-    start_ds = False    # Diffusion sampling
-
     running_std = []
 
     slmadv_params = Munch(config['slmadv_params'])
@@ -330,10 +336,6 @@ def main():
         model.msd.train()
         model.mpd.train()
 
-        # Start diffusion sampling at a specified epoch
-        if epoch >= diff_epoch:
-            start_ds = True
-
         for i, batch in enumerate(train_dataloader):
             waves = batch[0]
             batch = [b.to(device) for b in batch[1:]]
@@ -362,7 +364,7 @@ def main():
                 d_gt = s2s_attn_mono.sum(axis=-1).detach()
 
                 # compute reference styles
-                if multispeaker and start_ds:
+                if multispeaker and epoch >= diff_epoch:
                     ref_ss = model.style_encoder(ref_mels.unsqueeze(1))
                     ref_sp = model.predictor_encoder(ref_mels.unsqueeze(1))
                     ref = torch.cat([ref_ss, ref_sp], dim=1)
@@ -385,7 +387,7 @@ def main():
             d_en = model.bert_encoder(bert_dur).transpose(-1, -2)
 
             # denoiser training
-            if start_ds:
+            if epoch >= diff_epoch:
                 num_steps = np.random.randint(3, 5)
 
                 if model_params.diffusion.dist.estimate_sigma_data:
@@ -486,7 +488,7 @@ def main():
             loss_norm_rec = F.smooth_l1_loss(n_real, n_fake)
 
             #--- Discriminator loss ---
-            if start_ds:
+            if epoch >= diff_epoch:
                 optimizer.zero_grad()
                 d_loss = dl(wav.detach(), y_rec.detach()).mean()
                 d_loss.backward()
@@ -504,7 +506,7 @@ def main():
             optimizer.zero_grad()
 
             loss_mel = stft_loss(y_rec, wav)
-            loss_gen_all = gl(wav, y_rec).mean() if start_ds else 0
+            loss_gen_all = gl(wav, y_rec).mean() if epoch >= diff_epoch else 0
             loss_lm = wl(wav.detach().squeeze(), y_rec.squeeze()).mean()
 
             loss_ce, loss_dur = 0, 0
@@ -553,7 +555,7 @@ def main():
             optimizer.step('predictor')
             optimizer.step('predictor_encoder')
 
-            if start_ds:
+            if epoch >= diff_epoch:
                 if grad_clip:
                     nn.utils.clip_grad_norm_(model.diffusion.parameters(), grad_clip)
                 optimizer.step('diffusion')
@@ -616,7 +618,7 @@ def main():
                     for key in model.keys():
                         for p in model[key].parameters():
                             if p.grad is not None:
-                                p.grad *= (1 / total_norm['predictor']) 
+                                p.grad *= (1 / total_norm['predictor'])
 
                 for p in model.predictor.duration_proj.parameters():
                     if p.grad is not None:
@@ -811,26 +813,6 @@ def main():
                     loss_align += (loss_dur).mean()
                     loss_f += (loss_f0).mean()
 
-                    # # Generate validation sample (up to the defined number)
-                    # if save_val_audio and val_idx < n_val_audios:
-                    #     create_val_sample(
-                    #         val_idx,
-                    #         epoch,
-                    #         mel_input_length,
-                    #         mels,
-                    #         asr,
-                    #         p,
-                    #         idx_in_batch=0,
-                    #     )
-                    # # Generate ground-truth sample only at the beginning
-                    # if epoch == 0 and val_idx < n_val_audios and save_val_audio:
-                    #     create_gt_sample(
-                    #         val_idx,
-                    #         epoch,
-                    #         waves,
-                    #         idx_in_batch=0,
-                    #     )
-
                     iters_test += 1
 
                 except Exception as e:
@@ -865,9 +847,9 @@ def main():
 
                     # Write and save val audio
                     wav = y_rec.cpu().numpy().squeeze()
-                    writer.add_audio(f'eval/y{idx}', wav, epoch+1, sample_rate=sr)
-                    if save_val_audio and (epoch+1) % saving_epoch == 0:
-                        outfile_template = f'epoch_2nd_{epoch+1:0>5}'
+                    writer.add_audio(f'eval/y{idx}', wav, epoch, sample_rate=sr)
+                    if save_val_audio and epoch % saving_epoch == 0:
+                        outfile_template = f'epoch_2nd_{epoch:0>5}'
                         out_file = f'{outfile_template}_val-{idx}.wav'
                         scipy.io.wavfile.write(
                             filename=os.path.join(test_audio_dir, out_file),
@@ -884,7 +866,7 @@ def main():
                     writer.add_audio(
                         f'pred/y{idx}',
                         y_pred.cpu().numpy().squeeze(),
-                        epoch+1,
+                        epoch,
                         sample_rate=sr
                     )
 
@@ -892,7 +874,7 @@ def main():
                     if epoch == 0:
                         wav = waves[idx].squeeze()
                         if save_val_audio:
-                            outfile_template = f'epoch_2nd_{epoch+1:0>5}'
+                            outfile_template = f'epoch_2nd_{epoch:0>5}'
                             out_file = f'{outfile_template}_gt-{idx}.wav'
                             scipy.io.wavfile.write(
                                 filename=os.path.join(test_audio_dir, out_file),
@@ -902,7 +884,7 @@ def main():
                         writer.add_audio(
                             f'gt/y{idx}',
                             wav,
-                            epoch+1,
+                            epoch,
                             sample_rate=sr
                     )
 
@@ -914,7 +896,7 @@ def main():
             with torch.no_grad():
                 # compute reference styles
                 ref_s = None
-                if multispeaker and start_ds:
+                if multispeaker and epoch >= diff_epoch:
                     ref_ss = model.style_encoder(ref_mels.unsqueeze(1))
                     ref_sp = model.predictor_encoder(ref_mels.unsqueeze(1))
                     ref_s = torch.cat([ref_ss, ref_sp], dim=1)
@@ -941,7 +923,7 @@ def main():
                     ref = s_pred[:, :128]
 
                     d = model.predictor.text_encoder(
-                        d_en[idx, :, :input_lengths[idx]].unsqueeze(0), 
+                        d_en[idx, :, :input_lengths[idx]].unsqueeze(0),
                         s,
                         input_lengths[idx, ...].unsqueeze(0),
                         text_mask[idx, :input_lengths[idx]].unsqueeze(0)
@@ -974,8 +956,8 @@ def main():
                     # Write and save val audio
                     wav = out.cpu().numpy().squeeze()
                     writer.add_audio('pred/y' + str(idx), wav, epoch, sample_rate=sr)
-                    if save_val_audio and (epoch+1) % saving_epoch == 0:
-                        outfile_template = f'epoch_2nd_{epoch+1:0>5}'
+                    if save_val_audio and epoch % saving_epoch == 0:
+                        outfile_template = f'epoch_2nd_{epoch:0>5}'
                         out_file = f'{outfile_template}_val-{idx}.wav'
                         scipy.io.wavfile.write(
                             filename=os.path.join(test_audio_dir, out_file),
@@ -987,21 +969,20 @@ def main():
                         break
 
         # Save progress
-        if (epoch+1) % saving_epoch == 0:
+        if epoch % saving_epoch == 0:
             curr_loss = loss_test / iters_test
             if curr_loss < best_loss:
                 best_loss = curr_loss
-            # Prepare model state for saving
-            state = {
-                'net':  {key: model[key].state_dict() for key in model}, 
-                'optimizer': optimizer.state_dict(),
-                'iters': iters,
-                'val_loss': curr_loss,
-                'epoch': epoch,
-            }
-            # Save model
-            save_checkpoint(state, '2nd', epoch, log_dir, max_saved_models)
-            # save_checkpoint2(model, optimizer, '2nd', epoch, iters, curr_loss, log_dir, max_saved_models)
+            save_checkpoint(
+                model,
+                optimizer,
+                epoch,
+                iters,
+                curr_loss,
+                'epoch_2nd',
+                log_dir,
+                max_saved_models
+            )
 
             # if estimate sigma, save the estimated simga
             if model_params.diffusion.dist.estimate_sigma_data:
@@ -1011,8 +992,8 @@ def main():
                 with open(cfg_path, 'w', encoding='utf-8') as outfile:
                     yaml.dump(config, outfile, default_flow_style=True)
 
-            # JMa: synthesize test audios
-            if save_test_audio:
+            # JMa: synthesize test audios (makes sense after diffusion training started)
+            if save_test_audio and epoch >= diff_epoch:
                 synth_test_files(
                     model,
                     test_sentences,
@@ -1029,25 +1010,56 @@ def main():
         # Save milestone models
         if save_milestones:
             if epoch == diff_epoch - 1:
-                state = {
-                    'net':  {key: model[key].state_dict() for key in model}, 
-                    'optimizer': optimizer.state_dict(),
-                    'iters': iters,
-                    'val_loss': loss_test / iters_test,
-                    'epoch': epoch,
-                }
-                save_checkpoint(state, 'pre-diff', epoch, log_dir)
-                # save_checkpoint2(model, optimizer, 'pre-diff', epoch, iters, loss_test/iters_test, log_dir)
+                save_checkpoint(
+                    model,
+                    optimizer,
+                    epoch,
+                    iters,
+                    loss_test/iters_test,
+                    'stage2_pre-diff',
+                    log_dir
+                )
             if epoch == joint_epoch - 1:
-                state = {
-                    'net':  {key: model[key].state_dict() for key in model}, 
-                    'optimizer': optimizer.state_dict(),
-                    'iters': iters,
-                    'val_loss': loss_test / iters_test,
-                    'epoch': epoch,
-                }
-                save_checkpoint(state, 'pre-joint', epoch, log_dir)
-                # save_checkpoint2(model, optimizer, 'pre-joint', epoch, iters, loss_test/iters_test, log_dir)
+                save_checkpoint(
+                    model,
+                    optimizer,
+                    epoch,
+                    iters,
+                    loss_test/iters_test,
+                    'stage2_pre-joint',
+                    log_dir
+                )
+
+    # Save the final checkpoint
+    final_filepath = save_checkpoint(
+        model,
+        optimizer,
+        epoch,
+        iters,
+        loss_test / iters_test,
+        'epoch_2nd',
+        log_dir,
+        max_saved_models,
+    )
+    try:
+        final_model_symlink = 'second_stage.pth'
+        os.symlink(final_filepath, final_model_symlink)
+        print(f'Final second-stage model saved to {final_filepath}')
+    except FileExistsError:
+        print(f'Symlink or file {final_model_symlink} already exists => {final_filepath} was not symlinked!')
+
+    # if estimate sigma, save the estimated simga
+    if model_params.diffusion.dist.estimate_sigma_data:
+        config['model_params']['diffusion']['dist']['sigma_data'] = float(np.mean(running_std))
+
+        cfg_path = osp.join(log_dir, osp.basename(args.config_path))
+        with open(cfg_path, 'w', encoding='utf-8') as outfile:
+            yaml.dump(config, outfile, default_flow_style=True)
+
+    # Ending work with NVIDIA NVLM
+    nvidia_smi.nvmlShutdown()
+    logger.info('NVLM shutdown')
+
 
 if __name__=="__main__":
     main()

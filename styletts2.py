@@ -377,6 +377,7 @@ class StyleTTS2Finetune():
         self.best_loss = float('inf')   # Init best loss
         self.running_std = []
 
+        # Go over the defined epochs
         for epoch in range(self.start_epoch, self.epochs):
             # Set all models to eval mode
             self.eval_mode()
@@ -388,7 +389,7 @@ class StyleTTS2Finetune():
             loss_test, iters_test = self._validation_loop(epoch)
 
             # Save progress
-            if (epoch+1) % self.save_freq == 0:
+            if epoch % self.save_freq == 0:
                 self._save_progress(epoch, loss_test, iters_test)
                 # JMa: synthesize test audios
                 if self.save_test_audio:
@@ -411,23 +412,33 @@ class StyleTTS2Finetune():
             # Save milestone models
             if self.save_milestones:
                 if epoch == self.diff_epoch - 1:
-                    state = {
-                        'net':  {key: self.model[key].state_dict() for key in self.model}, 
-                        'optimizer': self.optimizer.state_dict(),
-                        'iters': self.iters,
-                        'val_loss': loss_test / iters_test,
-                        'epoch': epoch,
-                    }
-                    save_checkpoint(state, 'pre-diff', epoch, self.log_dir)
+                    save_checkpoint(
+                        self.model,
+                        self.optimizer,
+                        epoch,
+                        self.iters,
+                        loss_test/iters_test,
+                        'stage2_pre-diff',
+                        self.log_dir
+                    )
                 if epoch == self.joint_epoch - 1:
-                    state = {
-                        'net':  {key: self.model[key].state_dict() for key in self.model}, 
-                        'optimizer': self.optimizer.state_dict(),
-                        'iters': self.iters,
-                        'val_loss': loss_test / iters_test,
-                        'epoch': epoch,
-                    }
-                    save_checkpoint(state, 'pre-joint', epoch, self.log_dir)
+                    save_checkpoint(
+                        self.model,
+                        self.optimizer,
+                        epoch,
+                        self.iters,
+                        loss_test/iters_test,
+                        'stage2_pre-joint',
+                        self.log_dir
+                    )
+        # Save the final checkpoint
+        final_filepath = self._save_progress(epoch, loss_test, iters_test)
+        try:
+            final_model_symlink = 'second_stage.pth'
+            os.symlink(final_filepath, final_model_symlink)
+            print(f'Final second-stage model saved to {final_filepath}')
+        except FileExistsError:
+            print(f'Symlink or file {final_model_symlink} already exists => {final_filepath} was not symlinked!')
 
 
     def _training_loop(self, epoch):
@@ -975,9 +986,9 @@ class StyleTTS2Finetune():
 
         # Write and save val audio
         wav = y_rec.cpu().numpy().squeeze()
-        self.writer.add_audio('eval/y' + str(val_idx), wav, epoch+1, sample_rate=self.sr)
-        if (epoch+1) % self.save_freq == 0:
-            outfile_template = f'epoch_2nd_{epoch+1:0>5}'
+        self.writer.add_audio('eval/y' + str(val_idx), wav, epoch, sample_rate=self.sr)
+        if epoch % self.save_freq == 0:
+            outfile_template = f'epoch_2nd_{epoch:0>5}'
             out_file = f'{outfile_template}_val-{val_idx}.wav'
             scipy.io.wavfile.write(
                 filename=os.path.join(self.test_audio_dir, out_file),
@@ -990,8 +1001,8 @@ class StyleTTS2Finetune():
     # Do it only once at the very beginning (epoch 0)
     def _create_gt_sample(self, val_idx, epoch, waves, idx_in_batch=0):
         wav = waves[idx_in_batch].squeeze()
-        self.writer.add_audio('gt/y' + str(val_idx), wav, epoch+1, sample_rate=self.sr)
-        outfile_template = f'epoch_2nd_{epoch+1:0>5}'
+        self.writer.add_audio('gt/y' + str(val_idx), wav, epoch, sample_rate=self.sr)
+        outfile_template = f'epoch_2nd_{epoch:0>5}'
         out_file = f'{outfile_template}_gt-{val_idx}.wav'
         scipy.io.wavfile.write(
             filename=os.path.join(self.test_audio_dir, out_file),
@@ -1004,15 +1015,18 @@ class StyleTTS2Finetune():
         curr_loss = loss_test / iters_test
         if curr_loss < self.best_loss:
             self.best_loss = curr_loss
-        state = {
-            'net':  {key: self.model[key].state_dict() for key in self.model}, 
-            'optimizer': self.optimizer.state_dict(),
-            'iters': self.iters,
-            'val_loss': curr_loss,
-            'epoch': epoch,
-        }
+
         # Save model
-        save_checkpoint(state, '2nd', epoch, self.log_dir, self.max_saved_models)
+        checkpoint_path = save_checkpoint(
+            self.model,
+            self.optimizer,
+            epoch,
+            self.iters,
+            curr_loss,
+            'epoch_2nd',
+            self.log_dir,
+            self.max_saved_models
+        )
 
         # if estimate sigma, save the estimated sigma
         if self.config['model_params']['diffusion']['dist']['estimate_sigma_data']:
@@ -1025,18 +1039,9 @@ class StyleTTS2Finetune():
                 encoding='utf-8'
             ) as outfile:
                 yaml.dump(self.config, outfile, default_flow_style=True)
+        
+        return checkpoint_path
 
-    # # Save model
-    # def _save_model(self, path, epoch, loss_test, iters_test):
-    #     # Prepare model state fo saving
-    #     state = {
-    #         'net':  {key: self.model[key].state_dict() for key in self.model}, 
-    #         'optimizer': self.optimizer.state_dict(),
-    #         'iters': self.iters,
-    #         'val_loss': loss_test / iters_test,
-    #         'epoch': epoch,
-    #     }
-    #     torch.save(state, path)
 
     @property
     def log_dir(self):

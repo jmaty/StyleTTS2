@@ -664,7 +664,6 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     diffusion.diffusion.net = transformer
     diffusion.unet = transformer
 
-    
     nets = Munch(
             bert=bert,
             bert_encoder=nn.Linear(bert.config.hidden_size, args.hidden_dim),
@@ -843,47 +842,90 @@ def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_module
 #     return model, optimizer, epoch, iters
 
 
+# # JMa: Save model and delete old models
+# def save_checkpoint0(model_state, stage, epoch, save_dir, max_saved_models=None):
+#     if not os.path.exists(save_dir):
+#         os.makedirs(save_dir)
+
+#     # Save the model
+#     filename = f"epoch_{stage}_{epoch:05d}.pth"
+#     filepath = os.path.join(save_dir, filename)
+#     torch.save(model_state, filepath)
+#     print(f"New model saved to {filepath}")
+
+#     if max_saved_models:
+#         # Get list of all saved models and sort by epoch number
+#         saved_models = sorted(
+#             [f for f in os.listdir(save_dir) if f.startswith(f"epoch_{stage}") and f.endswith(".pth")],
+#             key=lambda x: int(x.split('_')[2].split('.')[0])
+#         )
+
+#         # Remove old models if exceeding max_saved_models
+#         while len(saved_models) > max_saved_models:
+#             old_model = saved_models.pop(0)
+#             os.remove(os.path.join(save_dir, old_model))
+#             print(f"Old model {old_model} removed")
+
+
+# # JMa: Save model and delete old models
+# def save_checkpoint2(model, optimizer, stage, epoch, iters, loss, save_dir, max_saved_models=None):
+#     if not os.path.exists(save_dir):
+#         os.makedirs(save_dir)
+
+#     # Net
+#     net_dict = {}
+#     for k in model:
+#         try:    # DP/DDP trick
+#             net_dict[k] = model[k].module.state_dict()
+#         except AttributeError:
+#             net_dict[k] = model[k].state_dict()
+
+#     # Prepare model state for saving
+#     state_dict = {
+#         'net': net_dict, 
+#         'optimizer': optimizer.state_dict(),
+#         'iters': iters,
+#         'val_loss': loss,
+#         'epoch': epoch,
+#     }
+
+#     # Save the model
+#     filename = f"epoch_{stage}_{epoch:05d}.pth"
+#     filepath = os.path.join(save_dir, filename)
+#     torch.save(state_dict, filepath)
+#     print(f"New model saved to {filepath}")
+
+#     if max_saved_models:
+#         # Get list of all saved models and sort by epoch number
+#         saved_models = sorted(
+#             [f for f in os.listdir(save_dir) if f.startswith(f"epoch_{stage}") and f.endswith(".pth")],
+#             key=lambda x: int(x.split('_')[2].split('.')[0])
+#         )
+
+#         # Remove old models if exceeding max_saved_models
+#         while len(saved_models) > max_saved_models:
+#             old_model = saved_models.pop(0)
+#             os.remove(os.path.join(save_dir, old_model))
+#             print(f"Old model {old_model} removed")
+
+
 # JMa: Save model and delete old models
-def save_checkpoint(model_state, stage, epoch, save_dir, max_saved_models=None):
+# def save_checkpoint(model, optimizer, stage, epoch, iters, loss, save_dir, max_saved_models=None):
+def save_checkpoint(model, optimizer, epoch, iters, loss, basename, save_dir, max_saved_models=None):
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
-    # Save the model
-    filename = f"epoch_{stage}_{epoch:05d}.pth"
-    filepath = os.path.join(save_dir, filename)
-    torch.save(model_state, filepath)
-    print(f"New model saved to {filepath}")
-
-    if max_saved_models:
-        # Get list of all saved models and sort by epoch number
-        saved_models = sorted(
-            [f for f in os.listdir(save_dir) if f.startswith(f"epoch_{stage}") and f.endswith(".pth")],
-            key=lambda x: int(x.split('_')[2].split('.')[0])
-        )
-
-        # Remove old models if exceeding max_saved_models
-        while len(saved_models) > max_saved_models:
-            old_model = saved_models.pop(0)
-            os.remove(os.path.join(save_dir, old_model))
-            print(f"Old model {old_model} removed")
-
-
-# JMa: Save model and delete old models
-def save_checkpoint2(model, optimizer, stage, epoch, iters, loss, save_dir, max_saved_models=None):
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
-
-    # Net
-    net_dict = {}
-    for k in model:
-        try:    # DP/DDP trick
-            net_dict[k] = model[k].module.state_dict()
-        except AttributeError:
-            net_dict[k] = model[k].state_dict()
+    # # Net
+    # net_dict = {}
+    # for k in model:
+    #     try:    # DP/DDP trick
+    #         net_dict[k] = model[k].module.state_dict()
+    #     except AttributeError:
+    #         net_dict[k] = model[k].state_dict()
 
     # Prepare model state for saving
     state_dict = {
-        'net':  net_dict, 
+        'net': {key: model[key].state_dict() for key in model}, 
         'optimizer': optimizer.state_dict(),
         'iters': iters,
         'val_loss': loss,
@@ -891,15 +933,19 @@ def save_checkpoint2(model, optimizer, stage, epoch, iters, loss, save_dir, max_
     }
 
     # Save the model
-    filename = f"epoch_{stage}_{epoch:05d}.pth"
+    filename = f"{basename}_{epoch:05d}.pth"
     filepath = os.path.join(save_dir, filename)
+    if os.path.isfile(filepath):
+        # Skip saving model when already exists
+        print(f"Model {filepath} already exists => skipping")
+        return filepath
     torch.save(state_dict, filepath)
     print(f"New model saved to {filepath}")
 
     if max_saved_models:
         # Get list of all saved models and sort by epoch number
         saved_models = sorted(
-            [f for f in os.listdir(save_dir) if f.startswith(f"epoch_{stage}") and f.endswith(".pth")],
+            [f for f in os.listdir(save_dir) if f.startswith(f"{basename}") and f.endswith(".pth")],
             key=lambda x: int(x.split('_')[2].split('.')[0])
         )
 
@@ -908,3 +954,6 @@ def save_checkpoint2(model, optimizer, stage, epoch, iters, loss, save_dir, max_
             old_model = saved_models.pop(0)
             os.remove(os.path.join(save_dir, old_model))
             print(f"Old model {old_model} removed")
+
+    # Return saved model's filepath
+    return filepath

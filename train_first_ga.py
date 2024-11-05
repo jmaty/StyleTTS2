@@ -68,6 +68,7 @@ def main():
     log_interval = config.get('log_interval', 10)
     saving_epoch = config.get('save_freq', 2)
     max_saved_models = config.get('max_saved_models', 2)
+    save_milestones = config.get('save_milestones', False)
 
     data_params = config.get('data_params', None)
     sr = config['preprocess_params'].get('sr', 24000)
@@ -375,8 +376,8 @@ def main():
                     # https://github.com/yl4579/StyleTTS2/issues/10#issuecomment-1783701686
                     # optimizer.step('pitch_extractor')
                     # optimizer.zero_grad('text_aligner')
+                
                 # Zero all gradients
-
                 optimizer.zero_grad()
 
             iters = iters + 1
@@ -463,7 +464,7 @@ def main():
             # print('Epochs:', epoch + 1)
             log_print(f'Epoch [{epoch+1:3}/{epochs}]: validation loss: {loss_test/iters_test:.3f}', logger)
             # print('\n\n\n')
-            writer.add_scalar('eval/mel_loss', loss_test / iters_test, epoch + 1)
+            writer.add_scalar('eval/mel_loss', loss_test / iters_test, epoch)
             attn_image = get_image(s2s_attn[0].cpu().numpy().squeeze())
             writer.add_figure('eval/attn', attn_image, epoch)
 
@@ -506,16 +507,16 @@ def main():
                 curr_loss = loss_test / iters_test
                 if curr_loss < best_loss:
                     best_loss = curr_loss
-                # Prepare model state for saving
-                state = {
-                    'net':  {key: model[key].state_dict() for key in model}, 
-                    'optimizer': optimizer.state_dict(),
-                    'iters': iters,
-                    'val_loss': curr_loss,
-                    'epoch': epoch,
-                }
-                # Save model
-                save_checkpoint(state, '1st', epoch, log_dir, max_saved_models)
+                save_checkpoint(
+                    model,
+                    optimizer,
+                    epoch,
+                    iters,
+                    curr_loss,
+                    'epoch_1st',
+                    log_dir,
+                    max_saved_models,
+                )
 
                 # JMa: synthesize test audios
                 if save_test_audio:
@@ -530,30 +531,35 @@ def main():
                                     embedding_scale=1,
                                     device=device)
             # Save pre-TMA model
-            if epoch == tma_epoch - 1:
-                # Prepare model state fo saving
-                state = {
-                    'net':  {key: model[key].state_dict() for key in model}, 
-                    'optimizer': optimizer.state_dict(),
-                    'iters': iters,
-                    'val_loss': loss_test / iters_test,
-                    'epoch': epoch,
-                }
-                save_path = osp.join(log_dir, f'pre-tma_1st_{epoch:0>5}.pth')
-                torch.save(state, save_path)
-                print('Pre-TMA model saved')
+            if save_milestones and epoch == tma_epoch - 1:
+                save_checkpoint(
+                    model,
+                    optimizer,
+                    epoch,
+                    iters,
+                    loss_test / iters_test,
+                    'stage1_pre-tma',
+                    log_dir,
+                )
 
     if accelerator.is_main_process:
-        state = {
-            'net':  {key: model[key].state_dict() for key in model}, 
-            'optimizer': optimizer.state_dict(),
-            'iters': iters,
-            'val_loss': loss_test / iters_test,
-            'epoch': epoch,
-        }
-        save_path = osp.join(log_dir, config.get('first_stage_path', 'first_stage.pth'))
-        torch.save(state, save_path)
-        print('Final first-stage model saved')
+        # Save final 1st stage model
+        final_filepath = save_checkpoint(
+            model,
+            optimizer,
+            epoch,
+            iters,
+            loss_test / iters_test,
+            'epoch_1st',
+            log_dir,
+            max_saved_models,
+        )
+        try:
+            first_stage_symlink = config.get('first_stage_path', 'first_stage.pth')
+            os.symlink(final_filepath, first_stage_symlink)
+            print(f'Final first-stage model saved to {final_filepath}')
+        except FileExistsError:
+            print(f'Symlink or file {first_stage_symlink} already exists => {final_filepath} was not symlinked!')
 
         # Ending work with NVIDIA NVLM
         nvidia_smi.nvmlShutdown()

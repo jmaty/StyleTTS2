@@ -65,7 +65,7 @@ def main():
     # Init NVLM
     nvidia_smi.nvmlInit()
     n_gpus = nvidia_smi.nvmlDeviceGetCount()
-    assert n_gpus > 1, f"Single-GPU 1st stage training not supported: model would be incompatible in 2nd stage training!"
+    assert n_gpus > 1, "Single-GPU 1st stage training not supported: model would be incompatible in 2nd stage training!"
     logger.info('NVLM initialized')
 
     batch_size = config.get('batch_size', 10)
@@ -377,8 +377,6 @@ def main():
 
             if (i+1)%log_interval == 0 and accelerator.is_main_process:
                 mel_loss = running_loss / log_interval
-                # log_print('Epoch [%3d/%d], Step [%d/%4d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f'
-                #        %(epoch+1, epochs, i+1, tot_num_steps, mel_loss, loss_gen_all, d_loss, loss_mono, loss_s2s, loss_slm), logger)
                 log_print(f'Epoch [{epoch+1:3}/{epochs}], Step [{i+1:4}/{tot_num_steps}], Mel Loss: {mel_loss:.5f}, Gen Loss: {loss_gen_all:.5f}, Disc Loss: {d_loss:.5f}, Mono Loss: {loss_mono:.5f}, S2S Loss: {loss_s2s:.5f}, SLM Loss: {loss_slm:.5f}', logger)
 
                 writer.add_scalar('train/mel_loss', mel_loss, iters)
@@ -466,7 +464,7 @@ def main():
             # print('\n\n\n')
             writer.add_scalar('eval/mel_loss', loss_test / iters_test, epoch + 1)
             attn_image = get_image(s2s_attn[0].cpu().numpy().squeeze())
-            writer.add_figure('eval/attn', attn_image, epoch)
+            writer.add_figure('eval/attn', attn_image, epoch + 1)
             
             with torch.no_grad():
                 for idx, (m, w) in enumerate(zip(mel_input_length, waves)):
@@ -483,7 +481,7 @@ def main():
                     
                     # Write and save val audio
                     wav = y_rec.cpu().numpy().squeeze()
-                    writer.add_audio('eval/y' + str(idx), wav, epoch, sample_rate=sr)
+                    writer.add_audio('eval/y' + str(idx), wav, epoch+1, sample_rate=sr)
                     if save_val_audio and epoch % saving_epoch == 0:
                         outfile_template = f'epoch_1st_{epoch:0>5}'
                         out_file = f'{outfile_template}_val-{idx}.wav'
@@ -511,16 +509,26 @@ def main():
             if epoch % saving_epoch == 0:
                 if (curr_loss_test) < best_loss:
                     best_loss = curr_loss_test
-                # Prepare model state for saving
-                state = {
-                    'net':  {key: model[key].state_dict() for key in model}, 
-                    'optimizer': optimizer.state_dict(),
-                    'iters': iters,
-                    'val_loss': loss_test / iters_test,
-                    'epoch': epoch,
-                }
+                # # Prepare model state for saving
+                # state = {
+                #     'net':  {key: model[key].state_dict() for key in model}, 
+                #     'optimizer': optimizer.state_dict(),
+                #     'iters': iters,
+                #     'val_loss': loss_test / iters_test,
+                #     'epoch': epoch,
+                # }
+                # save_checkpoint(state, '1st', epoch, log_dir, max_saved_models)
                 # Save model
-                save_checkpoint(state, '1st', epoch, log_dir, max_saved_models)
+                save_checkpoint(
+                    model,
+                    optimizer,
+                    '1st',
+                    epoch,
+                    iters,
+                    loss_test/iters_test,
+                    log_dir,
+                    max_saved_models
+                )
 
                 # JMa: synthesize test audios
                 if save_test_audio:
@@ -537,15 +545,25 @@ def main():
 
             # Save pre-TMA model
             if  epoch == tma_epoch - 1 and save_milestones:
-                # Prepare model state fo saving
-                state = {
-                    'net':  {key: model[key].state_dict() for key in model}, 
-                    'optimizer': optimizer.state_dict(),
-                    'iters': iters,
-                    'val_loss': loss_test / iters_test,
-                    'epoch': epoch,
-                }
-                save_checkpoint(state, 'pre-tma', epoch, log_dir)
+                # # Prepare model state fo saving
+                # state = {
+                #     'net':  {key: model[key].state_dict() for key in model}, 
+                #     'optimizer': optimizer.state_dict(),
+                #     'iters': iters,
+                #     'val_loss': loss_test / iters_test,
+                #     'epoch': epoch,
+                # }
+                # save_checkpoint(state, 'pre-tma', epoch, log_dir)
+                save_checkpoint(
+                    model,
+                    optimizer,
+                    'pre-tma',
+                    epoch,
+                    iters,
+                    loss_test/iters_test,
+                    log_dir,
+                    max_saved_models
+                )
 
     if accelerator.is_main_process:
         state = {
@@ -558,6 +576,10 @@ def main():
         save_path = osp.join(log_dir, config.get(config.get('first_stage_path', 'first_stage.pth')))
         torch.save(state, save_path)
         print(f'Final first-stage model saved to {save_path}')
+
+        # Ending work with NVIDIA NVLM
+        nvidia_smi.nvmlShutdown()
+        logger.info('NVLM shutdown')
 
 if __name__=="__main__":
     main()
