@@ -122,7 +122,7 @@ for i in $(seq 1 $RUNS); do
           $SELECT \
           $DEPS \
           -- $SINGULARITY "$INTB" "$CFG" "$ONTB")
-     echo "$EXP: $QUEUE$CLUSTER, RUN: $i, HOURS: $HOURS, JOBID: $PREV_JOBID -> $JOBID"
+     echo "$EXP: $QUEUE $SELECT, RUN: $i, HOURS: $HOURS, JOBID: $PREV_JOBID -> $JOBID"
      # Update dependencies to enable sequential run
      DEPS="-W depend=afterany:$JOBID"
      PREV_JOBID=$JOBID

@@ -17,7 +17,7 @@ MEM=64gb
 LSCRATCH=20gb
 
 if [[ "$#" -lt 2 ]]; then
-     echo "Usage: run_train_jupyter.sh cfg notebook [specification: iti<0-1> dgx gpu<0-3>] [hours] [runs] [jobid]"
+     echo "Usage: run_train_jupyter.sh cfg notebook [specification: iti<0-1> dgx gpu<0-4>] [hours] [runs] [jobid]"
      exit 1
 fi
 if [[ "$#" -gt 1 ]]; then
@@ -27,7 +27,7 @@ if [[ "$#" -gt 1 ]]; then
      INTB=$2
 fi
 if [[ "$#" -gt 2 ]]; then
-     # specification to run on (iti, gdx, gpu<0-3>)
+     # specification to run on (iti<0-1>, gdx, gpu<0-4>)
      SPEC=$3
 fi
 if [[ "$#" -gt 3 ]]; then
@@ -83,6 +83,10 @@ elif [[ $SPEC == "gpu3" ]]; then
      # Any cluster with GPU memory > 40gb (zia, black)
      QUEUE="-q gpu"
      CLUSTER=":gpu_mem=40000mb"
+elif [[ $SPEC == "gpu4" ]]; then
+     # Any cluster with GPU memory > 80gb (bee)
+     QUEUE="-q gpu"
+     CLUSTER=":gpu_mem=80000mb"
 else
      echo "Unsupported cluster/queue"
      exit 1
