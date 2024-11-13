@@ -555,8 +555,8 @@ def main():
             max_saved_models,
         )
         try:
-            first_stage_symlink = config.get('first_stage_path', 'first_stage.pth')
-            os.symlink(final_filepath, first_stage_symlink)
+            first_stage_symlink = osp.join(log_dir, config.get('first_stage_path', 'first_stage.pth'))
+            os.symlink(osp.basename(final_filepath), first_stage_symlink)
             print(f'Final first-stage model saved to {final_filepath}')
         except FileExistsError:
             print(f'Symlink or file {first_stage_symlink} already exists => {final_filepath} was not symlinked!')

@@ -383,7 +383,22 @@ def main():
             gs = torch.stack(gs).squeeze() # global acoustic styles
             s_trg = torch.cat([gs, s_dur], dim=-1).detach() # ground truth for denoiser
 
-            bert_dur = model.bert(texts, attention_mask=(~text_mask).int())
+            try:
+                bert_dur = model.bert(texts, attention_mask=(~text_mask).int())
+            except RuntimeError as e:
+                # RuntimeError: The expanded size of the tensor (544) must match the
+                #               existing size (512) at non-singleton dimension 1.
+                #               Target sizes: [4, 544].  Tensor sizes: [1, 512]
+                # => 1 sample in the batch has a text length > 512
+                #    - max size of the ALBERT model, corresponding to maximum phoneme length
+                #    - denoted as `max_mel_length` and `max_position_embeddings` in ALBERT config
+                #    - should be extracted as model.bert.config.max_position_embeddings
+                # => skip this batch
+                # TODO:Ensure the input text is not longer than 512 phonemes
+                logger.warning("Error: %s", e)
+                # print(f"[!] Error: {e}")
+                continue    # skip batch
+
             d_en = model.bert_encoder(bert_dur).transpose(-1, -2)
 
             # denoiser training
@@ -756,15 +771,18 @@ def main():
                     # # gs = torch.stack(gs).squeeze(dim=-1)        # !!! JMa: not used anymore?
                     # s_trg = torch.cat([s, gs], dim=-1).detach() # !!! JMa: not used anymore?
 
-                    bert_dur = model.bert(texts, attention_mask=(~text_mask).int())
-                    d_en = model.bert_encoder(bert_dur).transpose(-1, -2)
+                    bert_dur = model.bert(texts, attention_mask=(~text_mask).int()) # [B, T, 768]
+                    d_en = model.bert_encoder(bert_dur).transpose(-1, -2) # [B, 256, T]
+
+                    # decode
                     d, p = model.predictor(
                         d_en,
                         s,
                         input_lengths,
                         s2s_attn_mono,
                         text_mask
-                    )
+                    ) # [B, 256, T]
+
                     # get clips
                     mel_len = int(mel_input_length.min().item() / 2 - 1)
 
@@ -780,10 +798,10 @@ def main():
                         y = w[(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
                         wav.append(torch.from_numpy(y).to(device))
 
-                    wav = torch.stack(wav).float().detach()
+                    wav = torch.stack(wav).float().detach() # [B, T]
 
-                    en = torch.stack(en)
-                    p_en = torch.stack(p_en)
+                    en = torch.stack(en) # [B, 256, T]
+                    p_en = torch.stack(p_en) # [B, 256, T]
                     gt = torch.stack(gt).detach()
                     s = model.predictor_encoder(gt.unsqueeze(1))
 
@@ -1042,8 +1060,8 @@ def main():
         max_saved_models,
     )
     try:
-        final_model_symlink = 'second_stage.pth'
-        os.symlink(final_filepath, final_model_symlink)
+        final_model_symlink = osp.join(log_dir, 'second_stage.pth')
+        os.symlink(osp.basename(final_filepath), final_model_symlink)
         print(f'Final second-stage model saved to {final_filepath}')
     except FileExistsError:
         print(f'Symlink or file {final_model_symlink} already exists => {final_filepath} was not symlinked!')

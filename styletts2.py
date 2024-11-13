@@ -434,8 +434,8 @@ class StyleTTS2Finetune():
         # Save the final checkpoint
         final_filepath = self._save_progress(epoch, loss_test, iters_test)
         try:
-            final_model_symlink = 'second_stage.pth'
-            os.symlink(final_filepath, final_model_symlink)
+            final_model_symlink = osp.join(self.log_dir, 'second_stage.pth')
+            os.symlink(osp.basename(final_filepath), final_model_symlink)
             print(f'Final second-stage model saved to {final_filepath}')
         except FileExistsError:
             print(f'Symlink or file {final_model_symlink} already exists => {final_filepath} was not symlinked!')
