@@ -52,8 +52,24 @@ class FilePathDataset(torch.utils.data.Dataset):
         # spect_params = SPECT_PARAMS     # TODO: not reading from config!?
         # mel_params = MEL_PARAMS         # TODO: not reading from config!?
 
-        _data_list = [l.strip().split('|') for l in data_list]
-        self.data_list = [data if len(data) == 3 else (*data, 0) for data in _data_list]
+        # _data_list = [l.strip().split('|') for l in data_list]
+        # self.data_list = [data if len(data) == 3 else (*data, 0) for data in _data_list]
+
+        # Read input list of text data lines delimited by "|" and ignore too long lines
+        self.data_list = []  # Initialize the list for processed data
+        # Iterate over each line in the data_list
+        for l in data_list:
+            data = l.strip().split('|')  # Remove leading/trailing whitespaces and split the string
+            # Ensure data has at least two elements
+            assert len(data) in (2, 3), f"Invalid data format, 2-3 elements expected: {l}"
+            # Check if the length of data[1] exceeds 512 characters
+            if len(data[1]) > 512:
+                logger.warning(
+                    "Skipping %s: phoneme length %d > 512\n%s",
+                    data[0], len(data[1]), data[1]
+                )
+                continue  # Skip this item
+            self.data_list.append(data if len(data) == 3 else data + ['0'])
 
         self.text_cleaner = text_cleaner
         self.sr = sr
@@ -65,19 +81,21 @@ class FilePathDataset(torch.utils.data.Dataset):
         self.mean, self.std = -4, 4
         self.data_augmentation = data_augmentation and (not validation)
         self.max_mel_length = 192
-
         self.min_length = min_length
+
+        # Load OOD texts from the specified file
         with open(OOD_data, 'r', encoding='utf-8') as f:
             tl = f.readlines()
         idx = 1 if '.wav' in tl[0].split('|')[0] else 0
         self.ptexts = [t.split('|')[idx] for t in tl]
 
+        # Set tup path to waveform directory
         self.root_path = root_path
 
     def __len__(self):
         return len(self.data_list)
 
-    def __getitem__(self, idx):  
+    def __getitem__(self, idx):
         data = self.data_list[idx]  # [wavfile, phonetic_string, speaker_id]
         path = data[0]
 
@@ -88,46 +106,49 @@ class FilePathDataset(torch.utils.data.Dataset):
 
         acoustic_feature = mel_tensor.squeeze()
         length_feature = acoustic_feature.size(1)
+        # Ensure feature tensor with even length
         acoustic_feature = acoustic_feature[:, :(length_feature - length_feature % 2)]
 
-        # get reference sample
+        # get reference sample of max length `self.max_mel_length` (192)
         ref_data = (self.df[self.df[2] == str(speaker_id)]).sample(n=1).iloc[0].tolist()
-        ref_mel_tensor, ref_label = self._load_data(ref_data[:3])
-        # ref_label = speaker ID
+        ref_mel_tensor, ref_label = self._load_data(ref_data[:3]) # ref_label is speaker ID
 
-        # get OOD text
+        # Get OOD text
         ps = ""
+        # Randomly select a phonetic sentence from the OOD texts
+        # until it meets the minimum length requirement
         while len(ps) < self.min_length:
             rand_idx = np.random.randint(0, len(self.ptexts) - 1)
             ps = self.ptexts[rand_idx]  # random phonetic sentence from OOD texts
 
-            # Encode phonetic string as a list of phoneme IDs
-            text = self.text_cleaner(ps)
-            text.insert(0, 0)   # 0 means phoneme ID of pad symbol
-            text.append(0)
-            ref_text = torch.LongTensor(text)
+        # Encode phonetic string as a list of phoneme IDs
+        ref_text = self.text_cleaner(ps)
+        ref_text.insert(0, 0)   # 0 means phoneme ID of pad symbol
+        ref_text.append(0)
 
-        return speaker_id, acoustic_feature, text_tensor, ref_text, ref_mel_tensor, ref_label, path, wave
+        return speaker_id, acoustic_feature, text_tensor, torch.LongTensor(ref_text), ref_mel_tensor, ref_label, path, wave
 
     def _load_tensor(self, data):
         wave_path, text, speaker_id = data
-        speaker_id = int(speaker_id)
         wave, sr = sf.read(osp.join(self.root_path, wave_path))
         if wave.shape[-1] == 2:
             wave = wave[:, 0].squeeze()
         if sr != 24000:
             wave = librosa.resample(wave, orig_sr=sr, target_sr=24000)
-            print(wave_path, sr)
-
-        wave = np.concatenate([np.zeros([5000]), wave, np.zeros([5000])], axis=0)
+            logger.warning(
+                "%s: sampling rate is %d, resampling to 24000",
+                wave_path, sr
+            )
+        # Add padding to the waveform (200ms silence at both ends)
+        wave = np.concatenate([np.zeros([4800]), wave, np.zeros([4800])], axis=0)
 
         # Encode phonetic string as a list of phoneme IDs
         text = self.text_cleaner(text)
-        text.insert(0, 0)   # 0 means phoneme ID of pad symbol
+        # Pad the phoneme ID sequence with pad ID symbols (0)
+        text.insert(0, 0)
         text.append(0)
-        text = torch.LongTensor(text)
 
-        return wave, text, speaker_id
+        return wave, torch.LongTensor(text), int(speaker_id)
 
     def _load_data(self, data):
         wave, _, speaker_id = self._load_tensor(data)
@@ -135,6 +156,7 @@ class FilePathDataset(torch.utils.data.Dataset):
 
         mel_length = mel_tensor.size(1)
         if mel_length > self.max_mel_length:
+            # Randomly crop a segment of the mel spectrogram with length self.max_mel_length
             random_start = np.random.randint(0, mel_length - self.max_mel_length)
             mel_tensor = mel_tensor[:, random_start:random_start + self.max_mel_length]
 

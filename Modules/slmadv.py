@@ -157,7 +157,8 @@ class SLMAdversarialLoss(torch.nn.Module):
             if len(wav) >= self.batch_percentage * len(waves): # prevent OOM due to longer lengths
                 break
 
-        if len(sp) <= 1:
+        # if len(sp) <= 1: # Originally, batch size >=2 supported
+        if len(sp) < 1: # JMa: Can we use only 1 sample for SLM adversarial loss training?
             return None
 
         sp = torch.stack(sp)
@@ -180,57 +181,56 @@ class SLMAdversarialLoss(torch.nn.Module):
             if use_rec: # use reconstructed (shorter lengths), do length invariant regularization
                 if wav.size(-1) > y_pred.size(-1):
                     real_gp = wav[:, : , :crop_size]
-                    out_crop = self.wl.discriminator_forward(real_gp.detach().squeeze())
-                    out_org = self.wl.discriminator_forward(wav.detach().squeeze())
+                    out_crop = self.wl.discriminator_forward(real_gp.detach().squeeze(1))
+                    out_org = self.wl.discriminator_forward(wav.detach().squeeze(1))
                     loss_reg = F.l1_loss(out_crop, out_org[..., :out_crop.size(-1)])
 
                     if np.random.randint(0, 2) == 0:
                         d_loss = self.wl.discriminator(
-                            real_gp.detach().squeeze(),
-                            y_pred.detach().squeeze()
+                            real_gp.detach().squeeze(1),
+                            y_pred.detach().squeeze(1)
                         ).mean()
                     else:
                         d_loss = self.wl.discriminator(
-                            wav.detach().squeeze(),
-                            y_pred.detach().squeeze()
+                            wav.detach().squeeze(1),
+                            y_pred.detach().squeeze(1)
                         ).mean()
                 else:
                     real_gp = y_pred[:, : , :crop_size]
-                    out_crop = self.wl.discriminator_forward(real_gp.detach().squeeze())
-                    out_org = self.wl.discriminator_forward(y_pred.detach().squeeze())
+                    out_crop = self.wl.discriminator_forward(real_gp.detach().squeeze(1))
+                    out_org = self.wl.discriminator_forward(y_pred.detach().squeeze(1))
                     loss_reg = F.l1_loss(out_crop, out_org[..., :out_crop.size(-1)])
 
                     if np.random.randint(0, 2) == 0:
                         d_loss = self.wl.discriminator(
-                            wav.detach().squeeze(),
-                            real_gp.detach().squeeze()
+                            wav.detach().squeeze(1),
+                            real_gp.detach().squeeze(1)
                         ).mean()
                     else:
                         d_loss = self.wl.discriminator(
-                            wav.detach().squeeze(),
-                            y_pred.detach().squeeze()
+                            wav.detach().squeeze(1),
+                            y_pred.detach().squeeze(1)
                         ).mean()
 
                 # regularization (ignore length variation)
                 d_loss += loss_reg
 
-                out_gt = self.wl.discriminator_forward(y_rec_gt.detach().squeeze())
-                out_rec = self.wl.discriminator_forward(y_rec_gt_pred.detach().squeeze())
+                out_gt = self.wl.discriminator_forward(y_rec_gt.detach().squeeze(1))
+                out_rec = self.wl.discriminator_forward(y_rec_gt_pred.detach().squeeze(1))
 
                 # regularization (ignore reconstruction artifacts)
                 d_loss += F.l1_loss(out_gt, out_rec)
 
             else:
                 d_loss = self.wl.discriminator(
-                    wav.detach().squeeze(),
-                    y_pred.detach().squeeze()
+                    wav.detach().squeeze(1),
+                    y_pred.detach().squeeze(1)
                 ).mean()
         else:
             d_loss = 0
 
         # generator loss
-        gen_loss = self.wl.generator(y_pred.squeeze())
-
+        gen_loss = self.wl.generator(y_pred.squeeze(1))
         gen_loss = gen_loss.mean()
 
         return d_loss, gen_loss, y_pred.detach().cpu().numpy()

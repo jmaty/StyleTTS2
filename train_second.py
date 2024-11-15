@@ -336,7 +336,7 @@ def main():
         model.msd.train()
         model.mpd.train()
 
-        for i, batch in enumerate(train_dataloader):
+        for batch_idx, batch in enumerate(train_dataloader):
             waves = batch[0]
             batch = [b.to(device) for b in batch[1:]]
             texts, input_lengths, ref_texts, ref_lengths, mels, mel_input_length, ref_mels = batch
@@ -351,7 +351,7 @@ def main():
                     s2s_attn = s2s_attn[..., 1:]
                     s2s_attn = s2s_attn.transpose(-1, -2)
                 except Exception as e:
-                    print(f"[!] Error: {e}")
+                    logger.warning("Error: %s", e)
                     continue    # skip batch
 
                 mask_st = mask_from_lens(s2s_attn, input_lengths, mel_input_length // (2 ** n_down))
@@ -590,7 +590,7 @@ def main():
                     ref_texts = texts
 
                 slm_out = slmadv(
-                    i,
+                    batch_idx,
                     y_rec_gt,
                     y_rec_gt_pred,
                     waves,
@@ -603,9 +603,14 @@ def main():
                 )
 
                 if slm_out is None:
+                    # === Změna ===
+                    # Uvolnění paměti před pokračováním
+                    del slm_out, y_rec_gt, y_rec_gt_pred, s_trg
+                    torch.cuda.empty_cache()
+                    # === Konec změny ===
                     continue
 
-                d_loss_slm, loss_gen_lm, y_pred = slm_out
+                d_loss_slm, loss_gen_lm, _ = slm_out
 
                 # SLM generator loss
                 optimizer.zero_grad()
@@ -655,18 +660,20 @@ def main():
                 # SLM discriminator loss
                 if d_loss_slm != 0:
                     optimizer.zero_grad()
-                    d_loss_slm.backward(retain_graph=True)
+                    # d_loss_slm.backward(retain_graph=True)
+                    d_loss_slm.backward()
                     # JMa: gradient clipping
                     if grad_clip:
                         nn.utils.clip_grad_norm_(model.wd.parameters(), grad_clip)
                     optimizer.step('wd')
 
             else:
+                # d_loss_slm, loss_gen_lm = torch.tensor([0]), torch.tensor([0])
                 d_loss_slm, loss_gen_lm = 0, 0
 
             iters += 1
 
-            if (i+1) % log_interval == 0:
+            if (batch_idx+1) % log_interval == 0:
                 mel_loss = running_loss / log_interval
                 logger.info(
                     'Epoch [%d/%d], ' \
@@ -685,7 +692,7 @@ def main():
                     'GenLM Loss: %.5f',
                     epoch+1,
                     epochs,
-                    i+1,
+                    batch_idx+1,
                     tot_num_steps,
                     mel_loss,
                     d_loss,
@@ -719,6 +726,24 @@ def main():
                     info = nvidia_smi.nvmlDeviceGetMemoryInfo(handle)
                     print(f'Device {device_idx} VRAM usage: {info.used>>30}/{info.total>>30} GB ({info.used/info.total:.2%})')
                 print('Time elapsed:', time.time()-start_time)
+
+            # # === Změna ===
+            # # Uvolnění paměti po iteraci
+            # del waves, batch, texts, input_lengths, ref_texts, ref_lengths, mels, mel_input_length, ref_mels
+            # del mask, text_mask, s2s_attn, s2s_attn_mono, mask_st
+            # del t_en, asr, d_gt
+            # if multispeaker and epoch >= diff_epoch:
+            #     del ref_ss, ref_sp, ref
+            # del ss, gs, s_dur, s_trg, bert_dur, d_en
+            # del s_preds, loss_diff, loss_sty
+            # del d, p
+            # del en, gt, st, p_en, wav
+            # del f0_real, n_real, y_rec_gt, y_rec_gt_pred, f0_fake, n_fake, y_rec
+            # del loss_f0_rec, loss_norm_rec, loss_mel, loss_gen_all, loss_lm
+            # del loss_ce, loss_dur, g_loss
+            # del slm_out, d_loss_slm, loss_gen_lm
+            # torch.cuda.empty_cache()
+            # # === Konec změny ===
 
         # Validation
         loss_test, loss_align, loss_f = 0, 0, 0
@@ -839,9 +864,9 @@ def main():
                     continue
 
         # print('Epochs:', epoch + 1)
-        avg_loss_test = loss_test / iters_test
-        avg_dur_loss = loss_align / iters_test
-        avg_f_loss = loss_f / iters_test
+        avg_loss_test = loss_test.item() / iters_test
+        avg_dur_loss = loss_align.item() / iters_test
+        avg_f_loss = loss_f.item() / iters_test
         logger.info('Validation loss: %.3f, Dur loss: %.3f, F0 loss: %.3f',
                     avg_loss_test, avg_dur_loss, avg_f_loss)
         # print('\n\n\n')
@@ -988,7 +1013,7 @@ def main():
 
         # Save progress
         if epoch % saving_epoch == 0:
-            curr_loss = loss_test / iters_test
+            curr_loss = loss_test.item() / iters_test
             if curr_loss < best_loss:
                 best_loss = curr_loss
             save_checkpoint(
