@@ -450,20 +450,23 @@ def main():
 
             d, p = model.predictor(d_en, s_dur, input_lengths, s2s_attn_mono, text_mask)
 
+            # Set up maximum lengths based on `max_len` from config
+            # TODO: Use max and pad shorter segments?
             mel_len = min(int(mel_input_length.min().item() / 2 - 1), max_len // 2)
             mel_len_st = int(mel_input_length.min().item() / 2 - 1)
             en, gt, st, p_en, wav = [], [], [], [], []
 
+            # Pick random segments from the batch
             for idx, (m, w) in enumerate(zip(mel_input_length, waves)):
                 mel_length = int(m.item() / 2)
                 random_start = np.random.randint(0, mel_length - mel_len)
-                en.append(asr[idx, :, random_start:random_start+mel_len])
-                p_en.append(p[idx, :, random_start:random_start+mel_len])
+                en.append(asr[idx, :, random_start : random_start+mel_len])
+                p_en.append(p[idx, :, random_start : random_start+mel_len])
+                # Random melspetrogram segment up to `max_len`
                 gt.append(mels[idx, :, (random_start * 2):((random_start+mel_len) * 2)])
-
+                # Random waveform segment up to `max_len` (300 is hop size)
                 y = w[(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
                 wav.append(torch.from_numpy(y).to(device))
-
                 # style reference (better to be different from the GT)
                 random_start = np.random.randint(0, mel_length - mel_len_st)
                 st.append(mels[idx, :, (random_start * 2):((random_start+mel_len_st) * 2)])

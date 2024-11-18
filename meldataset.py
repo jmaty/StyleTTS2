@@ -127,7 +127,7 @@ class FilePathDataset(torch.utils.data.Dataset):
 
         return (
             speaker_id,                 # speaker ID
-            acoustic_feature,           # mel vector
+            acoustic_feature,           # mel spectrogram of input waveform
             text_tensor,                # phoneme IDs of input text
             torch.LongTensor(ref_text), # phoneme IDs of OOD text
             ref_mel_tensor,             # reference mel vector of the given speaker
@@ -189,7 +189,7 @@ class Collater(object):
         # batch[0] = wave, mel, text, f0, speakerid
         batch_size = len(batch)
 
-        # sort by mel length
+        # Sort batch by mel length
         lengths = [b[1].shape[1] for b in batch]
         batch_indexes = np.argsort(lengths)[::-1]
         batch = [batch[bid] for bid in batch_indexes]
@@ -208,11 +208,12 @@ class Collater(object):
         ref_lengths = torch.zeros(batch_size).long()
         output_lengths = torch.zeros(batch_size).long()
         ref_mels = torch.zeros((batch_size, nmels, self.max_mel_length)).float()
-        ref_labels = torch.zeros((batch_size)).long()
+        # ref_labels = torch.zeros((batch_size)).long()
         paths = ['' for _ in range(batch_size)]
         waves = [None for _ in range(batch_size)]
 
-        for bid, (label, mel, text, ref_text, ref_mel, ref_label, path, wave) in enumerate(batch):
+        # Rearrange batch data according to mel length
+        for bid, (label, mel, text, ref_text, ref_mel, _, path, wave) in enumerate(batch):
             mel_size = mel.size(1)
             text_size = text.size(0)
             rtext_size = ref_text.size(0)
@@ -226,11 +227,19 @@ class Collater(object):
             paths[bid] = path
             ref_mel_size = ref_mel.size(1)
             ref_mels[bid, :, :ref_mel_size] = ref_mel
-
-            ref_labels[bid] = ref_label
             waves[bid] = wave
+            # ref_labels[bid] = ref_label
 
-        return waves, texts, input_lengths, ref_texts, ref_lengths, mels, output_lengths, ref_mels
+        return (
+            waves,          # raw waveforms
+            texts,          # input phoneme IDs
+            input_lengths,  # input phoneme lengths
+            ref_texts,      # OOD text phoneme IDs
+            ref_lengths,    # OOD texts phoneme lengths
+            mels,           # mel spectrograms
+            output_lengths, # mel spectrogram lengths
+            ref_mels        # given speaker reference melspectrograms
+        )
 
 
 
