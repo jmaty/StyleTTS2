@@ -47,26 +47,23 @@ class FilePathDataset(torch.utils.data.Dataset):
                  validation=False,
                  OOD_data="Data/OOD_texts.txt",
                  min_length=50,
+                 max_length=512,
                  ):
 
         # spect_params = SPECT_PARAMS     # TODO: not reading from config!?
         # mel_params = MEL_PARAMS         # TODO: not reading from config!?
 
-        # _data_list = [l.strip().split('|') for l in data_list]
-        # self.data_list = [data if len(data) == 3 else (*data, 0) for data in _data_list]
-
         # Read input list of text data lines delimited by "|" and ignore too long lines
         self.data_list = []  # Initialize the list for processed data
-        # Iterate over each line in the data_list
         for l in data_list:
             data = l.strip().split('|')  # Remove leading/trailing whitespaces and split the string
             # Ensure data has at least two elements
             assert len(data) in (2, 3), f"Invalid data format, 2-3 elements expected: {l}"
-            # Check if the length of data[1] exceeds 512 characters
-            if len(data[1]) > 512:
+            # Check if the length of data[1] exceeds `max_length` characters (typically 512)
+            if len(data[1]) > max_length:
                 logger.warning(
-                    "Skipping %s: phoneme length %d > 512\n%s",
-                    data[0], len(data[1]), data[1]
+                    "Skipping %s: phoneme length %d > %d\n%s",
+                    data[0], len(data[1]), data[1], max_length
                 )
                 continue  # Skip this item
             self.data_list.append(data if len(data) == 3 else data + ['0'])
@@ -86,10 +83,20 @@ class FilePathDataset(torch.utils.data.Dataset):
         # Load OOD texts from the specified file
         with open(OOD_data, 'r', encoding='utf-8') as f:
             tl = f.readlines()
+        # Extract the index of text part (either 0 or 1) based on if
+        # the first element contains '.wav'
         idx = 1 if '.wav' in tl[0].split('|')[0] else 0
-        self.ptexts = [t.split('|')[idx] for t in tl]
+        # Read the text parts from the lines and filter out lines
+        # with text length not in `<min_length, max_length>`)
+        # (to avoid incompatibility with ALBERT's input size and ensure minimum length)
+        self.ptexts = [
+            parts[idx] for t in tl
+            if (parts := t.split('|'))
+            and (length := len(parts[idx])) <= max_length
+            and length >= min_length
+        ]
 
-        # Set tup path to waveform directory
+        # Set up path to waveform directory
         self.root_path = root_path
 
     def __len__(self):
@@ -97,7 +104,7 @@ class FilePathDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         data = self.data_list[idx]  # [wavfile, phonetic_string, speaker_id]
-        path = data[0]
+        # path = data[0]
 
         wave, text_tensor, speaker_id = self._load_tensor(data)
         # text_tensor is a list of phoneme IDs corresponding to the input phonetic string
@@ -113,20 +120,21 @@ class FilePathDataset(torch.utils.data.Dataset):
         ref_data = (self.df[self.df[2] == str(speaker_id)]).sample(n=1).iloc[0].tolist()
         ref_mel_tensor, ref_label = self._load_data(ref_data[:3]) # ref_label is speaker ID
 
-        # Get OOD text
-        ps = ""
         # Randomly select a phonetic sentence from the OOD texts
-        # until it meets the minimum length requirement
-        while len(ps) < self.min_length:
-            rand_idx = np.random.randint(0, len(self.ptexts) - 1)
-            ps = self.ptexts[rand_idx]  # random phonetic sentence from OOD texts
+        ps = self.ptexts[np.random.randint(0, len(self.ptexts) - 1)]
+        # Encode phonetic string as a list of phoneme IDs with padding
+        ref_text = [0] + self.text_cleaner(ps) + [0]
 
-        # Encode phonetic string as a list of phoneme IDs
-        ref_text = self.text_cleaner(ps)
-        ref_text.insert(0, 0)   # 0 means phoneme ID of pad symbol
-        ref_text.append(0)
-
-        return speaker_id, acoustic_feature, text_tensor, torch.LongTensor(ref_text), ref_mel_tensor, ref_label, path, wave
+        return (
+            speaker_id,                 # speaker ID
+            acoustic_feature,           # mel vector
+            text_tensor,                # phoneme IDs of input text
+            torch.LongTensor(ref_text), # phoneme IDs of OOD text
+            ref_mel_tensor,             # reference mel vector of the given speaker
+            ref_label,                  # reference speaker ID
+            data[0],                    # wavfile
+            wave                        # raw waveform
+        )
 
     def _load_tensor(self, data):
         wave_path, text, speaker_id = data
@@ -142,13 +150,14 @@ class FilePathDataset(torch.utils.data.Dataset):
         # Add padding to the waveform (200ms silence at both ends)
         wave = np.concatenate([np.zeros([4800]), wave, np.zeros([4800])], axis=0)
 
-        # Encode phonetic string as a list of phoneme IDs
-        text = self.text_cleaner(text)
-        # Pad the phoneme ID sequence with pad ID symbols (0)
-        text.insert(0, 0)
-        text.append(0)
+        # Encode phonetic string as a list of phoneme IDs with padding
+        text = [0] + self.text_cleaner(text) + [0]
 
-        return wave, torch.LongTensor(text), int(speaker_id)
+        return (
+            wave,                   # raw waveform
+            torch.LongTensor(text), # phoneme IDs of input text
+            int(speaker_id)         # speaker ID
+        )
 
     def _load_data(self, data):
         wave, _, speaker_id = self._load_tensor(data)
@@ -231,6 +240,7 @@ def build_dataloader(path_list,
                      validation=False,
                      OOD_data="Data/OOD_texts.txt",
                      min_length=50,
+                     max_length=512,
                      batch_size=4,
                      num_workers=1,
                      device='cpu',
@@ -247,6 +257,7 @@ def build_dataloader(path_list,
         text_cleaner,
         OOD_data=OOD_data,
         min_length=min_length,
+        max_length=max_length,
         validation=validation,
         **dataset_config,
     )
