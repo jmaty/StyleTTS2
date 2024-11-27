@@ -770,158 +770,17 @@ def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_module
 
     return model, optimizer, epoch, iters
 
-# def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_modules=None, n_gpus=1):
-#     # Modified to deal with inconsistent key names between first and second training stages
-#     # => see https://github.com/yl4579/StyleTTS2/issues/254,
-#     # https://github.com/yl4579/StyleTTS2/issues/21#issue-1962579727
-#     # https://github.com/pytorch/pytorch/issues/9176#issuecomment-403570715
-#     if ignore_modules is None:
-#         ignore_modules = []
-#     state = torch.load(path, map_location='cpu')
-#     params = state['net']
-#     for key in model:
-#         if key in params and key not in ignore_modules:
-#             print(f'{key} loaded')
-#             try:
-#                 model[key].load_state_dict(params[key], strict=True)
-#             except RuntimeError:    # DataParallel module. mismatch
-#                 state_dict = params[key]
-#                 new_state_dict = OrderedDict()
-#                 # print(f'{key} key length: {len(model[key].state_dict().keys())}, state_dict length: {len(state_dict.keys())}')
-#                 for (k_m, v_m), (k_c, v_c) in zip(model[key].state_dict().items(), state_dict.items()):
-#                     print(f'{k_c} vs. {k_m}')
-#                     # For single-GPU training: remove "module."
-#                     if n_gpus == 1 and k_c.startswith("module."):
-#                         k_m = k_c[7:]
-#                     elif not k_c.startswith("module.") and not k_m.startswith("module."):
-#                         k_m = 'module.' + k_m
-#                     new_state_dict[k_m] = v_c
-#                     print(f'  => {k_c} => {k_m}')
-#                 model[key].load_state_dict(new_state_dict, strict=False)
-#     _ = [model[key].eval() for key in model]
-
-#     if not load_only_params:
-#         # advance start epoch or we'd re-train and rewrite the last epoch file
-#         epoch = state["epoch"] + 1
-#         iters = state["iters"]
-#         optimizer.load_state_dict(state["optimizer"])
-#     else:
-#         epoch = 0
-#         iters = 0
-
-#     return model, optimizer, epoch, iters
-
-# def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_modules=[]):
-#     state = torch.load(path, map_location='cpu')
-#     params = state['net']
-#     for key in model:
-#         new_state_dict = OrderedDict()
-#         for k, v in params[key].items():
-#             name = 'module.' + k # add `module.`
-#             new_state_dict[name] = v
-
-#         if key in ['mpd', 'msd', 'wd']:
-#             new_state_dict = params[key]
-
-#         if key in params and key not in ignore_modules:
-#             print('%s loaded' % key)
-#             #model[key].load_state_dict(params[key])
-#             model[key].load_state_dict(new_state_dict)
-
-#     _ = [model[key].eval() for key in model]
-
-#     if not load_only_params:
-#         # advance start epoch or we'd re-train and rewrite the last epoch file
-#         epoch = state["epoch"] + 1
-#         iters = state["iters"]
-#         optimizer.load_state_dict(state["optimizer"])
-#     else:
-#         epoch = 0
-#         iters = 0
-
-#     return model, optimizer, epoch, iters
-
-
-# # JMa: Save model and delete old models
-# def save_checkpoint0(model_state, stage, epoch, save_dir, max_saved_models=None):
-#     if not os.path.exists(save_dir):
-#         os.makedirs(save_dir)
-
-#     # Save the model
-#     filename = f"epoch_{stage}_{epoch:05d}.pth"
-#     filepath = os.path.join(save_dir, filename)
-#     torch.save(model_state, filepath)
-#     print(f"New model saved to {filepath}")
-
-#     if max_saved_models:
-#         # Get list of all saved models and sort by epoch number
-#         saved_models = sorted(
-#             [f for f in os.listdir(save_dir) if f.startswith(f"epoch_{stage}") and f.endswith(".pth")],
-#             key=lambda x: int(x.split('_')[2].split('.')[0])
-#         )
-
-#         # Remove old models if exceeding max_saved_models
-#         while len(saved_models) > max_saved_models:
-#             old_model = saved_models.pop(0)
-#             os.remove(os.path.join(save_dir, old_model))
-#             print(f"Old model {old_model} removed")
-
-
-# # JMa: Save model and delete old models
-# def save_checkpoint2(model, optimizer, stage, epoch, iters, loss, save_dir, max_saved_models=None):
-#     if not os.path.exists(save_dir):
-#         os.makedirs(save_dir)
-
-#     # Net
-#     net_dict = {}
-#     for k in model:
-#         try:    # DP/DDP trick
-#             net_dict[k] = model[k].module.state_dict()
-#         except AttributeError:
-#             net_dict[k] = model[k].state_dict()
-
-#     # Prepare model state for saving
-#     state_dict = {
-#         'net': net_dict, 
-#         'optimizer': optimizer.state_dict(),
-#         'iters': iters,
-#         'val_loss': loss,
-#         'epoch': epoch,
-#     }
-
-#     # Save the model
-#     filename = f"epoch_{stage}_{epoch:05d}.pth"
-#     filepath = os.path.join(save_dir, filename)
-#     torch.save(state_dict, filepath)
-#     print(f"New model saved to {filepath}")
-
-#     if max_saved_models:
-#         # Get list of all saved models and sort by epoch number
-#         saved_models = sorted(
-#             [f for f in os.listdir(save_dir) if f.startswith(f"epoch_{stage}") and f.endswith(".pth")],
-#             key=lambda x: int(x.split('_')[2].split('.')[0])
-#         )
-
-#         # Remove old models if exceeding max_saved_models
-#         while len(saved_models) > max_saved_models:
-#             old_model = saved_models.pop(0)
-#             os.remove(os.path.join(save_dir, old_model))
-#             print(f"Old model {old_model} removed")
-
-
 # JMa: Save model and delete old models
-# def save_checkpoint(model, optimizer, stage, epoch, iters, loss, save_dir, max_saved_models=None):
-def save_checkpoint(model, optimizer, epoch, iters, loss, basename, save_dir, max_saved_models=None):
+def save_checkpoint(model,
+                    optimizer,
+                    epoch,
+                    iters,
+                    loss,
+                    basename,
+                    save_dir,
+                    max_saved_models=None):
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
-
-    # # Net
-    # net_dict = {}
-    # for k in model:
-    #     try:    # DP/DDP trick
-    #         net_dict[k] = model[k].module.state_dict()
-    #     except AttributeError:
-    #         net_dict[k] = model[k].state_dict()
 
     # Prepare model state for saving
     state_dict = {
