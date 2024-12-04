@@ -11,7 +11,6 @@ from nltk.tokenize import word_tokenize
 
 from Modules.diffusion.sampler import (ADPM2Sampler, DiffusionSampler,
                                        KarrasSchedule)
-from text_utils import TextCleaner
 
 
 def maximum_path(neg_cent, mask):

@@ -10,8 +10,9 @@ import soundfile as sf
 import torch
 import torch.nn.functional as F
 import torchaudio
-from torch import nn
 from torch.utils.data import DataLoader
+
+from text_utils import add_spaces_around_punctuation
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -66,6 +67,7 @@ class FilePathDataset(torch.utils.data.Dataset):
                     data[0], len(data[1]), data[1], max_length
                 )
                 continue  # Skip this item
+            data[1] = add_spaces_around_punctuation(data[1])
             self.data_list.append(data if len(data) == 3 else data + ['0'])
 
         self.text_cleaner = text_cleaner
@@ -90,7 +92,7 @@ class FilePathDataset(torch.utils.data.Dataset):
         # with text length not in `<min_length, max_length>`)
         # (to avoid incompatibility with ALBERT's input size and ensure minimum length)
         self.ptexts = [
-            parts[idx] for t in tl
+            add_spaces_around_punctuation(parts[idx]) for t in tl
             if (parts := t.split('|'))
             and (length := len(parts[idx])) <= max_length
             and length >= min_length
@@ -104,7 +106,6 @@ class FilePathDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         data = self.data_list[idx]  # [wavfile, phonetic_string, speaker_id]
-        # path = data[0]
 
         wave, text_tensor, speaker_id = self._load_tensor(data)
         # text_tensor is a list of phoneme IDs corresponding to the input phonetic string

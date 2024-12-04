@@ -95,7 +95,7 @@ fi
 
 # Set the log dir according to the input experiment directory
 # (the original log dir in the config file serves just as a placeholder)
-sed -i '/^log_dir:/c\log_dir: $EXPDIR' $CFG
+sed -i "/^log_dir:/c\log_dir: $EXPDIR" $CFG
 
 # -----------------------------------------------------------------------------
 # RUN TRAINING

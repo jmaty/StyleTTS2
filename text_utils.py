@@ -1,4 +1,5 @@
 import csv
+import re
 
 class TextCleaner:
     """
@@ -14,8 +15,8 @@ class TextCleaner:
         # Load symbol encodin dict
         self._symbols = symbols if isinstance(symbols, dict) else load_symbol_dict(symbols)
         self._pad = pad
-        assert len(self) == 81, f'Number of symbols must be 81 but it is {len(self)}'
-        assert pad in symbols, f'Pad symbol ({pad}) is not included in symbols!'
+        # assert len(self) == 81, f'Number of symbols must be 81 but it is {len(self)}'
+        assert pad in self._symbols, f'Pad symbol ({pad}) is not included in symbols!'
 
     def __call__(self, text):
         indexes = []
@@ -24,7 +25,7 @@ class TextCleaner:
                 indexes.append(self._symbols[c])
             except KeyError:
                 # JMa:
-                print(f'[!] Character  {c} not defined!\n    Utterance: {text}')
+                print(f'[!] Character  "{c}" not defined!\n    Utterance: {text}')
         return indexes
 
     def declean(self, indexes):
@@ -75,3 +76,10 @@ def load_symbol_dict(fpath):
         reader = csv.reader(f, delimiter=',', quotechar='"')
         symbol_dict = {row[0]: int(row[1]) for row in reader}
     return symbol_dict
+
+def add_spaces_around_punctuation(text):
+    # Add a space before punctuation if it is not already preceded by a space
+    text = re.sub(r'(?<! )([.,!?;:])', r' \1', text)
+    # Add a space after punctuation if it is not already followed by a space
+    text = re.sub(r'([.,!?;:])(?! )', r'\1 ', text)
+    return text.strip()

@@ -1,3 +1,4 @@
+import argparse
 import logging
 import os
 import os.path as osp
@@ -5,11 +6,10 @@ import random
 import shutil
 import time
 import warnings
-import numpy as np
-import scipy
-import nvidia_smi
 
-import argparse
+import scipy
+import numpy as np
+import nvidia_smi
 import torch
 import torch.nn.functional as F
 import yaml
@@ -19,15 +19,16 @@ from monotonic_align import mask_from_lens
 from munch import Munch
 from torch.utils.tensorboard import SummaryWriter
 
-from text_utils import TextCleaner
-from losses import GeneratorLoss, WavLMLoss, DiscriminatorLoss, MultiResolutionSTFTLoss
+from losses import (DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss,
+                    WavLMLoss)
 from meldataset import build_dataloader
-from models import load_ASR_models, load_F0_models, build_model, load_checkpoint, save_checkpoint
+from models import (build_model, load_ASR_models, load_checkpoint,
+                    load_F0_models, save_checkpoint)
 from optimizers import build_optimizer
+from text_utils import TextCleaner
 from utils import (get_data_path_list, get_image, length_to_mask, log_norm,
-                   log_print, maximum_path, recursive_munch,
-                   synth_test_files)
-from Utils.PLBERT_cs.util import load_plbert
+                   log_print, maximum_path, recursive_munch)
+from Utils.PLBERT.util import load_plbert
 
 warnings.simplefilter('ignore')
 
@@ -46,7 +47,7 @@ def main():
     log_dir = config['log_dir']
     if not osp.exists(log_dir):
         os.makedirs(log_dir, exist_ok=True)
-    shutil.copy(args.config_path, osp.join(log_dir, osp.basename(args.config_path)))
+    # shutil.copy(args.config_path, osp.join(log_dir, osp.basename(args.config_path)))
     writer = None
 
     # Distrinuted computing
@@ -78,18 +79,18 @@ def main():
     min_length = data_params['min_length']
     ood_data = data_params['OOD_data']
     save_val_audio = data_params.get('save_val_audio', False)
-    save_test_audio = data_params.get('save_test_audio', False)
-    test_sentences = data_params.get('test_sentences', [])
-    test_audio_dir = os.path.join(config['log_dir'], config['data_params'].get('test_audio_dir', 'test_audios'))
+    n_val_audios = config['data_params'].get('n_val_audios', 3)
+    save_test_audio = False
+    test_audio_dir = os.path.join(
+        config['log_dir'],
+        config['data_params'].get('test_audio_dir', 'test_audios')
+    )
 
     max_len = config.get('max_len', 200)
 
-    text_cleaner = TextCleaner(
-        pad=data_params['pad'],
-        punctuation=data_params['punctuation'],
-        letters=data_params['letters'],
-        ipa_phones=data_params['ipa_phones'],
-    )
+    text_cleaner = TextCleaner(data_params['symbol_dict_path'], pad=data_params['pad'])
+    print(f'Number of symbols: {len(text_cleaner)}')
+    assert len(text_cleaner) == 81, f'Number of symbols must be 81 but it is {len(text_cleaner)}'
 
     # Init NVLM
     nvidia_smi.nvmlInit()
@@ -104,26 +105,30 @@ def main():
     # load data
     train_list, val_list = get_data_path_list(train_path, val_path)
 
-    train_dataloader = build_dataloader(train_list,
-                                        root_path,
-                                        text_cleaner=text_cleaner,
-                                        OOD_data=ood_data,
-                                        min_length=min_length,
-                                        batch_size=batch_size,
-                                        num_workers=2,
-                                        dataset_config={},
-                                        device=device)
+    train_dataloader = build_dataloader(
+        train_list,
+        root_path,
+        text_cleaner=text_cleaner,
+        OOD_data=ood_data,
+        min_length=min_length,
+        max_length=512,
+        batch_size=batch_size,
+        num_workers=args.num_workers,
+        device=device
+    )
 
-    val_dataloader = build_dataloader(val_list,
-                                      root_path,
-                                      text_cleaner=text_cleaner,
-                                      OOD_data=ood_data,
-                                      min_length=min_length,
-                                      batch_size=batch_size,
-                                      validation=True,
-                                      num_workers=0,
-                                      device=device,
-                                      dataset_config={})
+    val_dataloader = build_dataloader(
+        val_list,
+        root_path,
+        text_cleaner=text_cleaner,
+        OOD_data=ood_data,
+        min_length=min_length,
+        max_length=512,
+        batch_size=batch_size,
+        validation=True,
+        num_workers=0,
+        device=device
+    )
 
     with accelerator.main_process_first():
         # load pretrained ASR model
@@ -500,7 +505,7 @@ def main():
                                                    rate=config['preprocess_params']['sr'],
                                                    data=wav)
                     # Use up to 6 validation samples
-                    if idx >= 6:
+                    if idx >= n_val_audios:
                         break
 
             if epoch % saving_epoch == 0:
@@ -517,19 +522,6 @@ def main():
                     log_dir,
                     max_saved_models,
                 )
-
-                # JMa: synthesize test audios
-                if save_test_audio:
-                    synth_test_files(model,
-                                     test_sentences,
-                                     test_audio_dir,
-                                    f'epoch_1st_{epoch:0>5}_test',
-                                    sr,
-                                    text_cleaner=text_cleaner,
-                                    sampler=None,
-                                    diffusion_steps=5,
-                                    embedding_scale=1,
-                                    device=device)
             # Save pre-TMA model
             if save_milestones and epoch == tma_epoch - 1:
                 save_checkpoint(
@@ -555,11 +547,15 @@ def main():
             max_saved_models,
         )
         try:
-            first_stage_symlink = osp.join(log_dir, config.get('first_stage_path', 'first_stage.pth'))
+            first_stage_symlink = osp.join(
+                log_dir,
+                config.get('first_stage_path', 'first_stage.pth')
+            )
             os.symlink(osp.basename(final_filepath), first_stage_symlink)
             print(f'Final first-stage model saved to {final_filepath}')
         except FileExistsError:
-            print(f'Symlink or file {first_stage_symlink} already exists => {final_filepath} was not symlinked!')
+            print(f'Symlink or file {first_stage_symlink} already exists\
+                   => {final_filepath} was not symlinked!')
 
         # Ending work with NVIDIA NVLM
         nvidia_smi.nvmlShutdown()
