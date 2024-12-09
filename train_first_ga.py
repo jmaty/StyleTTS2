@@ -504,8 +504,8 @@ def main():
                             scipy.io.wavfile.write(filename=os.path.join(test_audio_dir, out_file),
                                                    rate=config['preprocess_params']['sr'],
                                                    data=wav)
-                    # Use up to 6 validation samples
-                    if idx >= n_val_audios:
+                    # Use up to the defined number of validation samples
+                    if idx+1 >= n_val_audios:
                         break
 
             if epoch % saving_epoch == 0:
