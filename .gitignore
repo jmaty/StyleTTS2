@@ -15,6 +15,7 @@ monotonic_align/monotonic_align
 Configs
 Data
 Models
+Exps
 output_logs
 output_notebooks
 *.wav

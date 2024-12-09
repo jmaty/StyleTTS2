@@ -122,14 +122,9 @@ def main():
 
     optimizer_params = Munch(config['optimizer_params'])
 
-    text_cleaner = TextCleaner(
-        pad=data_params['pad'],
-        punctuation=data_params['punctuation'],
-        letters=data_params['letters'],
-        ipa_phones=data_params['ipa_phones'],
-    )
+    text_cleaner = TextCleaner(data_params['symbol_dict_path'], pad=data_params['pad'])
     print(f'Number of symbols: {len(text_cleaner)}')
-    assert len(text_cleaner) == 178, f'Number of symbols must be 178 but it is {len(text_cleaner)}'
+    assert len(text_cleaner) == 81, f'Number of symbols must be 81 but it is {len(text_cleaner)}'
 
     # Load data & dataloaders
     train_list, val_list = get_data_path_list(train_path, val_path)

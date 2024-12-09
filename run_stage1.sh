@@ -100,8 +100,8 @@ sed -i "/^log_dir:/c\log_dir: $EXPDIR" $CFG
 # -----------------------------------------------------------------------------
 # RUN TRAINING
 # -----------------------------------------------------------------------------
-OLOG=$EXPDIR/$EXP/log.txt
-ONTB=$EXPDIR/$EXP/$(basename "$INTB" .ipynb).processed.ipynb
+OLOG=$EXPDIR/log.txt
+ONTB=$EXPDIR/$(basename "$INTB" .ipynb).processed.ipynb
 
 # Run PBS script
 qsub -N "$EXP" \
