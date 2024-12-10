@@ -1,30 +1,27 @@
-log_dir: "Checkpoint"
-mixed_precision: "fp16"
-data_folder: "wikipedia_20220301.en.processed"
-batch_size: 192
-save_interval: 5000
-log_interval: 10
-num_process: 1 # number of GPUs
-num_steps: 1000000
-
+batch_size: 24
+data_folder: /scratch.ssd/jmatouse/job_6963757.pbs-m1.metacentrum.cz/cz-wikipedia.processed
 dataset_params:
-    tokenizer: "transfo-xl-wt103"
-    token_separator: " " # token used for phoneme separator (space)
-    token_mask: "M" # token used for phoneme mask (M)
-    word_separator: 3039 # token used for word separator (<formula>)
-    token_maps: "token_maps.pkl" # token map path
-    
-    max_mel_length: 512 # max phoneme length
-    
-    word_mask_prob: 0.15 # probability to mask the entire word
-    phoneme_mask_prob: 0.1 # probability to mask each phoneme
-    replace_prob: 0.2 # probablity to replace phonemes
-    
+  max_mel_length: 512
+  phoneme_mask_prob: 0.1
+  replace_prob: 0.2
+  symbol_dict_path: symbol_dict.csv
+  token_maps: token_maps.pkl
+  token_mask: M
+  token_separator: ' '
+  tokenizer: fav-kky/FERNET-C5
+  word_mask_prob: 0.15
+  word_separator: 18065
+log_dir: models/cs-wikipedia
+log_interval: 10
+mixed_precision: fp16
 model_params:
-    vocab_size: 178
-    hidden_size: 768
-    num_attention_heads: 12
-    intermediate_size: 2048
-    max_position_embeddings: 512
-    num_hidden_layers: 12
-    dropout: 0.1
+  dropout: 0.1
+  hidden_size: 768
+  intermediate_size: 2048
+  max_position_embeddings: 512
+  num_attention_heads: 12
+  num_hidden_layers: 12
+  vocab_size: 81
+num_process: 1
+num_steps: 8000000
+save_interval: 50000

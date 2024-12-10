@@ -1,16 +1,15 @@
-log_dir: "logs/20201006"
-save_freq: 5
-device: "cuda"
-epochs: 180
-batch_size: 64
-pretrained_model: ""
-train_data: "ASRDataset/train_list.txt"
-val_data: "ASRDataset/val_list.txt"
-
-dataset_params:
-  data_augmentation: false
-
-preprocess_parasm:
+log_dir: checkpoints
+save_freq: 1
+device: cuda
+epochs: 200
+batch_size: 256
+pretrained_model: ''
+train_data: 
+  /scratch.ssd/jmatouse/job_5359740.pbs-m1.metacentrum.cz/data/train_SPT-MGW.processed.csv
+val_data: 
+  /scratch.ssd/jmatouse/job_5359740.pbs-m1.metacentrum.cz/data/val_SPT-MGW.processed.csv
+show_progress: false
+preprocess_params:
   sr: 24000
   spect_params:
     n_fft: 2048
@@ -18,12 +17,10 @@ preprocess_parasm:
     hop_length: 300
   mel_params:
     n_mels: 80
-
 model_params:
-   input_dim: 80
-   hidden_dim: 256
-   n_token: 178
-   token_embedding_dim: 512
-
+  input_dim: 80
+  hidden_dim: 256
+  n_token: 81
+  token_embedding_dim: 256
 optimizer_params:
   lr: 0.0005
