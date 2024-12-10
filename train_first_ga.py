@@ -3,7 +3,6 @@ import logging
 import os
 import os.path as osp
 import random
-import shutil
 import time
 import warnings
 
@@ -47,7 +46,6 @@ def main():
     log_dir = config['log_dir']
     if not osp.exists(log_dir):
         os.makedirs(log_dir, exist_ok=True)
-    # shutil.copy(args.config_path, osp.join(log_dir, osp.basename(args.config_path)))
     writer = None
 
     # Distrinuted computing
