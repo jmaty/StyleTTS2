@@ -62,6 +62,10 @@ class TextCleaner:
     def pad(self):
         return self._pad, self._symbols[self._pad]
 
+    @property
+    def blank(self):
+        return " ", self._symbols[" "]
+
 
 def load_symbol_dict(fpath):
     """Load symbol dict from a text file
@@ -78,6 +82,14 @@ def load_symbol_dict(fpath):
     return symbol_dict
 
 def add_spaces_around_punctuation(text):
+    """_summary_
+
+    Args:
+        text (str): phonetic string
+
+    Returns:
+        str: phonetic string with non-initial and non-final punctution surrounded by spaces
+    """
     # Add a space before punctuation if it is not already preceded by a space
     text = re.sub(r'(?<! )([.,!?;:])', r' \1', text)
     # Add a space after punctuation if it is not already followed by a space
