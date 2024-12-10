@@ -19,3 +19,5 @@ Exps
 output_logs
 output_notebooks
 *.wav
+*.pth
+*.t7
