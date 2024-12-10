@@ -246,9 +246,16 @@ def main():
             s2s_attn = s2s_attn.transpose(-1, -2)
 
             with torch.no_grad():
-                attn_mask = (~mask).unsqueeze(-1).expand(mask.shape[0], mask.shape[1], text_mask.shape[-1]).float().transpose(-1, -2)
-                attn_mask = attn_mask.float() * (~text_mask).unsqueeze(-1).expand(text_mask.shape[0], text_mask.shape[1], mask.shape[-1]).float()
-                attn_mask = (attn_mask < 1)
+                attn_mask = (~mask).unsqueeze(-1).expand(
+                    mask.shape[0],
+                    mask.shape[1],
+                    text_mask.shape[-1]
+                ).float().transpose(-1, -2)
+                attn_mask = attn_mask.float() * (~text_mask).unsqueeze(-1).expand(
+                    text_mask.shape[0],
+                    text_mask.shape[1], mask.shape[-1]
+                ).float()
+                attn_mask = attn_mask < 1
 
             s2s_attn.masked_fill_(attn_mask, 0.0)
 
@@ -328,7 +335,10 @@ def main():
             if epoch >= tma_epoch: # start TMA training
                 loss_s2s = 0
                 for _s2s_pred, _text_input, _text_length in zip(s2s_pred, texts, input_lengths):
-                    loss_s2s += F.cross_entropy(_s2s_pred[:_text_length], _text_input[:_text_length])
+                    loss_s2s += F.cross_entropy(
+                        _s2s_pred[:_text_length],
+                        _text_input[:_text_length]
+                    )
                 loss_s2s /= texts.size(0)
 
                 loss_mono = F.l1_loss(s2s_attn, s2s_attn_mono) * 10
@@ -348,7 +358,7 @@ def main():
                 loss_gen_all = 0
                 loss_slm = 0
                 g_loss = loss_mel
-            
+ 
             g_loss = g_loss / grad_accum_steps  # JMa: normalize loss
             # JMa: Compute gradients only for generator
             inputs = list(model.decoder.parameters()) + \
@@ -379,7 +389,7 @@ def main():
                     # https://github.com/yl4579/StyleTTS2/issues/10#issuecomment-1783701686
                     # optimizer.step('pitch_extractor')
                     # optimizer.zero_grad('text_aligner')
-                
+
                 # Zero all gradients
                 optimizer.zero_grad()
 

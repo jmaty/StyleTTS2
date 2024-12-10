@@ -32,7 +32,7 @@ from Modules.slmadv import SLMAdversarialLoss
 from optimizers import build_optimizer
 from utils import (get_data_path_list, length_to_mask, log_norm,
                    maximum_path, recursive_munch, synth_test_files)
-from Utils.PLBERT_cs.util import load_plbert
+from Utils.PLBERT.util import load_plbert
 
 warnings.simplefilter('ignore')
 
