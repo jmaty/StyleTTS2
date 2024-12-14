@@ -11,7 +11,7 @@ SPEC="gpu3"
 RUNS=1
 HOURS=24
 MODELS=""
-INTB=Train_first_ga.ipynb
+INTB=Train_second.ipynb
 # QSUB ARGUMENTS
 MEM=64gb
 LSCRATCH=20gb
@@ -79,17 +79,20 @@ SELECT="-l select=1:ncpus=$NCPUS:mem=$MEM:scratch_local=$LSCRATCH:ngpus=$NGPUS$C
 WALLTIME="-l walltime=$HOURS:00:00"
 
 # Extract name of the experiment
-EXP=$(basename $EXPDIR)
+EXP="$(basename $EXPDIR)_stage2"
 
-# # Timestep to differentiate among runs with the same run name
-# TIMESTEP=$(date +"%y%m%d_%H%M%S")
+# Timestep to differentiate among runs with the same run name
+TIMESTEP=$(date +"%y%m%d-%H%M%S")
 
 SINGULARITY=/storage/plzen4-ntis/home/jmatouse/singularity/papermill_23.12-latest.sh
 
 # Check that config file exists
-CFG=$EXPDIR/config1.yml
-if [[ ! -e $CFG ]]; then
-     echo "Config file $CFG does not exists!"
+if [[ -f "$EXPDIR/config2.processed.yml" ]]; then
+    CFG=$EXPDIR/config2.processed.yml
+elif [[ -f "$EXPDIR/config2.yml" ]]; then
+    CFG=$EXPDIR/config2.yml
+else
+     echo "Config file does not exists!"
      exit 1
 fi
 
@@ -100,8 +103,8 @@ sed -i "/^log_dir:/c\log_dir: $EXPDIR" $CFG
 # -----------------------------------------------------------------------------
 # RUN TRAINING
 # -----------------------------------------------------------------------------
-OLOG=$EXPDIR/log.txt
-ONTB=$EXPDIR/$(basename "$INTB" .ipynb).processed.ipynb
+OLOG=$EXPDIR/log.$TIMESTEP.txt
+ONTB=$EXPDIR/$(basename "$INTB" .ipynb).processed.$TIMESTEP.ipynb
 
 # Run PBS script
 qsub -N "$EXP" \
