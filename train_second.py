@@ -67,6 +67,7 @@ def main():
 
     with open(args.config_path, encoding="utf-8") as fr:
         config = yaml.safe_load(fr)
+    cfg_name, cfg_ext = osp.splitext(osp.basename(args.config_path))
 
     log_dir = config["log_dir"]
     writer = SummaryWriter(log_dir + "/tensorboard")
@@ -558,8 +559,10 @@ def main():
             if torch.isnan(g_loss):
                 set_trace()
 
+            # Po zakomentování průběžné validation wavy nešumí!
             optimizer.step("bert_encoder")
             optimizer.step("bert")
+
             optimizer.step("predictor")
             optimizer.step("predictor_encoder")
 
@@ -922,8 +925,8 @@ def main():
                             )
                         writer.add_audio(f"gt/y{idx}", wav, epoch, sample_rate=sr)
 
-                    # Use up to 5 validation samples
-                    if idx >= n_val_audios:
+                    # Use up to the given number of  validation samples
+                    if idx + 1 >= n_val_audios:
                         break
         else:
             # generating sampled speech from text directly
@@ -998,7 +1001,7 @@ def main():
                             filename=os.path.join(test_audio_dir, out_file), rate=sr, data=wav
                         )
                     # Use up to the defined number validation samples
-                    if idx >= n_val_audios:
+                    if idx + 1 >= n_val_audios:
                         break
 
         # Save progress
@@ -1016,8 +1019,7 @@ def main():
                     np.mean(running_std)
                 )
 
-                cfg_name, ext = osp.splitext(osp.basename(args.config_path))
-                cfg_path = osp.join(log_dir, f"{cfg_name}_processed{ext}")
+                cfg_path = osp.join(log_dir, f"{cfg_name}.processed{cfg_ext}")
                 with open(cfg_path, "w", encoding="utf-8") as outfile:
                     yaml.dump(config, outfile, default_flow_style=True)
 
@@ -1083,8 +1085,7 @@ def main():
     if model_params.diffusion.dist.estimate_sigma_data:
         config["model_params"]["diffusion"]["dist"]["sigma_data"] = float(np.mean(running_std))
 
-        cfg_name, ext = osp.splitext(osp.basename(args.config_path))
-        cfg_path = osp.join(log_dir, f"{cfg_name}_processed{ext}")
+        cfg_path = osp.join(log_dir, f"{cfg_name}.processed{cfg_ext}")
         with open(cfg_path, "w", encoding="utf-8") as outfile:
             yaml.dump(config, outfile, default_flow_style=True)
 
