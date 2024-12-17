@@ -1,11 +1,13 @@
 import csv
 import re
 
+
 class TextCleaner:
     """
     Class for handling with phonemes as tokens
     """
-    def __init__(self, symbols, pad='_'):
+
+    def __init__(self, symbols, pad="_"):
         """Init
 
         Args:
@@ -16,7 +18,7 @@ class TextCleaner:
         self._symbols = symbols if isinstance(symbols, dict) else load_symbol_dict(symbols)
         self._pad = pad
         # assert len(self) == 81, f'Number of symbols must be 81 but it is {len(self)}'
-        assert pad in self._symbols, f'Pad symbol ({pad}) is not included in symbols!'
+        assert pad in self._symbols, f"Pad symbol ({pad}) is not included in symbols!"
 
     def __call__(self, text):
         indexes = []
@@ -29,12 +31,12 @@ class TextCleaner:
         return indexes
 
     def declean(self, indexes):
-        return ''.join([self._symbols[i] for i in indexes])
+        return "".join([self._symbols[i] for i in indexes])
 
     def check(self, symbols):
         """
         Checks if every input symbol exists is defined.
-    
+
         Args:
             symbols (str): The input string of characters to be checked.
 
@@ -43,7 +45,7 @@ class TextCleaner:
         """
         # Convert the input string into a set of unique characters
         unique_chars = set(symbols)
-         # Get the set of keys from the dictionary
+        # Get the set of keys from the dictionary
         valid_symbols = set(self._symbols.keys())
         # Check if all unique characters are a subset of the dictionary keys
         return unique_chars.issubset(valid_symbols)
@@ -76,10 +78,11 @@ def load_symbol_dict(fpath):
     Returns:
         dict: symbol dict
     """
-    with open(fpath, 'r', encoding='utf-8') as f:
-        reader = csv.reader(f, delimiter=',', quotechar='"')
+    with open(fpath, "r", encoding="utf-8") as f:
+        reader = csv.reader(f, delimiter=",", quotechar='"')
         symbol_dict = {row[0]: int(row[1]) for row in reader}
     return symbol_dict
+
 
 def add_spaces_around_punctuation(text):
     """_summary_
@@ -91,7 +94,7 @@ def add_spaces_around_punctuation(text):
         str: phonetic string with non-initial and non-final punctution surrounded by spaces
     """
     # Add a space before punctuation if it is not already preceded by a space
-    text = re.sub(r'(?<! )([.,!?;:])', r' \1', text)
+    text = re.sub(r"(?<! )([.,!?;:])", r" \1", text)
     # Add a space after punctuation if it is not already followed by a space
-    text = re.sub(r'([.,!?;:])(?! )', r'\1 ', text)
+    text = re.sub(r"([.,!?;:])(?! )", r"\1 ", text)
     return text.strip()

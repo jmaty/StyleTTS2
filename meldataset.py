@@ -62,13 +62,13 @@ class FilePathDataset(torch.utils.data.Dataset):
             assert len(data) in (2, 3), f"Invalid data format, 2-3 elements expected: {l}"
             data[1] = add_spaces_around_punctuation(data[1])
             # Check if the length of data[1] exceeds `max_length` characters (typically 512)
-            if len(data[1]) > max_length:
+            if len(data[1]) > max_length - 2:  # -2: padding at the start/end
                 logger.warning(
                     "Skipping %s: phoneme length %d > %d\n%s",
                     data[0],
                     len(data[1]),
+                    max_length - 2,
                     data[1],
-                    max_length,
                 )
                 continue  # Skip this item
             self.data_list.append(data if len(data) == 3 else data + ["0"])
@@ -98,7 +98,7 @@ class FilePathDataset(torch.utils.data.Dataset):
             add_spaces_around_punctuation(parts[idx])
             for t in tl
             if (parts := t.split("|"))
-            and (length := len(parts[idx])) <= max_length
+            and (length := len(parts[idx])) <= max_length - 2  # -2: padding at the start/end
             and length >= min_length
         ]
 
