@@ -30,7 +30,9 @@ def load_plbert(log_dir):
     iters = [int(f.split('_')[-1].split('.')[0]) for f in ckpts if os.path.isfile(os.path.join(log_dir, f))]
     iters = sorted(iters)[-1]
 
-    checkpoint = torch.load(log_dir + "/step_" + str(iters) + ".t7", map_location='cpu')
+    checkpoint_path = log_dir + "/step_" + str(iters) + ".t7"
+    print(f"Loading PL-BERT at {checkpoint_path} ...")
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
     state_dict = checkpoint['net']
     new_state_dict = OrderedDict()
     for k, v in state_dict.items():
