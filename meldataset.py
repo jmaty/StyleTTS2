@@ -1,4 +1,4 @@
-#coding: utf-8
+# coding: utf-8
 import logging
 import os.path as osp
 import random
@@ -19,18 +19,16 @@ logger.setLevel(logging.DEBUG)
 
 np.random.seed(1)
 random.seed(1)
-SPECT_PARAMS = {
-    "n_fft": 2048,
-    "win_length": 1200,
-    "hop_length": 300
-}
+SPECT_PARAMS = {"n_fft": 2048, "win_length": 1200, "hop_length": 300}
 MEL_PARAMS = {
     "n_mels": 80,
 }
 
 to_mel = torchaudio.transforms.MelSpectrogram(
-    n_mels=80, n_fft=2048, win_length=1200, hop_length=300)
+    n_mels=80, n_fft=2048, win_length=1200, hop_length=300
+)
 mean, std = -4, 4
+
 
 def preprocess(wave):
     wave_tensor = torch.from_numpy(wave).float()
@@ -38,18 +36,20 @@ def preprocess(wave):
     mel_tensor = (torch.log(1e-5 + mel_tensor.unsqueeze(0)) - mean) / std
     return mel_tensor
 
+
 class FilePathDataset(torch.utils.data.Dataset):
-    def __init__(self,
-                 data_list,
-                 root_path,
-                 text_cleaner,
-                 sr=24000,
-                 data_augmentation=False,
-                 validation=False,
-                 OOD_data="Data/OOD_texts.txt",
-                 min_length=50,
-                 max_length=512,
-                 ):
+    def __init__(
+        self,
+        data_list,
+        root_path,
+        text_cleaner,
+        sr=24000,
+        data_augmentation=False,
+        validation=False,
+        OOD_data="Data/OOD_texts.txt",
+        min_length=50,
+        max_length=512,
+    ):
 
         # spect_params = SPECT_PARAMS     # TODO: not reading from config!?
         # mel_params = MEL_PARAMS         # TODO: not reading from config!?
@@ -57,18 +57,21 @@ class FilePathDataset(torch.utils.data.Dataset):
         # Read input list of text data lines delimited by "|" and ignore too long lines
         self.data_list = []  # Initialize the list for processed data
         for l in data_list:
-            data = l.strip().split('|')  # Remove leading/trailing whitespaces and split the string
+            data = l.strip().split("|")  # Remove leading/trailing whitespaces and split the string
             # Ensure data has at least two elements
             assert len(data) in (2, 3), f"Invalid data format, 2-3 elements expected: {l}"
+            data[1] = add_spaces_around_punctuation(data[1])
             # Check if the length of data[1] exceeds `max_length` characters (typically 512)
             if len(data[1]) > max_length:
                 logger.warning(
                     "Skipping %s: phoneme length %d > %d\n%s",
-                    data[0], len(data[1]), data[1], max_length
+                    data[0],
+                    len(data[1]),
+                    data[1],
+                    max_length,
                 )
                 continue  # Skip this item
-            data[1] = add_spaces_around_punctuation(data[1])
-            self.data_list.append(data if len(data) == 3 else data + ['0'])
+            self.data_list.append(data if len(data) == 3 else data + ["0"])
 
         self.text_cleaner = text_cleaner
         self.sr = sr
@@ -83,17 +86,18 @@ class FilePathDataset(torch.utils.data.Dataset):
         self.min_length = min_length
 
         # Load OOD texts from the specified file
-        with open(OOD_data, 'r', encoding='utf-8') as f:
+        with open(OOD_data, "r", encoding="utf-8") as f:
             tl = f.readlines()
         # Extract the index of text part (either 0 or 1) based on if
         # the first element contains '.wav'
-        idx = 1 if '.wav' in tl[0].split('|')[0] else 0
+        idx = 1 if ".wav" in tl[0].split("|")[0] else 0
         # Read the text parts from the lines and filter out lines
         # with text length not in `<min_length, max_length>`)
         # (to avoid incompatibility with ALBERT's input size and ensure minimum length)
         self.ptexts = [
-            add_spaces_around_punctuation(parts[idx]) for t in tl
-            if (parts := t.split('|'))
+            add_spaces_around_punctuation(parts[idx])
+            for t in tl
+            if (parts := t.split("|"))
             and (length := len(parts[idx])) <= max_length
             and length >= min_length
         ]
@@ -115,11 +119,11 @@ class FilePathDataset(torch.utils.data.Dataset):
         acoustic_feature = mel_tensor.squeeze()
         length_feature = acoustic_feature.size(1)
         # Ensure feature tensor with even length
-        acoustic_feature = acoustic_feature[:, :(length_feature - length_feature % 2)]
+        acoustic_feature = acoustic_feature[:, : (length_feature - length_feature % 2)]
 
         # get reference sample of max length `self.max_mel_length` (192)
         ref_data = (self.df[self.df[2] == str(speaker_id)]).sample(n=1).iloc[0].tolist()
-        ref_mel_tensor, ref_label = self._load_data(ref_data[:3]) # ref_label is speaker ID
+        ref_mel_tensor, ref_label = self._load_data(ref_data[:3])  # ref_label is speaker ID
 
         # Randomly select a phonetic sentence from the OOD texts
         ps = self.ptexts[np.random.randint(0, len(self.ptexts) - 1)]
@@ -127,14 +131,14 @@ class FilePathDataset(torch.utils.data.Dataset):
         ref_text = [0] + self.text_cleaner(ps) + [0]
 
         return (
-            speaker_id,                 # speaker ID
-            acoustic_feature,           # mel spectrogram of input waveform
-            text_tensor,                # phoneme IDs of input text
-            torch.LongTensor(ref_text), # phoneme IDs of OOD text
-            ref_mel_tensor,             # reference mel vector of the given speaker
-            ref_label,                  # reference speaker ID
-            data[0],                    # wavfile
-            wave                        # raw waveform
+            speaker_id,  # speaker ID
+            acoustic_feature,  # mel spectrogram of input waveform
+            text_tensor,  # phoneme IDs of input text
+            torch.LongTensor(ref_text),  # phoneme IDs of OOD text
+            ref_mel_tensor,  # reference mel vector of the given speaker
+            ref_label,  # reference speaker ID
+            data[0],  # wavfile
+            wave,  # raw waveform
         )
 
     def _load_tensor(self, data):
@@ -144,10 +148,7 @@ class FilePathDataset(torch.utils.data.Dataset):
             wave = wave[:, 0].squeeze()
         if sr != 24000:
             wave = librosa.resample(wave, orig_sr=sr, target_sr=24000)
-            logger.warning(
-                "%s: sampling rate is %d, resampling to 24000",
-                wave_path, sr
-            )
+            logger.warning("%s: sampling rate is %d, resampling to 24000", wave_path, sr)
         # Add padding to the waveform (200ms silence at both ends)
         wave = np.concatenate([np.zeros([4800]), wave, np.zeros([4800])], axis=0)
 
@@ -155,9 +156,9 @@ class FilePathDataset(torch.utils.data.Dataset):
         text = [0] + self.text_cleaner(text) + [0]
 
         return (
-            wave,                   # raw waveform
-            torch.LongTensor(text), # phoneme IDs of input text
-            int(speaker_id)         # speaker ID
+            wave,  # raw waveform
+            torch.LongTensor(text),  # phoneme IDs of input text
+            int(speaker_id),  # speaker ID
         )
 
     def _load_data(self, data):
@@ -168,7 +169,7 @@ class FilePathDataset(torch.utils.data.Dataset):
         if mel_length > self.max_mel_length:
             # Randomly crop a segment of the mel spectrogram with length self.max_mel_length
             random_start = np.random.randint(0, mel_length - self.max_mel_length)
-            mel_tensor = mel_tensor[:, random_start:random_start + self.max_mel_length]
+            mel_tensor = mel_tensor[:, random_start : random_start + self.max_mel_length]
 
         return mel_tensor, speaker_id
 
@@ -184,7 +185,6 @@ class Collater(object):
         self.min_mel_length = 192
         self.max_mel_length = 192
         self.return_wave = return_wave
-
 
     def __call__(self, batch):
         # batch[0] = wave, mel, text, f0, speakerid
@@ -210,7 +210,7 @@ class Collater(object):
         output_lengths = torch.zeros(batch_size).long()
         ref_mels = torch.zeros((batch_size, nmels, self.max_mel_length)).float()
         # ref_labels = torch.zeros((batch_size)).long()
-        paths = ['' for _ in range(batch_size)]
+        paths = ["" for _ in range(batch_size)]
         waves = [None for _ in range(batch_size)]
 
         # Rearrange batch data according to mel length
@@ -232,34 +232,33 @@ class Collater(object):
             # ref_labels[bid] = ref_label
 
         return (
-            waves,          # raw waveforms
-            texts,          # input phoneme IDs
+            waves,  # raw waveforms
+            texts,  # input phoneme IDs
             input_lengths,  # input phoneme lengths
-            ref_texts,      # OOD text phoneme IDs
-            ref_lengths,    # OOD texts phoneme lengths
-            mels,           # mel spectrograms
-            output_lengths, # mel spectrogram lengths
-            ref_mels        # given speaker reference melspectrograms
+            ref_texts,  # OOD text phoneme IDs
+            ref_lengths,  # OOD texts phoneme lengths
+            mels,  # mel spectrograms
+            output_lengths,  # mel spectrogram lengths
+            ref_mels,  # given speaker reference melspectrograms
         )
 
 
-
-def build_dataloader(path_list,
-                     root_path,
-                     text_cleaner,
-                     validation=False,
-                     OOD_data="Data/OOD_texts.txt",
-                     min_length=50,
-                     max_length=512,
-                     batch_size=4,
-                     num_workers=1,
-                     device='cpu',
-                     collate_config=None,
-                     dataset_config=None):
-    if collate_config is None:
-        collate_config = {}
-    if dataset_config is None:
-        dataset_config = {}
+def build_dataloader(
+    path_list,
+    root_path,
+    text_cleaner,
+    validation=False,
+    OOD_data="Data/OOD_texts.txt",
+    min_length=50,
+    max_length=512,
+    batch_size=4,
+    num_workers=1,
+    device="cpu",
+    collate_config=None,
+    dataset_config=None,
+):
+    collate_config = collate_config or {}
+    dataset_config = dataset_config or {}
 
     dataset = FilePathDataset(
         path_list,
@@ -279,7 +278,7 @@ def build_dataloader(path_list,
         num_workers=num_workers,
         drop_last=(not validation),
         collate_fn=collate_fn,
-        pin_memory=(device != 'cpu')
+        pin_memory=(device != "cpu"),
     )
 
     return data_loader

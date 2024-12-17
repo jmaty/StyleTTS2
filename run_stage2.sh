@@ -16,7 +16,7 @@ INTB=Train_second.ipynb
 MEM=64gb
 LSCRATCH=20gb
 NCPUS=8
-NGPUS=2
+NGPUS=1
 
 if [[ "$#" -lt 1 ]]; then
      echo "Usage: run_stage1.sh exp_dir [specification: iti<0-1> dgx gpu<0-3>] [hours]"
@@ -86,7 +86,7 @@ TIMESTEP=$(date +"%y%m%d-%H%M%S")
 
 SINGULARITY=/storage/plzen4-ntis/home/jmatouse/singularity/papermill_23.12-latest.sh
 
-# Check that config file exists
+# Check if config file exists
 if [[ -f "$EXPDIR/config2.processed.yml" ]]; then
     CFG=$EXPDIR/config2.processed.yml
 elif [[ -f "$EXPDIR/config2.yml" ]]; then
