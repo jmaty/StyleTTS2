@@ -85,25 +85,38 @@ class FilePathDataset(torch.utils.data.Dataset):
         self.max_mel_length = 192
         self.min_length = min_length
 
-        # Load OOD texts from the specified file
-        with open(OOD_data, "r", encoding="utf-8") as f:
-            tl = f.readlines()
-        # Extract the index of text part (either 0 or 1) based on if
-        # the first element contains '.wav'
-        idx = 1 if ".wav" in tl[0].split("|")[0] else 0
-        # Read the text parts from the lines and filter out lines
-        # with text length not in `<min_length, max_length>`)
-        # (to avoid incompatibility with ALBERT's input size and ensure minimum length)
-        self.ptexts = [
-            add_spaces_around_punctuation(parts[idx])
-            for t in tl
-            if (parts := t.split("|"))
-            and (length := len(parts[idx])) <= max_length - 2  # -2: padding at the start/end
-            and length >= min_length
-        ]
+        self.ptexts = self._load_ood_texts(OOD_data, min_length, max_length)
 
         # Set up path to waveform directory
         self.root_path = root_path
+
+    @staticmethod
+    def _load_ood_texts(ood_file, min_length, max_length):
+        """
+        Load out-of-distribution (OOD) texts from a specified file.
+
+        Args:
+            ood_file (str): Path to the file containing OOD texts.
+            min_length (int): Minimum length of the text to be considered.
+            max_length (int): Maximum length of the text to be considered.
+        """
+        # Load OOD texts from the specified file
+        with open(ood_file, "r", encoding="utf-8") as f:
+            text_lines = f.readlines()
+        # Extract the index of text part (either 0 or 1) based on
+        # if the first element contains '.wav'
+        idx = 1 if ".wav" in text_lines[0].split("|")[0] else 0
+        # Read the text parts from the lines and filter out lines
+        # with text length not in `<min_length, max_length>`)
+        # (to avoid incompatibility with ALBERT's input size and ensure minimum length)
+        ptexts = []
+        for t in text_lines:
+            parts = t.split("|")
+            text = add_spaces_around_punctuation(parts[idx])
+            length = len(text)
+            if min_length <= length <= max_length - 2:
+                ptexts.append(text)
+        return ptexts
 
     def __len__(self):
         return len(self.data_list)

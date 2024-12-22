@@ -26,8 +26,16 @@ fi
 # Input experimental directory
 EXPDIR=$1
 
+if [[ "$#" -lt 1 ]]; then
+     echo "Usage: run_stage1.sh exp_dir [specification: iti dgx gpu<3-4>] [hours]"
+     exit 1
+fi
+
+# Input experimental directory
+EXPDIR=$1
+
 if [[ "$#" -gt 1 ]]; then
-     # specification to run on (iti<0-1>, gdx, gpu<0-3>)
+     # specification to run on (iti, gdx, gpu<3-4>)
      SPEC=$2
 fi
 if [[ "$#" -gt 2 ]]; then
@@ -36,35 +44,22 @@ if [[ "$#" -gt 2 ]]; then
 fi
 
 # Check run specification and set queue and cluster to run on
-if [[ $SPEC == "iti0" || $SPEC == "iti"  ]]; then
-     # ITI queue: any machine
-     QUEUE="-q iti"
-     CLUSTER=""
-elif [[ $SPEC == "iti1" ]]; then
+elif [[ $SPEC == "iti" ]]; then
      # ITI queue: alfrid (>40 gb GPU)
      QUEUE="-q iti"
      CLUSTER=":gpu_mem=40000mb"
 elif [[ $SPEC == "dgx" ]]; then
-     # GDX queue
+     # GDX queue: capy
      QUEUE="-q gpu_dgx"
      CLUSTER=""
-elif [[ $SPEC == "gpu0" || $SPEC == "gpu" ]]; then
-     # Any cluster with gpu (incl. problematic zubat, gita)
-     QUEUE="-q gpu"
-     CLUSTER=""
-     SPEC="gpu0"
-elif [[ $SPEC == "gpu1" ]]; then
-     # Any cluster with GPU memory > 11gb (glados)
-     QUEUE="-q gpu"
-     CLUSTER=":gpu_mem=11111mb"
-elif [[ $SPEC == "gpu2" ]]; then
-     # Any cluster with GPU memory > 12gb (excl. glados)
-     QUEUE="-q gpu"
-     CLUSTER=":gpu_mem=12000mb"
 elif [[ $SPEC == "gpu3" ]]; then
      # Any cluster with GPU memory > 40gb (zia, black)
      QUEUE="-q gpu"
      CLUSTER=":gpu_mem=40000mb"
+elif [[ $SPEC == "gpu4" ]]; then
+     # Any cluster with GPU memory > 80gb (bee)
+     QUEUE="-q gpu"
+     CLUSTER=":gpu_mem=80000mb"
 else
      echo "Unsupported cluster/queue"
      exit 1
@@ -79,10 +74,10 @@ SELECT="-l select=1:ncpus=$NCPUS:mem=$MEM:scratch_local=$LSCRATCH:ngpus=$NGPUS$C
 WALLTIME="-l walltime=$HOURS:00:00"
 
 # Extract name of the experiment
-EXP=$(basename $EXPDIR)
+EXP="$(basename $EXPDIR)_stage1"
 
 # # Timestep to differentiate among runs with the same run name
-# TIMESTEP=$(date +"%y%m%d_%H%M%S")
+TIMESTEP=$(date +"%y%m%d-%H%M%S")
 
 SINGULARITY=/storage/plzen4-ntis/home/jmatouse/singularity/papermill_23.12-latest.sh
 
@@ -100,8 +95,8 @@ sed -i "/^log_dir:/c\log_dir: $EXPDIR" $CFG
 # -----------------------------------------------------------------------------
 # RUN TRAINING
 # -----------------------------------------------------------------------------
-OLOG=$EXPDIR/log.txt
-ONTB=$EXPDIR/$(basename "$INTB" .ipynb).processed.ipynb
+OLOG=$EXPDIR/log.$TIMESTEP.txt
+ONTB=$EXPDIR/$(basename "$INTB" .ipynb).processed.$TIMESTEP.ipynb
 
 # Run PBS script
 qsub -N "$EXP" \
