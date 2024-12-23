@@ -19,14 +19,6 @@ NCPUS=8
 NGPUS=2
 
 if [[ "$#" -lt 1 ]]; then
-     echo "Usage: run_stage1.sh exp_dir [specification: iti<0-1> dgx gpu<0-3>] [hours]"
-     exit 1
-fi
-
-# Input experimental directory
-EXPDIR=$1
-
-if [[ "$#" -lt 1 ]]; then
      echo "Usage: run_stage1.sh exp_dir [specification: iti dgx gpu<3-4>] [hours]"
      exit 1
 fi
@@ -44,7 +36,7 @@ if [[ "$#" -gt 2 ]]; then
 fi
 
 # Check run specification and set queue and cluster to run on
-elif [[ $SPEC == "iti" ]]; then
+if [[ $SPEC == "iti" ]]; then
      # ITI queue: alfrid (>40 gb GPU)
      QUEUE="-q iti"
      CLUSTER=":gpu_mem=40000mb"

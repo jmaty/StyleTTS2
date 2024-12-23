@@ -12,8 +12,6 @@ import torch.nn.functional as F
 import torchaudio
 from torch.utils.data import DataLoader
 
-from text_utils import add_spaces_around_punctuation
-
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
@@ -43,6 +41,7 @@ class FilePathDataset(torch.utils.data.Dataset):
         data_list,
         root_path,
         text_cleaner,
+        preprocess_text_fn=None,
         sr=24000,
         data_augmentation=False,
         validation=False,
@@ -54,24 +53,15 @@ class FilePathDataset(torch.utils.data.Dataset):
         # spect_params = SPECT_PARAMS     # TODO: not reading from config!?
         # mel_params = MEL_PARAMS         # TODO: not reading from config!?
 
-        # Read input list of text data lines delimited by "|" and ignore too long lines
-        self.data_list = []  # Initialize the list for processed data
-        for l in data_list:
-            data = l.strip().split("|")  # Remove leading/trailing whitespaces and split the string
-            # Ensure data has at least two elements
-            assert len(data) in (2, 3), f"Invalid data format, 2-3 elements expected: {l}"
-            data[1] = add_spaces_around_punctuation(data[1])
-            # Check if the length of data[1] exceeds `max_length` characters (typically 512)
-            if len(data[1]) > max_length - 2:  # -2: padding at the start/end
-                logger.warning(
-                    "Skipping %s: phoneme length %d > %d\n%s",
-                    data[0],
-                    len(data[1]),
-                    max_length - 2,
-                    data[1],
-                )
-                continue  # Skip this item
-            self.data_list.append(data if len(data) == 3 else data + ["0"])
+        self.mean, self.std = -4, 4
+        self.data_augmentation = data_augmentation and (not validation)
+        self.max_mel_length = 192
+        self.min_length = min_length
+        self.max_length = max_length
+        self._preprocess_text_fn = preprocess_text_fn
+
+        # Load texts from the input data list
+        self.data_list = self._load_texts(data_list)
 
         self.text_cleaner = text_cleaner
         self.sr = sr
@@ -80,18 +70,46 @@ class FilePathDataset(torch.utils.data.Dataset):
 
         self.to_melspec = torchaudio.transforms.MelSpectrogram(**MEL_PARAMS)
 
-        self.mean, self.std = -4, 4
-        self.data_augmentation = data_augmentation and (not validation)
-        self.max_mel_length = 192
-        self.min_length = min_length
-
-        self.ptexts = self._load_ood_texts(OOD_data, min_length, max_length)
+        # Load Out-of-distribution texts
+        self.ptexts = self._load_ood_texts(OOD_data)
 
         # Set up path to waveform directory
         self.root_path = root_path
 
-    @staticmethod
-    def _load_ood_texts(ood_file, min_length, max_length):
+    def _load_texts(self, data_list):
+        """
+        Load texts from a list of data lines.
+        Also load speaker IDs if available and path to the corresponding waveforms.
+
+        Args:
+            data_list (list): List of data lines.
+
+        Returns:
+            list: List of texts.
+        """
+        texts = []  # Initialize the list for processed data
+
+        # Read input list of text data lines delimited by "|" and ignore too long lines
+        for l in data_list:
+            data = l.strip().split("|")  # Remove leading/trailing whitespaces and split the string
+            # Ensure data has at least two elements
+            assert len(data) in (2, 3), f"Invalid data format, 2-3 elements expected: {l}"
+            if callable(self._preprocess_text_fn):
+                data[1] = self._preprocess_text_fn(data[1])
+            # Check if the length of data[1] exceeds `max_length` characters (typically 512)
+            if len(data[1]) > self.max_length - 2:  # -2: padding at the start/end
+                logger.warning(
+                    "Skipping %s: phoneme length %d > %d\n%s",
+                    data[0],
+                    len(data[1]),
+                    self.max_length - 2,
+                    data[1],
+                )
+                continue  # Skip this item
+            texts.append(data if len(data) == 3 else data + ["0"])
+        return texts
+
+    def _load_ood_texts(self, ood_file):
         """
         Load out-of-distribution (OOD) texts from a specified file.
 
@@ -112,9 +130,13 @@ class FilePathDataset(torch.utils.data.Dataset):
         ptexts = []
         for t in text_lines:
             parts = t.split("|")
-            text = add_spaces_around_punctuation(parts[idx])
+            text = (
+                self._preprocess_text_fn(parts[idx])
+                if callable(self._preprocess_text_fn)
+                else parts[idx]
+            )
             length = len(text)
-            if min_length <= length <= max_length - 2:
+            if self.min_length <= length <= self.max_length - 2:
                 ptexts.append(text)
         return ptexts
 
@@ -260,6 +282,7 @@ def build_dataloader(
     path_list,
     root_path,
     text_cleaner,
+    preprocess_text_fn=None,
     validation=False,
     OOD_data="Data/OOD_texts.txt",
     min_length=50,
@@ -277,6 +300,7 @@ def build_dataloader(
         path_list,
         root_path,
         text_cleaner,
+        preprocess_text_fn=preprocess_text_fn,
         OOD_data=OOD_data,
         min_length=min_length,
         max_length=max_length,

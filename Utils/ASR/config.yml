@@ -1,14 +1,16 @@
 log_dir: checkpoints
 save_freq: 1
 device: cuda
-epochs: 200
-batch_size: 256
+epochs: 500
+batch_size: 128
 pretrained_model: ''
 train_data: 
-  /scratch.ssd/jmatouse/job_5359740.pbs-m1.metacentrum.cz/data/train_SPT-MGW.processed.csv
+  /scratch.ssd/jmatouse/job_7441070.pbs-m1.metacentrum.cz/data/train_MGW+CRo200.processed.csv
 val_data: 
-  /scratch.ssd/jmatouse/job_5359740.pbs-m1.metacentrum.cz/data/val_SPT-MGW.processed.csv
+  /scratch.ssd/jmatouse/job_7441070.pbs-m1.metacentrum.cz/data/val_MGW+CRo200.processed.csv
 show_progress: false
+dataset_params:
+  max_text_len: 200
 preprocess_params:
   sr: 24000
   spect_params:

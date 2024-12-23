@@ -85,7 +85,7 @@ def load_symbol_dict(fpath):
 
 
 def add_spaces_around_punctuation(text):
-    """_summary_
+    """Add spaces around punctuation in a phonetic string.
 
     Args:
         text (str): phonetic string
@@ -98,3 +98,15 @@ def add_spaces_around_punctuation(text):
     # Add a space after punctuation if it is not already followed by a space
     text = re.sub(r"([.,!?;:])(?! )", r"\1 ", text)
     return text.strip()
+
+
+def remove_spaces(text):
+    """Remove spaces from a phonetic string.
+
+    Args:
+        text (str): phonetic string
+
+    Returns:
+        str: phonetic string with spaces removed
+    """
+    return text.replace(" ", "")

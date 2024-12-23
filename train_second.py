@@ -4,7 +4,6 @@ import copy
 import logging
 import os
 import os.path as osp
-import shutil
 import time
 import traceback
 import warnings
@@ -22,7 +21,7 @@ from munch import Munch
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 
-from text_utils import TextCleaner
+from text_utils import TextCleaner, add_spaces_around_punctuation
 from losses import GeneratorLoss, WavLMLoss, DiscriminatorLoss, MultiResolutionSTFTLoss
 from meldataset import build_dataloader
 from models import load_ASR_models, load_F0_models, build_model, load_checkpoint, save_checkpoint
@@ -41,6 +40,9 @@ from Utils.PLBERT.util import load_plbert
 
 warnings.simplefilter("ignore")
 
+# Disable TF32 computations for cuDNN
+torch.backends.cudnn.allow_tf32 = False
+
 
 # simple fix for dataparallel that allows access to class attributes
 class MyDataParallel(torch.nn.DataParallel):
@@ -51,6 +53,7 @@ class MyDataParallel(torch.nn.DataParallel):
             return getattr(self.module, name)
 
 
+# Set up logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 handler = StreamHandler()
@@ -65,26 +68,26 @@ def main():
     parser.add_argument("-w", "--num_workers", type=int, default=0, help="number of workers")
     args = parser.parse_args()
 
+    # Load config
     with open(args.config_path, encoding="utf-8") as fr:
         config = yaml.safe_load(fr)
     cfg_name, cfg_ext = osp.splitext(osp.basename(args.config_path))
 
+    # Set up logging
     log_dir = config["log_dir"]
     writer = SummaryWriter(log_dir + "/tensorboard")
+    file_handler = logging.FileHandler(osp.join(log_dir, "train.log"))
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter("%(levelname)s:%(asctime)s: %(message)s"))
+    logger.addHandler(file_handler)
 
     # Init NVLM
     nvidia_smi.nvmlInit()
     n_gpus = nvidia_smi.nvmlDeviceGetCount()
     logger.info("NVLM initialized")
 
-    # write logs
-    file_handler = logging.FileHandler(osp.join(log_dir, "train.log"))
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter("%(levelname)s:%(asctime)s: %(message)s"))
-    logger.addHandler(file_handler)
-
+    # Set up training parameters
     batch_size = config.get("batch_size", 10)
-
     epochs = config.get("epochs_2nd", 200)
     log_interval = config.get("log_interval", 10)
     saving_epoch = config.get("save_freq", 2)
@@ -109,8 +112,6 @@ def main():
     max_len = config.get("max_len", 200)
     # JMa: gradient clipping support
     grad_clip = config.get("grad_clip", None)
-    # # JMa: gradient accumulation
-    # grad_accum_steps = config.get('grad_accum_steps', 1)
 
     loss_params = Munch(config["loss_params"])
     diff_epoch = loss_params.diff_epoch
@@ -118,9 +119,13 @@ def main():
 
     optimizer_params = Munch(config["optimizer_params"])
 
+    # Set up text cleaner and pre-processing function
     text_cleaner = TextCleaner(data_params["symbol_dict_path"], pad=data_params["pad"])
     print(f"Number of symbols: {len(text_cleaner)}")
     assert len(text_cleaner) == 81, f"Number of symbols must be 81 but it is {len(text_cleaner)}"
+
+    preprocess_text_fn = add_spaces_around_punctuation  # TODO: Add to config
+    print(f"Function for text pre-processing: {preprocess_text_fn}")
 
     # Load data & dataloaders
     train_list, val_list = get_data_path_list(train_path, val_path)
@@ -130,6 +135,7 @@ def main():
         train_list,
         root_path,
         text_cleaner=text_cleaner,
+        preprocess_text_fn=preprocess_text_fn,
         OOD_data=ood_data,
         min_length=min_length,
         max_length=512,
@@ -143,6 +149,7 @@ def main():
         val_list,
         root_path,
         text_cleaner=text_cleaner,
+        preprocess_text_fn=preprocess_text_fn,
         OOD_data=ood_data,
         min_length=min_length,
         max_length=512,
@@ -559,10 +566,8 @@ def main():
             if torch.isnan(g_loss):
                 set_trace()
 
-            # Po zakomentování průběžné validation wavy nešumí!
             optimizer.step("bert_encoder")
             optimizer.step("bert")
-
             optimizer.step("predictor")
             optimizer.step("predictor_encoder")
 
