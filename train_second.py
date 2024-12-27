@@ -93,6 +93,9 @@ def main():
     saving_epoch = config.get("save_freq", 2)
     max_saved_models = config.get("max_saved_models", 2)
     save_milestones = config.get("save_milestones", False)
+    max_len = config.get("max_len", 200)
+    grad_clip = config.get("grad_clip", None)  # JMa: gradient clipping support
+    device = config.get("cuda", "cuda")  # Set to cuda
 
     data_params = config.get("data_params", None)
     sr = config["preprocess_params"].get("sr", 24000)
@@ -104,32 +107,48 @@ def main():
     save_val_audio = data_params.get("save_val_audio", False)
     n_val_audios = config["data_params"].get("n_val_audios", 3)
     save_test_audio = data_params.get("save_test_audio", False)
-    test_sentences = data_params.get("test_sentences", [])
     test_audio_dir = os.path.join(
         config["log_dir"], config["data_params"].get("test_audio_dir", "test_audios")
     )
 
-    max_len = config.get("max_len", 200)
-    # JMa: gradient clipping support
-    grad_clip = config.get("grad_clip", None)
+    # Define pre-processing function and apply to test sentences
+    preprocess_text_fn = add_spaces_around_punctuation  # TODO: Add to config
+    print(f"Function for text pre-processing: {preprocess_text_fn}")
+    test_sentences = list(map(preprocess_text_fn, data_params.get("test_sentences", [])))
+    print("\n".join(test_sentences))
 
+    # Set up loss and optimizer parameters
     loss_params = Munch(config["loss_params"])
     diff_epoch = loss_params.diff_epoch
     joint_epoch = loss_params.joint_epoch
-
     optimizer_params = Munch(config["optimizer_params"])
 
-    # Set up text cleaner and pre-processing function
+    # Set up text cleaner
     text_cleaner = TextCleaner(data_params["symbol_dict_path"], pad=data_params["pad"])
     print(f"Number of symbols: {len(text_cleaner)}")
     assert len(text_cleaner) == 81, f"Number of symbols must be 81 but it is {len(text_cleaner)}"
 
-    preprocess_text_fn = add_spaces_around_punctuation  # TODO: Add to config
-    print(f"Function for text pre-processing: {preprocess_text_fn}")
+    # Load pretrained utility models
+    # Load ASR model
+    asr_config = config.get("ASR_config", False)
+    asr_path = config.get("ASR_path", False)
+    text_aligner = load_ASR_models(asr_path, asr_config)
+    # Load pretrained F0 model
+    f0_path = config.get("F0_path", False)
+    pitch_extractor = load_F0_models(f0_path)
+    # Load PL-BERT model
+    bert_path = config.get("PLBERT_dir", False)
+    plbert = load_plbert(bert_path)
+
+    # Build model
+    model_params = recursive_munch(config["model_params"])
+    model = build_model(model_params, text_aligner, pitch_extractor, plbert)
+
+    multispeaker = model_params.multispeaker
+    bert_size = model.bert.config.max_position_embeddings  # ALBERT config
 
     # Load data & dataloaders
     train_list, val_list = get_data_path_list(train_path, val_path)
-    device = config.get("cuda", "cuda")
 
     train_dataloader = build_dataloader(
         train_list,
@@ -138,7 +157,7 @@ def main():
         preprocess_text_fn=preprocess_text_fn,
         OOD_data=ood_data,
         min_length=min_length,
-        max_length=512,
+        max_length=bert_size,
         batch_size=batch_size,
         num_workers=args.num_workers,
         dataset_config={},
@@ -152,31 +171,13 @@ def main():
         preprocess_text_fn=preprocess_text_fn,
         OOD_data=ood_data,
         min_length=min_length,
-        max_length=512,
+        max_length=bert_size,
         batch_size=batch_size,
         validation=True,
         num_workers=0,
         device=device,
         dataset_config={},
     )
-
-    # load pretrained ASR model
-    asr_config = config.get("ASR_config", False)
-    asr_path = config.get("ASR_path", False)
-    text_aligner = load_ASR_models(asr_path, asr_config)
-
-    # load pretrained F0 model
-    f0_path = config.get("F0_path", False)
-    pitch_extractor = load_F0_models(f0_path)
-
-    # load PL-BERT model
-    bert_path = config.get("PLBERT_dir", False)
-    plbert = load_plbert(bert_path)
-
-    # build model
-    model_params = recursive_munch(config["model_params"])
-    multispeaker = model_params.multispeaker
-    model = build_model(model_params, text_aligner, pitch_extractor, plbert)
 
     # Move models to device (cuda)
     _ = [model[key].to(device) for key in model]
@@ -1026,7 +1027,7 @@ def main():
 
                 cfg_path = osp.join(log_dir, f"{cfg_name}.processed{cfg_ext}")
                 with open(cfg_path, "w", encoding="utf-8") as outfile:
-                    yaml.dump(config, outfile, default_flow_style=True)
+                    yaml.dump(config, outfile, default_flow_style=False)
 
             # JMa: synthesize test audios (makes sense after diffusion training started)
             if save_test_audio and epoch >= diff_epoch:
@@ -1078,9 +1079,10 @@ def main():
         max_saved_models,
     )
     try:
-        final_model_symlink = osp.join(log_dir, "second_stage.pth")
-        os.symlink(osp.basename(final_filepath), final_model_symlink)
-        print(f"Final second-stage model saved to {final_filepath}")
+        if epoch > joint_epoch - 1:
+            final_model_symlink = osp.join(log_dir, "second_stage.pth")
+            os.symlink(osp.basename(final_filepath), final_model_symlink)
+            print(f"Final second-stage model saved to {final_filepath}")
     except FileExistsError:
         print(
             f"Symlink or file {final_model_symlink} already exists => {final_filepath} was not symlinked!"
@@ -1092,7 +1094,7 @@ def main():
 
         cfg_path = osp.join(log_dir, f"{cfg_name}.processed{cfg_ext}")
         with open(cfg_path, "w", encoding="utf-8") as outfile:
-            yaml.dump(config, outfile, default_flow_style=True)
+            yaml.dump(config, outfile, default_flow_style=False)
 
     # Ending work with NVIDIA NVLM
     nvidia_smi.nvmlShutdown()
