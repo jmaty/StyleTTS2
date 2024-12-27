@@ -9,9 +9,9 @@ export LC_NUMERIC="en_US.UTF-8"
 # Default params
 SPEC="gpu3"
 RUNS=1
-HOURS=24
+HOURS=72
 MODELS=""
-INTB=Train_first_ga.ipynb
+INTB=Train_second.ipynb
 # QSUB ARGUMENTS
 MEM=64gb
 LSCRATCH=20gb
@@ -19,12 +19,13 @@ NCPUS=8
 NGPUS=2
 
 if [[ "$#" -lt 1 ]]; then
-     echo "Usage: run_stage1.sh exp_dir [specification: iti dgx gpu<3-4>] [hours]"
+     echo "Usage: run_stage2b.sh exp_dir [specification: iti dgx gpu<3-4>] [hours]"
      exit 1
 fi
 
 # Input experimental directory
 EXPDIR=$1
+CFG=$EXPDIR/config2b.yml
 
 if [[ "$#" -gt 1 ]]; then
      # specification to run on (iti, gdx, gpu<3-4>)
@@ -66,15 +67,14 @@ SELECT="-l select=1:ncpus=$NCPUS:mem=$MEM:scratch_local=$LSCRATCH:ngpus=$NGPUS$C
 WALLTIME="-l walltime=$HOURS:00:00"
 
 # Extract name of the experiment
-EXP="$(basename $EXPDIR)_stage1"
+EXP="$(basename $EXPDIR)_stage2"
 
-# # Timestep to differentiate among runs with the same run name
+# Timestep to differentiate among runs with the same run name
 TIMESTEP=$(date +"%y%m%d-%H%M%S")
 
 SINGULARITY=/storage/plzen4-ntis/home/jmatouse/singularity/papermill_23.12-latest.sh
 
 # Check that config file exists
-CFG=$EXPDIR/config1.yml
 if [[ ! -e $CFG ]]; then
      echo "Config file $CFG does not exists!"
      exit 1
@@ -83,11 +83,16 @@ fi
 # Set the log dir according to the input experiment directory
 # (the original log dir in the config file serves just as a placeholder)
 sed -i "/^log_dir:/c\log_dir: $EXPDIR" $CFG
+# Set the pretrained model path
+sed -i "/^pretrained_model:/c\pretrained_model: $EXPDIR/stage2_pre-joint_00049.pth" $CFG
+# Transfer sigma_data from config2a to config2b
+sigma_data=$(grep -E '^[[:space:]]*sigma_data:' $EXPDIR/config2.processed.yml)
+sed -i "/^[[:space:]]*sigma_data:/c\\$sigma_data" $CFG
 
 # -----------------------------------------------------------------------------
 # RUN TRAINING
 # -----------------------------------------------------------------------------
-OLOG=$EXPDIR/stage1_$TIMESTEP.log
+OLOG=$EXPDIR/stage2.$TIMESTEP.log
 ONTB=$EXPDIR/$(basename "$INTB" .ipynb).processed.$TIMESTEP.ipynb
 
 # Run PBS script

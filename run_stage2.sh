@@ -73,17 +73,6 @@ TIMESTEP=$(date +"%y%m%d-%H%M%S")
 
 SINGULARITY=/storage/plzen4-ntis/home/jmatouse/singularity/papermill_23.12-latest.sh
 
-# !!! Zajistit, aby se config.processed ukládal jako originál
-# # Check if config file exists
-# if [[ -f "$EXPDIR/config2.processed.yml" ]]; then
-#     CFG=$EXPDIR/config2.processed.yml
-# elif [[ -f "$EXPDIR/config2.yml" ]]; then
-#     CFG=$EXPDIR/config2.yml
-# else
-#      echo "Config file does not exists!"
-#      exit 1
-# fi
-
 # Check that config file exists
 CFG=$EXPDIR/config2.yml
 if [[ ! -e $CFG ]]; then
@@ -98,7 +87,7 @@ sed -i "/^log_dir:/c\log_dir: $EXPDIR" $CFG
 # -----------------------------------------------------------------------------
 # RUN TRAINING
 # -----------------------------------------------------------------------------
-OLOG=$EXPDIR/log.$TIMESTEP.txt
+OLOG=$EXPDIR/stage2.$TIMESTEP.log
 ONTB=$EXPDIR/$(basename "$INTB" .ipynb).processed.$TIMESTEP.ipynb
 
 # Run PBS script

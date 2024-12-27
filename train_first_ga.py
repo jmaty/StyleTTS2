@@ -143,7 +143,7 @@ def main():
     for k in model:
         model[k] = accelerator.prepare(model[k])
 
-    # load data
+    # Load data
     train_list, val_list = get_data_path_list(train_path, val_path)
 
     train_dataloader = build_dataloader(

@@ -7,11 +7,12 @@ export LC_NUMERIC="en_US.UTF-8"
 # INPUT ARGUMENTS
 # -----------------------------------------------------------------------------
 # Default params
+JOBID=""
 SPEC="gpu3"
 RUNS=1
 HOURS=24
 MODELS=""
-INTB=Train_first_ga.ipynb
+INTB=Train_second.ipynb
 # QSUB ARGUMENTS
 MEM=64gb
 LSCRATCH=20gb
@@ -19,7 +20,7 @@ NCPUS=8
 NGPUS=2
 
 if [[ "$#" -lt 1 ]]; then
-     echo "Usage: run_stage1.sh exp_dir [specification: iti dgx gpu<3-4>] [hours]"
+     echo "Usage: run_stage2a.sh exp_dir [specification: iti dgx gpu<3-4>] [hours] [jobid]"
      exit 1
 fi
 
@@ -33,6 +34,18 @@ fi
 if [[ "$#" -gt 2 ]]; then
      # Number of hours
      HOURS=$3
+fi
+if [[ "$#" -gt 3 ]]; then
+     # JOBID to continue run
+     JOBID=$4
+fi
+
+# Check dependencies
+if [[ -z $JOBID ]]; then
+     # No deps at the beginning
+     DEPS=""
+else
+     DEPS="-W depend=afterany:$JOBID"
 fi
 
 # Check run specification and set queue and cluster to run on
@@ -66,15 +79,15 @@ SELECT="-l select=1:ncpus=$NCPUS:mem=$MEM:scratch_local=$LSCRATCH:ngpus=$NGPUS$C
 WALLTIME="-l walltime=$HOURS:00:00"
 
 # Extract name of the experiment
-EXP="$(basename $EXPDIR)_stage1"
+EXP="$(basename $EXPDIR)_stage2"
 
-# # Timestep to differentiate among runs with the same run name
+# Timestep to differentiate among runs with the same run name
 TIMESTEP=$(date +"%y%m%d-%H%M%S")
 
 SINGULARITY=/storage/plzen4-ntis/home/jmatouse/singularity/papermill_23.12-latest.sh
 
 # Check that config file exists
-CFG=$EXPDIR/config1.yml
+CFG=$EXPDIR/config2a.yml
 if [[ ! -e $CFG ]]; then
      echo "Config file $CFG does not exists!"
      exit 1
@@ -87,7 +100,7 @@ sed -i "/^log_dir:/c\log_dir: $EXPDIR" $CFG
 # -----------------------------------------------------------------------------
 # RUN TRAINING
 # -----------------------------------------------------------------------------
-OLOG=$EXPDIR/stage1_$TIMESTEP.log
+OLOG=$EXPDIR/stage2.$TIMESTEP.log
 ONTB=$EXPDIR/$(basename "$INTB" .ipynb).processed.$TIMESTEP.ipynb
 
 # Run PBS script
@@ -97,5 +110,6 @@ qsub -N "$EXP" \
      -o $OLOG \
      $WALLTIME \
      $SELECT \
+     $DEPS \
      -- $SINGULARITY "$INTB" "$CFG" "$ONTB"
 echo "$EXP: $QUEUE $SELECT, HOURS: $HOURS"
