@@ -19,7 +19,7 @@ NCPUS=8
 NGPUS=2
 
 if [[ "$#" -lt 1 ]]; then
-     echo "Usage: run_stage1.sh exp_dir [specification: iti dgx gpu<3-4>] [hours]"
+     printf "Usage: run_stage1.sh exp_dir [specification: iti dgx gpu<3-4>] [hours]\n" >&2
      exit 1
 fi
 
@@ -53,7 +53,7 @@ elif [[ $SPEC == "gpu4" ]]; then
      QUEUE="-q gpu"
      CLUSTER=":gpu_mem=80000mb"
 else
-     echo "Unsupported cluster/queue"
+     printf "Unsupported cluster/queue\n" >2&
      exit 1
 fi
 
@@ -76,7 +76,7 @@ SINGULARITY=/storage/plzen4-ntis/home/jmatouse/singularity/papermill_23.12-lates
 # Check that config file exists
 CFG=$EXPDIR/config1.yml
 if [[ ! -e $CFG ]]; then
-     echo "Config file $CFG does not exists!"
+     printf "Config file $CFG does not exists!\n" >&2
      exit 1
 fi
 
@@ -91,11 +91,12 @@ OLOG=$EXPDIR/stage1.$TIMESTEP.log
 ONTB=$EXPDIR/$(basename "$INTB" .ipynb).processed.$TIMESTEP.ipynb
 
 # Run PBS script
-qsub -N "$EXP" \
+JOBID=$(qsub -N "$EXP" \
      $QUEUE \
      -j oe \
      -o $OLOG \
      $WALLTIME \
      $SELECT \
-     -- $SINGULARITY "$INTB" "$CFG" "$ONTB"
-echo "$EXP: $QUEUE $SELECT, HOURS: $HOURS"
+     -- $SINGULARITY "$INTB" "$CFG" "$ONTB")
+printf "$JOBID"
+#printf "$EXP: $QUEUE $SELECT, HOURS: $HOURS\n" >&2
