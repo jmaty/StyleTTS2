@@ -19,7 +19,7 @@ NCPUS=8
 NGPUS=2
 
 if [[ "$#" -lt 1 ]]; then
-     echo "Usage: run_stage2b.sh exp_dir [specification: iti dgx gpu<3-4>] [hours]"
+     echo "Usage: run_stage2a.sh exp_dir [specification: iti dgx gpu<3-4>] [hours] [jobid]"
      exit 1
 fi
 
@@ -34,6 +34,18 @@ fi
 if [[ "$#" -gt 2 ]]; then
      # Number of hours
      HOURS=$3
+fi
+if [[ "$#" -gt 3 ]]; then
+     # JOBID to continue run
+     JOBID=$4
+fi
+
+# Check dependencies
+if [[ -z $JOBID ]]; then
+     # No deps at the beginning
+     DEPS=""
+else
+     DEPS="-W depend=afterany:$JOBID"
 fi
 
 # Check run specification and set queue and cluster to run on
@@ -85,7 +97,7 @@ fi
 sed -i "/^log_dir:/c\log_dir: $EXPDIR" $CFG
 # Set the pretrained model path
 sed -i "/^pretrained_model:/c\pretrained_model: $EXPDIR/stage2_pre-joint_00049.pth" $CFG
-# Transfer sigma_data from config2a to config2b
+# Transfer sigma_data from stage2a to stage2b
 sigma_data=$(grep -E '^[[:space:]]*sigma_data:' $EXPDIR/config2.processed.yml)
 sed -i "/^[[:space:]]*sigma_data:/c\\$sigma_data" $CFG
 
@@ -102,5 +114,6 @@ qsub -N "$EXP" \
      -o $OLOG \
      $WALLTIME \
      $SELECT \
+     $DEPS \
      -- $SINGULARITY "$INTB" "$CFG" "$ONTB"
-echo "$EXP: $QUEUE $SELECT, HOURS: $HOURS"
+echo "$EXP: $QUEUE $SELECT, HOURS: $HOURS <-- $JOBID"

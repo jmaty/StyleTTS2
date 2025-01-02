@@ -1020,7 +1020,7 @@ def main():
             )
 
             # if estimate sigma, save the estimated sigma
-            if model_params.diffusion.dist.estimate_sigma_data:
+            if epoch >= diff_epoch and model_params.diffusion.dist.estimate_sigma_data:
                 config["model_params"]["diffusion"]["dist"]["sigma_data"] = float(
                     np.mean(running_std)
                 )
@@ -1089,7 +1089,7 @@ def main():
         )
 
     # if estimate sigma, save the estimated sigma
-    if model_params.diffusion.dist.estimate_sigma_data:
+    if epoch >= diff_epoch and model_params.diffusion.dist.estimate_sigma_data:
         config["model_params"]["diffusion"]["dist"]["sigma_data"] = float(np.mean(running_std))
 
         cfg_path = osp.join(log_dir, f"{cfg_name}.processed{cfg_ext}")

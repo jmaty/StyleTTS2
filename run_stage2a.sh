@@ -26,6 +26,7 @@ fi
 
 # Input experimental directory
 EXPDIR=$1
+CFG=$EXPDIR/config2a.yml
 
 if [[ "$#" -gt 1 ]]; then
      # specification to run on (iti, gdx, gpu<3-4>)
@@ -87,7 +88,6 @@ TIMESTEP=$(date +"%y%m%d-%H%M%S")
 SINGULARITY=/storage/plzen4-ntis/home/jmatouse/singularity/papermill_23.12-latest.sh
 
 # Check that config file exists
-CFG=$EXPDIR/config2a.yml
 if [[ ! -e $CFG ]]; then
      echo "Config file $CFG does not exists!"
      exit 1

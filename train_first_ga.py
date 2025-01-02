@@ -22,7 +22,7 @@ from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, Wa
 from meldataset import build_dataloader
 from models import build_model, load_ASR_models, load_checkpoint, load_F0_models, save_checkpoint
 from optimizers import build_optimizer
-from text_utils import TextCleaner, add_spaces_around_punctuation, remove_spaces
+from text_utils import TextCleaner, add_spaces_around_punctuation
 from utils import (
     get_data_path_list,
     get_image,
