@@ -1,0 +1,31 @@
+[
+	{
+		"action": "Rules",
+		"comment": "časový údaj",
+		"rules": [
+			{ "firstCharHint": "d", "regex": "(24|23|22|21|20|1\\d|0\\d):([0-6]\\d|\\d):(\\d{2}) (hodin)", "mergeInto": "time", "regexMap": [ null, ["hour", "i"], ["minute", "i"], ["second", "i"]] },
+			{ "firstCharHint": "d", "regex": "(24|23|22|21|20|1\\d|0\\d|\\d):([0-6]\\d) (hodin)", "mergeInto": "time", "regexMap": [ null, ["hour", "i"], ["minute", "i"]] },
+			{ "firstCharHint": "d", "regex": "(24|23|22|21|20|1\\d|0\\d|\\d)\\.([0-6]\\d) (hodin)", "mergeInto": "time", "regexMap": [ null, ["hour", "i"], ["minute", "i"]] },
+			{ "firstCharHint": "d", "regex": "(24|23|22|21|20|1\\d|0\\d|\\d),([0-6]\\d) (hodin)", "mergeInto": "time", "regexMap": [ null, ["hour", "i"], ["minute", "i"]] },
+			{ "firstCharHint": "d", "regex": "(24|23|22|21|20|1\\d|0\\d):([0-6]\\d):(\\d{2}) ((hod)\\.)?", "mergeInto": "time", "regexMap": [ null, ["hour", "i"], ["minute", "i"], ["second", "i"]] },
+			{ "firstCharHint": "d", "regex": "(24|23|22|21|20|1\\d|0\\d):([0-6]\\d) ((hod)\\.)?", "mergeInto": "time", "regexMap": [ null, ["hour", "i"], ["minute", "i"]] },
+			{ "firstCharHint": "d", "regex": "(24|23|22|21|20|1\\d|0\\d|\\d)\\.([0-6]\\d) ((hod)\\.)?", "mergeInto": "time", "regexMap": [ null, ["hour", "i"], ["minute", "i"]] },
+			{ "firstCharHint": "d", "regex": "(24|23|22|21|20|1\\d|0\\d|\\d)\\.([0-6]\\d)", "left": ["od", "do"], "mergeInto": "time", "regexMap": [ null, ["hour", "i"], ["minute", "i"]] },
+			{ "firstCharHint": "d", "regex": "(24|23|22|21|20|1\\d|0\\d|\\d):([0-6]\\d)", "left": ["od", "do"], "mergeInto": "time", "regexMap": [ null, ["hour", "i"], ["minute", "i"]] },
+			{ "firstCharHint": "d", "regex": "(24|23|22|21|20|1\\d|0\\d|\\d):([0-6]\\d)", "left": ["od", "do", "v"], "mergeInto": "time", "regexMap": [ null, ["hour", "i"], ["minute", "i"]] },
+			{ "firstCharHint": "d", "regex": "(24|23|22|21|20|1\\d|0\\d|\\d):([0-6]\\d)", "right": ["seč"], "mergeInto": "time", "regexMap": [ null, ["hour", "i"], ["minute", "i"]] }
+		]
+	},
+	{
+		"action": "Rules",
+		"comment": "datum",
+		"rules": [
+			{ "firstCharHint": "d", "regex": "([123]?[0-9]\\.) (ledna|února|března|dubna|května|června|července|srpna|září|října|listopadu|prosince)( [12][0-9]{3})?", "mergeInto": "date", "left": "k ", "regexMap": [ null, ["day", "i"], "textMonth", ["year", "i"]], "data": { "textMonth": true, "case": 3 } },
+			{ "firstCharHint": "d", "regex": "([0123]?\\d)\\. ?(11|12|10|0?\\d)\\.( ?[12][0-9]{3})?", "mergeInto": "date", "left": "k", "regexMap": [ null, ["day", "i"], ["month", "i"], ["year", "i"]], "data": {"case": 3}},
+			{ "firstCharHint": "d", "regex": "([123]?[0-9]\\.) (ledna|února|března|dubna|května|června|července|srpna|září|října|listopadu|prosince)( [12][0-9]{3})?", "mergeInto": "date", "regexMap": [ null, ["day", "i"], "textMonth", ["year", "i"]], "data": { "textMonth": true } },
+			{ "regex": "([12]?[0-9]{3})", "left": ["rok", "roce", "roku", "letech", "až"], "data": {"style": "cardinal_years", "dateYear": true}},
+			{ "regex": "([0123]?\\d)\\.\\s?(11|12|10|0?\\d)\\.(\\s?[12][0-9]{3})?", "mergeInto": "date", "regexMap": [ null, ["day", "i"], ["month", "i"], ["year", "i"]] }
+		]
+	}
+
+]

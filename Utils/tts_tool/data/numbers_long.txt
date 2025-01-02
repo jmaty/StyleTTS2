@@ -1,0 +1,74 @@
+one_of {
+    10              deset_
+    1*              náct_
+}
+
+one_of {              
+    11              jede
+    12              dva
+    13              tři
+    14              čtr
+    15              pat
+    16              šest
+    17              sedm
+    18              osm
+    19              devate
+    1               jedna_  
+    2               dva_   
+    3               tři_    
+    4               čtyři_  
+    5               pět_    
+    6               šest_  
+    7               sedm_  
+    8               osm_ 
+    9               devět_
+}
+
+^*		@exit
+
+one_of {      
+    [2-4]*          cet_       
+    [5-9]*          desát_       
+}
+
+one_of {                     
+	2*              dva
+	3*              tři
+	4*              čtyři
+	5*              pa
+	6*              še
+	7*              sedm
+	8*              osm
+	9*              deva
+    00              nula_nula_
+	0*              nula_
+}
+
+@shift2                
+
+once {
+    only_odd_length {
+        
+        one_of {                   
+            1             sto_
+            2             stě_  
+            [3-4]         sta_   
+            [5-9]         set_   
+        }
+
+        one_of {                   
+            2             dvě_   
+            3             tři_   
+            4             čtyři_
+            5             pět_   
+            6             šest_  
+            7             sedm_  
+            8             osm_   
+            9             devět_
+        }
+
+        @shift
+    }
+}
+
+@loop

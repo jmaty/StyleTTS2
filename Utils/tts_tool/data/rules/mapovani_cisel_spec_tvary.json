@@ -1,0 +1,61 @@
+[
+	{
+		"action": "Rules",
+		"comment": "rodné číslo",
+		"rules": [
+			{ "firstCharHint": "d", "regex": "\\d{6}\\/\\d{4}", "mergeInto": "special", "regexMap": [ "value" ], "data": { "special": "rodne_cislo"}, "left": ["r.č.", "r. č.", "rodné číslo", "rč", "RČ"]}
+		]
+	},
+	{
+		"action": "Rules",
+		"comment": "telefonní číslo",
+		"rules": [
+			{ "regex": "\\W(\\d{12})", "mergeInto": "special", "regexMap": [ "value" ], "data": { "special": "tel_cislo"}},
+			{ "firstCharHint": "d", "regex": "(\\d{3})\\ (\\d{3})\\ (\\d{3})", "mergeInto": "special", "regexMap": [ "value" ], "data": { "special": "tel_cislo"}, "left": ["tel.", "číslo", "číslo:", "tel", "telefon", "+420"]},
+			{ "firstCharHint": "d", "regex": "\\d{9}", "mergeInto": "special", "regexMap": [ "value" ], "data": { "special": "tel_cislo"}, "left": ["tel.", "číslo", "číslo:", "tel", "telefon", "+420"]},
+			{ "firstCharHint": "d", "regex": "(\\d{3})\\ (\\d{2})\\ (\\d{2})\\ (\\d{2})", "mergeInto": "special", "regexMap": [ "value" ], "data": { "special": "tel_cislo_po_dvou"}, "left": ["tel.", "číslo", "číslo:", "tel", "telefon", "+420"]}
+		]
+	},
+	{
+		"action": "Rules",
+		"comment": "registrační značka",
+		"rules": [
+			{"regex": "\\w{3}\\s\\d{2}\\-?\\d{2}", "matchcase":true, "mergeInto": "special", "regexMap": [ "value" ], "data": { "special": "reg_znacka" }, "left": ["RZ", "reg. zn.", "značka", "rz"]}
+		]
+	},
+	{
+		"action": "Rules",
+		"comment": "variabilní symbol",
+		"rules": [
+			{ "regex": "(\\d{3,10})", "wholeWord": true, "replace": "$1", "data": {"spell": true}, "left": ["variabilní symbol", "variabilním symbolem"]},
+			{ "regex": "(\\d+)( )?x", "replace": "$1 krát", "left": ["variabilní symbol", "variabilním symbolem"]}
+		]
+	},
+	{
+		"action": "Rules",
+		"comment": "čísla účtů a smluv",
+		"rules": [
+			{ "firstCharHint": "d", "regex": "(\\d{1,5}\\-)?(\\d{6,10})(\\/)(\\d{4})", "mergeInto": "special", "regexMap": [ "value" ], "data": { "special": "cislo_uctu"}, "left": ["číslo", "č.", "účet", "číslem","účtu"]},
+            { "firstCharHint": "d", "regex": "(\\d{6,10})(\\-\\d{1,5})?", "mergeInto": "special", "regexMap": [ "value" ], "data": { "special": "cislo_uctu"}, "left": ["číslo", "č.", "číslem"]}
+		]
+	},
+	{
+		"action": "Rules",
+		"comment": "čísla/texty s lomítkem, např. 11/12, 1/2A, a/b.",
+		"rules": [
+			{ "firstCharHint": "d", "regex": "(\\d+)/(\\d+)", "replace": "$1 lomeno $2", "wholeWord": true },
+			{ "regex": "([a-záéíěóůúýčřžšťďň]+)/([a-záéíěóůúýčřžšťďň]+)", "replace": "$1 lomeno $2", "wholeWord": true }
+		]
+	},
+	{
+		"action": "Rules",
+		"comment": "Různě složitá čísla s pomlčkami",
+		"rules": [
+			{ "firstCharHint": "d", "regex": "(\\d+)-(\\d+)-(\\d+)-(\\d+)-(\\d+)-(\\d+)", "replace": "$1 pomlčka $2 pomlčka $3 pomlčka $4 pomlčka $5 pomlčka $6", "wholeWord": true },
+			{ "firstCharHint": "d", "regex": "(\\d+)-(\\d+)-(\\d+)-(\\d+)-(\\d+)", "replace": "$1 pomlčka $2 pomlčka $3 pomlčka $4 pomlčka $5", "wholeWord": true },
+			{ "firstCharHint": "d", "regex": "(\\d+)-(\\d+)-(\\d+)-(\\d+)", "replace": "$1 pomlčka $2 pomlčka $3 pomlčka $4", "wholeWord": true },
+			{ "firstCharHint": "d", "regex": "(\\d+)-(\\d+)-(\\d+)", "replace": "$1 pomlčka $2 pomlčka $3", "wholeWord": true },
+			{ "firstCharHint": "d", "regex": "(\\d+)-(\\d+)", "replace": "$1 pomlčka $2", "wholeWord": true }
+		]
+	}
+]

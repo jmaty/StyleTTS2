@@ -1,0 +1,23 @@
+[
+	{
+		"action": "Rules",
+		"comment": "římská čísla",
+		"TODO": "třeba domyslet...",
+		"rules": [
+			{ "search": "i.", "matchCase": true, "replace": "římská jedna" },
+			{ "search": "ii.", "matchCase": true, "replace": "římská dva" },
+			{ "search": "iii.", "matchCase": true, "replace": "římská tři" },
+			{ "search": "iv.", "matchCase": true, "replace": "římská čtyři" },
+			{ "search": "I.", "matchCase": true, "wholeWord":true, "replace": "římská jedna","left": ["výrok","výrokem", "ad", "ad."]},
+			{ "search": "II.", "matchCase": true, "replace": "římská dva" },
+			{ "search": "III.", "matchCase": true, "replace": "římská tři" },
+			{ "search": "IV.", "matchCase": true, "replace": "římská čtyři" },
+			{ "search": "V.", "matchCase": true, "wholeWord":true, "replace": "římská pět","left": ["výrok"]},
+			{ "search": "I", "matchCase": true, "wholeWord":true, "replace": "římská jedna","left": ["výrok","výrokem","Výrok","Výrokem", "výroku", "Výroku", "ad", "ad."]},
+			{ "search": "II", "matchCase": true, "replace": "římská dva", "left": ["výrok","výrokem","Výrok","Výrokem", "výroku", "Výroku", "ad", "ad."] },
+			{ "search": "III", "matchCase": true, "replace": "římská tři", "left": ["výrok","výrokem","Výrok","Výrokem", "výroku", "Výroku", "ad", "ad."] },
+			{ "search": "IV", "matchCase": true, "replace": "římská čtyři", "left": ["výrok","výrokem","Výrok","Výrokem", "výroku", "Výroku", "ad", "ad."] },
+			{ "search": "V", "matchCase": true, "wholeWord":true, "replace": "římská pět","left": ["výrok","výrokem","Výrok","Výrokem", "výroku", "Výroku", "ad", "ad."]}
+		]
+	}
+]

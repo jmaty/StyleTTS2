@@ -1,0 +1,15 @@
+[
+	{
+		"action": "Rules",
+		"comment": "stupne celsia",
+		"rules": [
+			{"regex": "1°C", "matchCase": true, "wholeWord": false, "replace": "jeden stupeň celsia"},
+			{"regex": "([234])°C", "matchCase": true, "wholeWord": false, "replace": "$1 stupně celsia"},
+			{"regex": "(\\d*)°C", "matchCase": true, "wholeWord": false,  "replace": "$1 stupňů celsia"},
+			{"regex": "1 °C", "matchCase": true, "wholeWord": false, "replace": "1 stupeň celsia"},
+			{"regex": "([234]) °C", "matchCase": true, "wholeWord": false, "replace": "$1 stupně celsia"},
+			{"regex": "(\\d*) °C", "matchCase": true, "wholeWord": false,  "replace": "$1 stupňů celsia"}
+		]
+	}
+
+]

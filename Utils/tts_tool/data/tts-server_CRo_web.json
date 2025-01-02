@@ -1,0 +1,9 @@
+[
+	{
+		"action": "Rules",
+		"comment": "e-mail - z textů pro ČRo - iROZHLAS.cz, iDNES.cz, atd.",
+		"rules": [
+			{"regex": "i[A-Z]+\\.cz", "mergeInto": "email", "regexMap": [ "value" ], "matchCase": true }
+		]
+	}
+]

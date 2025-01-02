@@ -1,0 +1,119 @@
+# tohle je komentář
+once {
+	^0		nula_
+	^0		@exit
+
+	^00		nula_nula_
+	^00		@exit
+}
+
+one_of {
+    1*             ý   [24]:m:ého 3:m:ému 6:m:ém 7:m:ým 1:f:á [236]:f:é [47]:f:ou [14]:n:é 2:n:ého 3:n:ému 6:n:ém 7:n:ým
+}
+
+one_of {
+	10              desát
+	1*              náct
+}
+
+
+one_of {
+	11              jede
+	12              dva
+	13              tři
+	14              čtr
+	15              pat
+	16              šest
+	17              sedm
+	18              osm
+	19              devate
+	1               první    [24]:m:prvního 3:m:prvnímu [67]:m:prvním 2:n:prvního 3:n:prvnímu [67]:n:prvním [23467]:f:první
+	2               druhý    [24]:m:druhého 3:m:druhému 6:m:druhém 7:m:druhým 1:f:druhá [236]:f:druhé [47]:f:druhou [14]:n:druhé 2:n:druhého 3:n:druhému 6:n:druhém 7:n:druhým
+	3               třetí    [24]:m:třetího 3:m:třetímu [67]:m:třetím [236]:f:třetí [47]:f:třetí 4:n:třetí 2:n:třetího 3:n:třetímu 6:n:třetím 7:n:třetím
+	4               čtvrtý   [24]:m:čtvrtého 3:m:čtvrtému 6:m:čtvrtém 7:m:čtvrtým 1:f:čtvrtá [236]:f:čtvrté [47]:f:čtvrtou [14]:n:čtvrté 2:n:čtvrtého 3:n:čtvrtému 6:n:čtvrtém 7:n:čtvrtým
+	5               pátý     [24]:m:pátého 3:m:pátému 6:m:pátém 7:m:pátým 1:f:pátá [236]:f:páté [47]:f:pátou [14]:n:páté 2:n:pátého 3:n:pátému 6:n:pátém 7:n:pátým
+	6               šestý    [24]:m:šestého 3:m:šestému 6:m:šestém 7:m:šestým 1:f:šestá [236]:f:šesté [47]:f:šestou [14]:n:šesté 2:n:šestého 3:n:šestému 6:n:šestém 7:n:šestým
+	7               sedmý    [24]:m:sedmého 3:m:sedmému 6:m:sedmém 7:m:sedmým 1:f:sedmá [236]:f:sedmé [47]:f:sedmou [14]:n:sedmé 2:n:sedmého 3:n:sedmému 6:n:sedmém 7:n:sedmým
+	8               osmý     [24]:m:osmého 3:m:osmému 6:m:osmém 7:m:osmým 1:f:osmá [236]:f:osmé [47]:f:osmou [14]:n:osmé 2:n:osmého 3:n:osmému 6:n:osmém 7:n:osmým
+	9               devátý   [24]:m:devátého 3:m:devátému 6:m:devátém 7:m:devátým 1:f:devátá [236]:f:deváté [47]:f:devátou [14]:n:deváté 2:n:devátého 3:n:devátému 6:n:devátém 7:n:devátým
+}
+
+^*		@exit
+
+one_of {
+    [2-9]*         ý_ [24]:m:ého_ 3:m:ému_ 6:m:ém_ 7:m:ým_ 1:f:á_ [236]:f:é_ [47]:f:ou_ [14]:n:é_ 2:n:ého_ 3:n:ému_ 6:n:ém_ 7:n:ým_
+}
+
+one_of {
+	[2-4]*          cát
+	[5-9]*          desát
+}
+
+
+one_of {
+	2*              dva
+	3*              tři
+	4*              čtyři
+	5*              pa
+	6*              še
+	7*              sedm
+	8*              osm
+	9*              deva
+}
+
+^**		@exit
+
+# skloňování stovek
+
+one_of {
+	[1-9]**         stý_   2:m:stého_ 3:m:stému_ 6:m:stém_ 7:m:stým_ [14]:n:sté_ 2:n:stého_ 3:n:stému_ 6:n:stém_ 7:n:stým_ 1:f:stá_ [236]:f:sté_ [47]:f:stou_
+	^0**            nula_
+}
+
+one_of {
+	2**             dvou
+	3**             tří
+	4**             čtyř
+	5**             pěti_
+	6**             šesti_
+	7**             sedmi_
+	8**             osmi_
+	9**             devíti_
+}
+
+^***	@exit
+
+# skloňování tisíců
+
+one_of {
+	^[1-9]***       _    2:m:ho_ 3:m:mu_ [67]:m:m_ 2:n:ho_ 3:n:mu_ [67]:n:m_
+	^0***           nula_
+}
+
+one_of {
+	1***            tisící
+	2***            dvou_tisící
+	3***            tří_tisící
+	4***            čtyř_tisící
+	5***            pěti_tisící
+	6***            šesti_tisící
+	7***            sedmi_tisící
+	8***            osmi_tisící
+	9***            devíti_tisící
+}
+^****			@exit
+
+@error
+
+
+
+
+
+
+
+
+
+
+
+
+

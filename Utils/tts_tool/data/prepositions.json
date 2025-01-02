@@ -1,0 +1,252 @@
+{
+    "sets": [
+        {
+            "data": {
+                "partOfSpeech": "preposition",
+                "caseIndicator": 2,
+                "syllables": 1
+            },
+            "keys": [
+                "od",
+                "do",
+                "bez",
+                "krom",
+                "stran",
+                "u",
+                "za",
+                "dle",
+                "se",
+                "ze",
+                "zpod"
+            ]
+        },
+        {
+            "data": {
+                "partOfSpeech": "preposition",
+                "caseIndicator": 2,
+                "syllables": 0
+            },
+            "keys": [
+                "z",
+                "s"
+            ]
+        },
+        {
+            "data": {
+                "partOfSpeech": "preposition",
+                "caseIndicator": 2,
+                "syllables": 2
+            },
+            "keys": [
+                "kromě",
+                "místo",
+                "podle",
+                "podél",
+                "kolem",
+                "vedle",
+                "během",
+                "beze",
+                "ode",
+                "blízko",
+                "koncem",
+                "vlivem",
+                "vyjma",
+                "výjma"
+            ]
+        },
+        {
+            "data": {
+                "partOfSpeech": "preposition",
+                "caseIndicator": 2,
+                "syllables": 3
+            },
+            "keys": [
+                "pomocí",
+                "okolo",
+                "doprostřed",
+                "uprostřed",
+                "namísto",
+                "následkem",
+                "ohledně",
+                "začátkem",
+                "zásluhou"
+            ]
+        },
+        {
+            "data": {
+                "partOfSpeech": "preposition",
+                "caseIndicator": 2,
+                "syllables": 4
+            },
+            "keys": [
+                "prostřednictvím",
+                "nedaleko",
+                "využitím"
+            ]
+        },
+        {
+            "data": {
+                "partOfSpeech": "preposition",
+                "caseIndicator": 3,
+                "syllables": 1
+            },
+            "keys": [
+                "ke",
+                "ku"
+            ]
+        },
+        {
+            "data": {
+                "partOfSpeech": "preposition",
+                "caseIndicator": 3,
+                "syllables": 0
+            },
+            "keys": [
+                "k"
+            ]
+        },
+        {
+            "data": {
+                "partOfSpeech": "preposition",
+                "caseIndicator": 3,
+                "syllables": 2
+            },
+            "keys": [
+                "proti",
+                "kvůli",
+                "díky",
+                "vůči"
+            ]
+        },
+        {
+            "data": {
+                "partOfSpeech": "preposition",
+                "caseIndicator": 3,
+                "syllables": 3
+            },
+            "keys": [
+                "naproti",
+                "oproti"
+            ]
+        },
+        {
+            "data": {
+                "partOfSpeech": "preposition",
+                "caseIndicator": 4,
+                "syllables": 1
+            },
+            "keys": [
+                "pro",
+                "za",
+                "před",
+                "na",
+                "pod",
+                "nad",
+                "skrz",
+                "o",
+                "po",
+                "ve",
+                "ob",
+                "přes"
+            ]
+        },
+        {
+            "data": {
+                "partOfSpeech": "preposition",
+                "caseIndicator": 4,
+                "syllables": 0
+            },
+            "keys": [
+                "v"
+            ]
+        },
+        {
+            "data": {
+                "partOfSpeech": "preposition",
+                "caseIndicator": 4,
+                "syllables": 2
+            },
+            "keys": [
+                "mimo",
+                "pode",
+                "nade",
+                "mezi",
+                "skrze"
+            ]
+        },
+        {
+            "data": {
+                "partOfSpeech": "preposition",
+                "caseIndicator": 6,
+                "syllables": 1
+            },
+            "keys": [
+                "o",
+                "na",
+                "po",
+                "při",
+                "ve"
+            ]
+        },
+        {
+            "data": {
+                "partOfSpeech": "preposition",
+                "caseIndicator": 6,
+                "syllables": 0
+            },
+            "keys": [
+                "v"
+            ]
+        },
+        {
+            "data": {
+                "partOfSpeech": "preposition",
+                "caseIndicator": 7,
+                "syllables": 1
+            },
+            "keys": [
+                "za",
+                "před",
+                "pod",
+                "nad",
+                "se"
+
+            ]
+        },
+        {
+            "data": {
+                "partOfSpeech": "preposition",
+                "caseIndicator": 7,
+                "syllables": 0
+            },
+            "keys": [
+                "s"
+            ]
+        },
+        {
+            "data": {
+                "partOfSpeech": "preposition",
+                "caseIndicator": 7,
+                "syllables": 2
+            },
+            "keys": [
+                "mezi",
+                "přede",
+                "pode",
+                "nade"
+                
+            ]
+        },
+        {
+            "data": {
+                "partOfSpeech": "preposition",
+                "caseIndicator": 7,
+                "syllables": 4
+            },
+            "keys": [
+                "počínaje"
+                
+            ]
+        }
+    ]
+}

@@ -1,0 +1,83 @@
+# tohle je komentář
+once {
+	^0		nula_
+	^0		@exit
+	
+	^00		nula_nula_
+	^00		@exit	
+}
+
+one_of {
+    1*             ý   [24]:m:ého 3:m:ému 6:m:ém 7:m:ým 1:f:á [236]:f:é 7:f:ou [14]:n:é 2:n:ého 3:n:ému 6:n:ém 7:n:ým
+}
+
+one_of {
+	10              desát
+	1*              náct
+}
+
+
+one_of {                
+	11              jede
+	12              dva
+	13              tři
+	14              čtr
+	15              pat
+	16              šest
+	17              sedm
+	18              osm
+	19              devate
+	1               první    [24]:*:prvních 3:*:prvním [6]:*:prvních 7:*:prvními
+	2               druzí    1:m:druhé [26]:*:druhých 3:*:druhým 4:m:druhé 7:*:druhými [14]:f:druhé [14]:n:druhá
+	3               třetí    [26]:*:třetích 3:*:třetím 4:m:třetí 7:*:třetími     
+	4               čtvrtý   1:m:čtvrté [26]:*:čtvrtých 3:*:čtvrtým 4:m:čtvrté 7:*:čtvrtými [14]:f:čtvrté [14]:n:čtvrtá
+	5               pátý     1:m:páté [26]:*:pátých 3:*:pátým 4:m:páté 7:*:pátými [14]:f:páté [14]:n:pátá
+	6               šestý    1:m:šesté [26]:*:šestých 3:*:šestým 4:m:šesté 7:*:šestými [14]:f:šesté [14]:n:šestá
+	7               sedmí    1:m:sedmé [26]:*:sedmých 3:*:sedmým 4:m:sedmé 7:*:sedmými [14]:f:sedmé [14]:n:sedmá
+	8               osmí     1:m:osmé [26]:*:osmých 3:*:osmým 4:m:osmé 7:*:osmými [14]:f:osmé [14]:n:osmá
+	9               devátí   1:m:deváté [26]:*:devátých 3:*:devátým 4:m:deváté 7:*:devátými [14]:f:deváté [14]:n:devátá
+}
+
+^*		@exit
+
+one_of {
+    [2-9]*         í_ [26]:*:ých_ 3:*:ým_ 4:m:é_ 4:f:é_ 7:*:ými_ [14]:n:á_ 1:f:é_
+}
+
+one_of {      
+	[2-4]*          cát
+	[5-9]*          desát     
+}
+
+
+one_of {                     
+	2*              dva
+	3*              tři
+	4*              čtyři
+	5*              pa
+	6*              še
+	7*              sedm
+	8*              osm
+	9*              deva
+}
+
+^**		@exit
+
+# skloňování stovek, tisíců apod. - zatím nebudeme řešit
+
+***		@exit
+
+@error
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,40 @@
+{
+    "sets": [
+      {
+        "data": { "properNounGender": "feminine", "partOfSpeech": "properNoun", "properNounCase": 1},
+        "keys": [ "Kateřina", "Věra" ]
+      },
+      {
+        "data": { "properNounGender": "feminine", "partOfSpeech": "properNoun", "properNounCase": 2 },
+        "keys": [ "Kateřiny", "Jany", "Věry" ]
+      },
+      {
+        "data": { "properNounGender": "feminine", "partOfSpeech": "properNoun", "properNounCase": 36 },
+        "keys": [ "Kateřině", "Janě", "Věře" ]
+      },
+      {
+        "data": { "properNounGender": "feminine", "partOfSpeech": "properNoun", "properNounCase": 4 },
+        "keys": [ "Kateřinu", "Janu", "Věru" ]
+      },
+      {
+        "data": { "properNounGender": "feminine", "partOfSpeech": "properNoun", "properNounCase": 6 },
+        "keys": [ "Kateřině", "Janě", "Věře" ]
+      },
+      {
+        "data": { "properNounGender": "feminine", "partOfSpeech": "properNoun", "properNounCase": 7 },
+        "keys": [ "Kateřinou", "Janou", "Věrou" ]
+      },
+      {
+        "data": { "properNounGender": "masculine", "partOfSpeech": "properNoun", "properNounCase": 1},
+        "keys": [ "Karel", "Jan", "Petr" ]
+      },
+      {
+        "data": { "properNounGender": "masculine", "partOfSpeech": "properNoun", "properNounCase": 24},
+        "keys": [ "Karla", "Petra" ]
+      },
+      {
+        "data": { "properNounGender": "feminine", "partOfSpeech": "properNoun", "properNounCase": 1, "check": true},
+        "keys": [ "Jana"]
+      }
+    ]
+}

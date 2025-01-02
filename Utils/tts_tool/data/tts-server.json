@@ -1,0 +1,380 @@
+[
+	{
+		"comment": "ukazkove pravidlo",
+		"active": false
+	},
+	{
+		"action": "Rules",
+		"rules": [
+			{ "condition": { "type": "text" }, "data": { "kept": true } }
+		]
+	},
+	{
+		"action": "Rules",
+		"comment":"Mezery před/za/mezi textem",
+		"rules": [
+			{ "regex": "^[ \n\t]+", "wholeWord": false, "replace": ""},
+			{ "regex": "[ \n\t]+$", "wholeWord": false, "replace": ""},
+			{ "regex": "([.,?!])[ ]{2,}", "wholeWord": false, "replace": "$1 "}
+		]
+	},
+	{
+		"action": "Rules",
+		"rules": [
+			{ "regex": "( )(\\d+)( )(\\()([a-záéíěóůúýčřžšťďň]+)(\\))", "replace": " $5", "wholeWord": false}
+		]
+	},
+	{
+		"action": "Rules",
+		"comment": "1x, 2x, 3x  apod.",
+		"rules": [
+			{ "regex": "(\\d+)( )?x", "replace": "$1 krát", "matchcase":true}
+		]
+	},
+	{
+		"action": "Rules",
+		"comment": "21% apod.",
+		"rules": [
+			{ "regex": "(\\d+)(%)", "replace": "$1$2", "data":{"check":true, "spell":true, "wholeNumber": true}}
+		]
+	},
+	{
+		"action": "Rules",
+		"comment": "spelování písmen, pokud tomu předcházejí číslice, nebo naopak",
+		"rules": [
+			{ "firstCharHint": "d", "regex": "\\d+[a-zA-Z]", "data": {"spell": true, "wholeNumber": true}, "matchcase":true},
+			{"regex": "[a-zA-Z]\\d+", "data": {"spell": true, "wholeNumber": true}, "matchcase":true}
+		]
+	},
+	{
+		"action": "Rules",
+		"comment": "spelování písmen, pokud je ve skupině &",
+		"rules": [
+			{"regex": "[a-zA-Z]\\&[a-zA-Z]", "data": {"spell": true}, "matchcase":true}
+		]
+	},
+	{	"action": "TokenData", "config": "prepositions.json", "comment": "prepositions" },
+
+	{	"action": "@include", "file": "rules/tituly.json" },
+	{	"action": "@include", "file": "rules/datum_casove_udaje.json" },
+	{	"action": "@include", "file": "rules/sklonovani_cisel.json" },
+	{	"action": "@include", "file": "rules/rozepsani_zkratek.json" },
+
+	{
+		"action": "Rules",
+		"comment": "Detekce řadových číslovek",
+		"rules": [
+			{ "regex": "([0-9]{1,5})[.]", "leftCondition": {"partOfSpeech": "preposition"}, "data": {"style":"ordinal", "check":true}, "replace":"$1" },
+			{ "regex": "([0-9]{1,5})[.] ([a-zžščřďťňáéíóú]+)", "data": {"style":"ordinal", "check":true}, "replace":"$1 $2", "condition": {"dateYear": false} }
+		],
+		"NOTE": "Řadové čislovky se sklo%nují, ale jen pro vybrané kontexty (viz rules/sklonovani_cisel.json)!"
+	},
+
+	{	"action": "@include", "file": "rules/mapovani_cisel_spec_tvary.json" },
+	{
+		"action": "BreakNewlines",
+		"comment": "frázování - odřádkování",
+		"sentenceThreshold": 2,
+		"paragraphThreshold": 3
+	},
+	{	"action": "@include", "file": "rules/body-rimske_cislice.json" },
+	{
+		"action": "Rules",
+		"rules": [
+			{ "regex": "(s\\.) (\\d+ až \\d+)", "replace": "strany $2", "wholeWord": true },
+			{ "regex": "(s\\.) (\\d+)", "replace": "strana $2", "wholeWord": true },
+			{ "regex": "(str\\.) (\\d+ až \\d+)", "replace": "strany $2", "wholeWord": true },
+			{ "regex": "(str\\.) (\\d+)", "replace": "strana $2", "wholeWord": true }
+		]
+	},
+	{	"action": "@include", "file": "rules/emaily.json" },
+	{	"action": "@include", "file": "tts-server_CRo_web.json" },
+	{
+		"action": "Rules",
+		"comment": "čísla faktur apod. číst po jedné číslici + hodně dlouhá čísla",
+		"rules": [
+			{ "firstCharHint": "d", "regex": "(\\d{5,30})", "wholeWord": true, "data": {"spell": true }, "left": ["číslo", "číslem"]},
+			{ "firstCharHint": "d", "regex": "(\\d{14,30})", "wholeWord": true, "data": {"spell": true }}
+		]
+	},
+	{
+		"action": "Rules",
+		"comment": "Spelování samostatných souhlásek VELKYM PISMEM",
+		"rules": [
+		    {"regex": "[BCDFGHJKLMNPQRSTVWXZČĎŇŘŠŤŽ]{2,10}",  "matchCase": true, "data": {"spell": true, "check": true }, "wholeWord": true },
+		    {"regex": "[csz]{2}",  "matchCase": true, "data": {"spell": true, "check": true }, "wholeWord": true }
+		]
+	},
+	{	"action": "@include", "file": "rules/cena-koruny.json" },
+	{	"action": "@include", "file": "rules/pomlcka.json" },
+	{
+		"action": "Rules",
+		"comment": "ks",
+		"rules": [
+			{ "firstCharHint": "d", "regex": "[1] ks", "matchCase": true, "replace": "jeden kus" },
+			{ "firstCharHint": "d", "regex": "([234]) ks", "matchCase": true, "replace": "$1 kusy" },
+			{ "firstCharHint": "d", "regex": "(\\d*) ks", "matchCase": true, "replace": "$1 kusů" }
+		]
+	},
+	{	"action": "@include", "file": "rules/rimske_cislice.json" },
+	{
+		"action": "Rules",
+		"comment": "iniciála",
+		"rules": [
+			{ "regex": "([A-Z]|Á|É|Í|Ó|Ů|Ú|Ý|Ě|Ž|Š|Č|Ř|Ď|Ť|Ň)(\\.)([A-Z]|Á|É|Í|Ó|Ů|Ú|Ý|Ě|Ž|Š|Č|Ř|Ď|Ť|Ň)(\\.)", "replace": "$1$3",  "matchCase": true, "data": {"spell": true }},
+			{ "regex": "([A-Z]|Á|É|Í|Ó|Ů|Ú|Ý|Ě|Ž|Š|Č|Ř|Ď|Ť|Ň)(\\.)", "replace": "$1",  "matchCase": true, "data": {"spell": true }},
+			{ "active": false, "regex": "([A-Z]|Á|É|Í|Ó|Ů|Ú|Ý|Ě|Ž|Š|Č|Ř|Ď|Ť|Ň)", "replace": "$1",  "wholeWord":true, "matchCase": true, "data": {"spell": true }, "leftCondition": {"type": "text"}, "rightCondition": {"type": "text"}}
+		]
+	},
+	{
+		"action": "Rules",
+		"comment": "hláskování",
+		"rules": [
+			{ "regex": "([a-z]|á|é|í|ó|ů|ú|ý|ě|ž|š|č|ř|ď|ť|ň)(\\.) ([a-z]|á|é|í|ó|ů|ú|ý|ě|ž|š|č|ř|ď|ť|ň)(\\.)", "replace": "$1$3",  "matchCase": true, "data": {"spell": true }},
+			{ "regex": "([a-z]|á|é|í|ó|ů|ú|ý|ě|ž|š|č|ř|ď|ť|ň)(\\.)([a-z]|á|é|í|ó|ů|ú|ý|ě|ž|š|č|ř|ď|ť|ň)(\\.)", "replace": "$1$3",  "matchCase": true, "data": {"spell": true }}
+		]
+	},
+	{
+		"action": "Rules",
+		"comment": "číslo s tečkou oddělující tisíce",
+		"rules": [
+			{"regex": "(\\d{1,3})\\.(\\d{3})\\.(\\d{3})", "replace":"$1$2$3", "wholeWord":true},
+			{"regex": "(\\d{1,3})\\.(\\d{3})", "replace":"$1$2", "wholeWord":true},
+			{"regex": "(\\d{1,3})\\ (\\d{3})\\ (\\d{3})", "replace":"$1$2$3", "wholeWord":true},
+			{"regex": "(\\d{1,3})\\ (\\d{3})", "replace":"$1$2", "wholeWord":true}
+		]
+	},
+	{
+		"action": "Rules",
+		"comment": "desetinné číslo",
+		"rules": [
+			{"regex": "(\\d+)(,)(\\d{2})", "replace":"$1 celých $3 setin", "data":{"check":true}},
+			{"regex": "(\\d+)(,)(\\d{3})", "replace":"$1 celých $3 tisícin", "data":{"check":true}},
+			{"regex": "(\\d+)(,)(\\d)", "replace":"$1 celých $3", "data":{"check":true}}
+		]
+	},
+	{
+		"action": "Rules",
+		"comment": "čísla faktur apod. číst po jedné číslici + hodně dlouhá čísla",
+		"rules": [
+			{ "firstCharHint": "d", "regex": "(\\d{5,30})", "wholeWord": true, "data": {"spell": true }, "left": ["číslo", "číslem"]},
+			{ "firstCharHint": "d", "regex": "(\\d{14,30})", "wholeWord": true, "data": {"spell": true }}
+		]
+	},
+	{	"action": "@include", "file": "rules/stupne_celsia.json" },
+	{	"action": "@include", "file": "rules/prohozeni_zavorek_konec_vety.json" },
+	{
+		"action": "Rules",
+		"comment": "hláskování",
+		"rules": [
+			{ "regex": "([bcdefghjlmnpqrtwxyščřžťďň])(?=\\s)", "wholeWord": true, "matchCase": true, "condition": { "@isset:spell": false }, "data": { "spell": true  } }
+		]
+	},
+	{
+		"action": "Rules",
+		"comment": "sloučení pro slova e-mail, e-shop (aby byla nalezena ve slovníku)",
+		"rules": [
+			{ "regex": "e-mail([a-z]|á|é|í|ó|ů|ú|ý|ě|ž|š|č|ř|ď|ť|ň){0,6}", "mergeInto": "text", "regexMap": [ "text" ], "data": {"kept": true}},
+			{ "regex": "e-shop([a-z]|á|é|í|ó|ů|ú|ý|ě|ž|š|č|ř|ď|ť|ň){0,6}", "mergeInto": "text", "regexMap": [ "text" ], "data": {"kept": true}}
+		]
+	},
+	{	"action": "@include", "file": "rules/frazovani_noPB.json" },
+	{
+		"action": "Rules",
+		"comment": "skóre?",
+		"rules": [
+			{ "search": ":", "wholeWord": false, "rightCondition": {"type": "number"}, "leftCondition": {"type": "number"}, "replace": " " }
+
+		]
+	},
+	{	"action": "TokenData", "config": "abbrevs.json", "comment": "abbrevs" },
+	{
+		"action": "ExpandSpecial",
+		"special": "cislo_uctu",
+		"numberStyle": "cisla_po_dvou",
+		"spell": true
+	},
+	{
+		"action": "ExpandSpecial",
+		"special": "reg_znacka",
+		"numberStyle": "cisla_po_dvou",
+		"spell": true
+	},
+	{
+		"action": "ExpandSpecial",
+		"special": "rodne_cislo",
+		"numberStyle": "cisla_po_dvou",
+		"spell": true
+	},
+	{
+		"action": "ExpandSpecial",
+		"special": "tel_cislo",
+		"spell": true
+	},
+	{
+		"action": "ExpandSpecial",
+		"special": "tel_cislo_po_dvou",
+		"numberStyle": "cisla_po_dvou",
+		"spell": true
+	},
+	{
+		"action": "ExpandDate"
+	},
+	{
+		"action": "ExpandEmail",
+		"config": "email_website_abbrev.json"
+	},
+	{
+		"action": "ExpandTime",
+		"hourNorm": [
+			[0, "nula"]
+		],
+		"minuteNorm": [
+			[0, "nula nula"],
+			[1, "nula jedna"],
+			[2, "nula dva"],
+			[3, "nula tři"],
+			[4, "nula čtyři"],
+			[5, "nula pět"],
+			[6, "nula šest"],
+			[7, "nula sedum"],
+			[8, "nula osum"],
+			[9, "nula devět"]
+		]
+	},
+	{
+		"action": "Rules",
+		"rules": [
+			{ "condition": { "type": "numberWithStyle", "spell": true, "style": "cisla_po_dvou" }, "data": { "spell": false }}
+		]
+	},
+	{
+		"action": "Rules",
+		"rules": [
+			{ "condition": { "type": "number", "dateYear": true }, "data": { "style": "cardinal_years"}}
+		]
+	},
+	{
+		"action" : "NormalizeNumbers",
+		"type"   : "number",
+		"style"  : "cardinal_years",
+		"rules"  : "numbers_cardinal_years.txt",
+		"comment": "numbers_cardinal_years.txt"
+	},
+	{
+		"action" : "NormalizeNumbers",
+		"type"	 : "numberWithStyle",
+		"style"	 : "cisla_po_dvou",
+		"rules"	 : "numbers_long.txt",
+		"comment": "numbers_long.txt"
+	},
+	{
+		"action" : "NormalizeNumbers",
+		"type"   : "number",
+		"style"  : "ordinal_plural",
+		"rules"  : "numbers_ordinal_plural.txt",
+		"comment": "numbers_ordinal_plural.txt"
+	},
+	{
+		"action" : "NormalizeNumbers",
+		"type"	 : "number",
+		"style"	 : "ordinal",
+		"rules"	 : "numbers_ordinal.txt",
+		"comment": "numbers_ordinal.txt"
+	},
+	{
+		"action" : "NormalizeNumbers",
+		"type"	 : "number",
+		"rules"	 : "numbers_cardinal.txt",
+		"comment": "numbers_cardinal.txt"
+	},
+	{
+		"action" : "ApplyDict",
+		"path"	 : "ortexcps_general.tdict",
+		"comment": "ortexcps_general.tdict"
+	},
+	{
+		"action" : "ApplyDict",
+		"path"	 : "ortexcps_streets.tdict",
+		"comment": "ortexcps_streets.tdict"
+	},
+	{
+		"action" : "ApplyDict",
+		"path"   : "ortexcps_names.tdict",
+		"comment": "ortexcps_names.tdict"
+	},
+	{
+		"action" : "ApplyDict",
+		"path"	 : "ortexcps_geographic.tdict",
+		"comment": "ortexcps_geographic.tdict"
+	},
+	{
+		"action" : "ApplyDict",
+		"path"	 : "ortexcps_foreign_la.tdict",
+		"comment": "ortexcps_foreign_la.tdict"
+	},
+	{
+		"action" : "ApplyDict",
+		"path"	 : "ortexcps_foreign_fr.tdict",
+		"comment": "ortexcps_foreign_fr.tdict"
+	},
+	{
+		"action" : "ApplyDict",
+		"path"	 : "ortexcps_foreign_en.tdict",
+		"comment": "ortexcps_foreign_en.tdict"
+	},
+	{
+		"action" : "ApplyDict",
+		"path"	 : "ortexcps_foreign_de.tdict",
+		"comment": "ortexcps_foreign_de.tdict"
+	},
+	{
+		"action" : "ApplyDict",
+		"path"	 : "ortexcps_firms.tdict",
+		"comment": "ortexcps_firms.tdict"
+	},
+	{
+		"action" : "ApplyDict",
+		"path"	 : "ortexcps_alza.tdict",
+		"comment": "ortexcps_alza.tdict"
+	},
+	{
+		"action": "PronounceableClassifier",
+		"trigramsFn": "trigrams.txt",
+		"comment"   : "trigrams.txt",
+		"mark_as"   : "spell"
+	},
+	{
+		"action" : "Spell",
+		"config" : "spelling.json",
+		"comment": "spelling.json"
+	},
+	{	"action": "FinishWords"  },
+	{	"action": "InsertSpaces" },
+	{	"action": "DistributeSilences" },
+	{
+		"comment": "Odstraní zapomenuté apostrofy",
+		"action": "Rules",
+		"rules": [
+			{ "condition": { "type": "punctChar", "text": "'" }, "data": { "type": "ignored" }}
+		]
+	},
+	{
+		"action": "SplitTooLong",
+		"maxNumWords": 100,
+		"maxNumChars": 700,
+		"comment": "Rozdělení příliš dlouhých frází podle počtu slov/znaků"
+	},
+	{	"action": "CheckBreaks"	},
+	{	"action": "CleanUp" },
+	{
+		"action": "NormalizeAlphabet",
+		"comment": "vyčištění od nepodporovaných znaků",
+		"alphabet": [
+			"ABCDEFGHIJKLMNOPQRSTUVWXYZĚŠČŘÉŽÝÁÍŤÚŮÓĎŇ",
+			"abcdefghijklmnopqrstuvwxyzěščřéžýáíťúůóďň",
+			"üëäöŕĺľô",
+			"ueaorllo"
+		]
+	}
+]

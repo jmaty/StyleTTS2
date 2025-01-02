@@ -1,0 +1,61 @@
+[
+    {
+        "action": "Rules",
+        "comment": "frázování - nahrazení znaků",
+        "rules": [
+            { "search": ":",      "wholeWord": false, "right": " ",              "rawContext": true, "condition": {"type": "punctChar"}, "replace": "," },
+            { "search": "–",      "wholeWord": false, "right": " ",              "rawContext": true, "condition": {"type": "punctChar"}, "replace": "," },
+            { "search": "„",      "wholeWord": false,                                                "condition": {"type": "punctChar"}, "replace": ""  },
+            { "search": "“",      "wholeWord": false,                                                "condition": {"type": "punctChar"}, "replace": ""  }
+
+        ]
+    },
+    {
+        "action": "Rules",
+        "comment": "frázování - závorky",
+        "active": false,
+        "rules": [
+            {"search": " (", "wholeWord": false, "replace": ","},
+            {"search": ") ", "wholeWord": false, "replace": ","},
+            {"search": "),", "wholeWord": false, "replace": ","},
+            {"search": ").", "wholeWord": false, "replace": "."},
+            {"search": " \"","wholeWord": false, "replace": ""},
+            {"search": "\"", "wholeWord": false, "replace": ""},
+            {"search": "\"", "right": [" ", ".", "!", ","], "wholeWord": false, "replace": ""}
+        ]
+    },
+    {
+        "action": "Rules",
+        "comment": "frázování - interpunkce",
+        "rules": [
+            { "search": ",",      "wholeWord": false,                            "rawContext": true, "condition": {"type": "punctChar"}, "insertAfter": {"type": "phone", "text":"#", "pause":true} },
+            { "search": ":",      "wholeWord": false, "right": " ",              "rawContext": true, "condition": {"type": "punctChar"}, "insertAfter": {"type": "phone", "text":"#", "pause":true} },
+            { "search": ";",      "wholeWord": false, "right": " ",              "rawContext": true, "condition": {"type": "punctChar"}, "insertAfter": {"type": "phone", "text":"#", "pause":true} },
+            { "search": "-",      "wholeWord": false, "right": " ", "left": " ", "rawContext": true, "condition": {"type": "punctChar"}, "insertAfter": {"type": "phone", "text":"#", "pause":true} },
+            { "search": "–",      "wholeWord": false, "right": " ", "left": " ", "rawContext": true, "condition": {"type": "punctChar"}, "insertAfter": {"type": "phone", "text":"#", "pause":true} },
+
+            { "search": ".",      "wholeWord": false,                            "rawContext": true, "condition": {"type": "punctChar"}, "insertAfter":  {"type": "sentenceBreak"}},
+            { "search": "!",      "wholeWord": false, "right": [" ", "\n"],      "rawContext": true, "condition": {"type": "punctChar"}, "insertAfter":  {"type": "sentenceBreak"}},
+            { "search": "?",      "wholeWord": false, "right": [" ", "\n"],      "rawContext": true, "condition": {"type": "punctChar"}, "insertAfter":  {"type": "sentenceBreak", "question": true}},
+            { "regex": "[.]{2,}", "wholeWord": false, "replace": ".",            "rawContext": true, "condition": {"type": "punctChar"}, "insertAfter":  {"type": "sentenceBreak"}},
+            { "search": "…",      "wholeWord": false, "replace": ".",            "rawContext": true, "condition": {"type": "punctChar"}, "insertAfter":  {"type": "sentenceBreak"}},
+            { "regex": "\\?$",    "wholeWord": false,                            "rawContext": true, "condition": {"type": "punctChar"}, "insertAfter":  {"type": "sentenceBreak", "question": true}}
+        ]
+    },
+    {
+        "action": "Rules",
+        "comment": "frázování - spojky",
+        "rules": [
+            {"search": "nebo", "wholeWord": true, "insertBefore": {"type": "phone", "text":"#", "pause":true}}
+        ]
+    },
+    {
+        "action": "Rules",
+        "comment": "Punctuation postprocess",
+        "rules": [
+            {"search": " ",   "right": [".", "!", ","], "replace": "" },
+            {"regex": "# #", "replace": "#" }
+        ]
+    }
+]
+

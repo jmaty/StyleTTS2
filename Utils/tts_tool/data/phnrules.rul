@@ -1,0 +1,703 @@
+// -*- coding: utf-8 -*-
+//
+// PLEASE, READ THE FOLLOWING NOTES (LM = Ludek Muller, 16.4.2001):
+//
+// 1)
+//  Each simple rule has a general form:
+//  [+]E-C/L1,L2,...,Lm_R1,R2,...,Rn
+//   where the square brackets mean that their content is optional,
+//   the character + signs that the rule is an alternative rule,
+//   E is an Evidence part of a rule,
+//   C is a Conclusion part of a rule,
+//   Li is a Left context part of a rule,
+//   Ri is a Right context part of a rule.
+//
+//  Each rule has its E, L, R, and C part. L and R parts can be empty. Each part can have several elements separeted by ,.)
+//   e.g.:
+//   E-C/L1,L2,...,Lm_R1,R2,...,Rn
+//                       ^the 2nd element of the R part of the rule
+//
+// 2)
+//  Space,and tab are not separators, e.g.the rule:
+//  k-k/|_| JS,|v
+//  can be also written in the form:
+//   k - k / | _ | JS, | v
+//  but also:
+//   k - k / | _ | J S, | v
+//  .
+//
+// 3)
+//  A comment can be done by //.
+//
+// 4)
+//  The separators of [], rules, groups, and stopsymbols are lines;
+//  i.e. each [], rule, group, stopsymbol shoul be defined on one line.
+//
+// 5)
+//  Every string inside a [] is considered as a name of a part of rule definition file and checked.
+//
+// 6)
+//  + - / _ are the key characters applied within a rule definition.
+//  (The character + signs that the rule is an alternative rule.)
+//  (Each rule should contain - / _ characters.)
+//
+// 7)
+//  The following (white)characters inside a line are ignored:
+//  space 0x20 and tab, 0x09.
+//
+// 8)
+//  All other characters are treated as letters, e.g. a rule can have the following form:
+//  ;_./#_" // replace ; with . inside "
+//
+// 9)
+//  Maximum number of Groups is 127!
+//
+// 10)
+//  If the character 'b', resp. 'f' appears instead of 'B', resp. 'F' in the set name [] then the input string rather then the output string is taken as the right context.
+//
+// 11)
+//  The left context (i.e. the 'f' or 'F' mode) is not supported yet.
+//
+// 12)
+//  The rule order is important. Rules are taken acording their order and only the first available rule and its alternatives are activated and aplied on the given input string place.
+//
+// 13)
+//  Group is Group of substitution symbols. Only one substitution symbol can appear in an element of a part of a rule.
+//  (Each rule has its E, L, R, and C part. L and R parts can be empty. Each part can have several elements separeted by ,.)
+//  E-C/L1,L2,...,Lm_R1,R2,...,Rn
+//                   ^an element of the R part of the rule
+// 14)
+//  The alternative rules are applied on the same place as the preceding a nonalternative rule.
+//
+// 15)
+//  On the given place the first aplicable rule is aplied. Furthermore, the set of alternative (+) rules immediately following the first aplicable rule is also aplied -
+//  on condition that the given alternative rule is aplicable.
+//  Then the input string place is shift.
+//
+// 16)
+// In the case of [Stop Symbols]:
+// - only Groups symbols are allowed to be used
+// - only one Group name per a line is allowed
+//
+// 17)
+// In the case of [RC Influence Set] rules:
+// - the RC (right context) is always taken from the output buffer (not from the input string).
+// - '+' character is not allowed
+//
+// 18)
+// In the case of [Voiced RC Impact Symbols]:
+// - only Groups symbols are allowed to be used
+// - only one Group name per a line is allowed
+//
+// 19)
+// High level API:
+// Each word should be sourrounded by '|', e.g.:
+// |TEXT1|TEXT2|TEXT3|
+//
+// Then the R part of each RULE has a form: |RCTEXT| (only the right closest word is taken into account!)
+//      the E part of each RULE has a form: |TEXT    (i.e. without the right '|').
+//
+// 20)
+// Each word pronunciation in a vocab must have its transcription for U (Unvoiced) RC (Right Context), and can have a transcrioption for V RC.
+// If a vocabulary contains a transcription of a word pronunciation with V RC,
+// then the vocabulary should contain transcriptions of all pronunciations of the given word (both with U and V RC).
+//
+
+//-----------------------------------------------------------------------------
+// Zmeny JM 25.6.2002:
+//
+//  Znaceni: q -> w, Q -> W, ^ -> Q, ~ -> J, % -> y, @ -> Y, & -> F
+//  Pridan raz: znacka !
+//  Pridan fonem pro znele "ch": znacka G
+//  Pridany slabikotvorne r,l,m - P,L,H
+//  nova pravidla
+//  rozsireni stavajici foneticke abecedy je oznaceno jako EXT
+
+[Groups]
+LTR     = á,č,ď,é,í,ň,ó,ř,š,ť,ú,ů,w,x,y,ý,ž,ü,ë,ä,ö,ŕ,ĺ,ľ,ô
+PHN     = A,C,D,E,I,J,O,R,S,T,U,U,v,X,i,I,Z,i,e,e,e,r,l,l,o
+LTR12   = q,ě
+PHN12   = kv,je
+LTR21   = ch
+PHN21   = x
+LDIF    = au,ou,eu
+PDIF    = Y,y,F
+PNDIF   = au,ou,eu
+DTNI.L  = di,dí,ti,tí,ni,ní
+DTNI.P  = Di,DI,Ti,TI,Ji,JI
+DTNE.L  = dě,tě,ně
+DTNE.P  = De,Te,Je
+// JM 28.1.2020: uprava zpracovani dvojitych hlasek
+//DBL     = zs,ss,ZS,SS,cc,CC,nn,kk,ll   // JM 25.6.2002   seznam foneticky stejnych hlasek, ktere je mozno zjednodusit (vyslovit pouze jednu)
+//SGL     = s,s,S,S,c,C,n,k,l           // JM 25.6.2002
+// JM 28.1.2020: dvojite hlasky bez podpory dvojite vyslovnosti
+DBLC    = ďď,ff,gg,nn,ňň,pp,qq,řř,ss,tt,ťť,vv,ww,xx
+SGLC    = ď,f,g,n,ň,p,q,ř,s,t,ť,v,w,x
+// JM 28.1.2020: dvojite hlasky s podporou dvojite vyslovnosti (pro alignment - slovnik)
+DBLC2   = čč,šš,žš
+SGLC2   = č,š,š
+VOCDIF  = a,A,e,E,i,I,o,O,u,U,y,Y,F
+//VOCDIF|   = a|,A|,e|,E|,i|,I|,o|,O|,u|,U|,y|,Y|,F|
+|VOCDIF = |a,|A,|e,|E,|i,|I,|o,|O,|u,|U,|y,|Y,|F
+!VOCDIF = !a,!A,!e,!E,!i,!I,!o,!O,!u,!U,!y,!Y,!F
+VOCDIF! = a|!,A|!,e|!,E|!,i|!,I|!,o|!,O|!,u|!,U|!,y|!,Y|!,F|!
+//VOCD!2  = a!,A!,e!,E!,i!,I!,o!,O!,u!,U!,y!,Y!,F!
+ZPC     = b,d,D,g,v,z,Z,h,w,W
+ZPC0V   = b,d,D,g,z,Z,h,w,W                 // JM 7.11.2019: znele parove hlasky bez [v]
+|ZPC    = |b,|d,|D,|g,|v,|z,|Z,|h,|w,|W
+|ZPC0V  = |b,|d,|D,|g,|z,|Z,|h,|w,|W        // // JM 7.11.2019: znele parove hlasky bez [|v]
+NPC     = p,t,T,k,f,s,S,x,c,C
+|NPC    = |p,|t,|T,|k,|f,|s,|S,|x,|c,|C
+ZPCAZ   = b,d,D,g,v,z,Z,G,w,W      // JM 25.6.2002 asimilace znelosti z neznele hlasky na znelou (x se spodobuje na G a ne na h)
+SON     = m,n,J,l,r,j,M,N                // JM 25.6.2002
+|SON    = |m,|n,|J,|l,|r,|j,|M,|N       // JM 25.6.2002
+//PREFZ   = pQez,pQed,bez,nad,pod,ob,od   // predpony koncici znelym konsonantem
+PREFZ.1   = pRes,pRed,bez,nad,pod,ob,od   // predpony koncici znelym konsonantem, predlozka "přes" se přepíše jako "přez"
+PREFZ.2   = pQez,pQed,bez,nad,pod,ob,od
+//PREP1=k,s,v,z                     // JM 25.6.2002 - kvuli zavedeni razu
+//PREP1R=k!,s!,f!,s!                // JM 25.6.2002 - kvuli zavedeni razu
+PREP1   = k,s,v,f,z                       // JM 25.6.2002 - kvuli zavedeni razu
+PREP1!  = k|!,s|!,f|!,f|!,s|!               // JM 25.6.2002 - kvuli zavedeni razu
+PREFV   = spolu, proTi, kvazi, anti, sebe, mezi, mimo, para, polo, pro, pRi, pQi, do, na, ne, po, za, vi
+PREFV!  = spolu!,proTi!,kvazi!,anti!,sebe!,mezi!,mimo!,para!,polo!,pro!,pQi!,pQi!,do!,na!,ne!,po!,za!,vi!
+PREFK   = pRed, pQed, nej, bez, roz, z
+PREFK!  = pQet!,pQet!,nej!,bes!,ros!,s!
+PREPV   = pRi,pro,do,ke,na,po,ve,za,ze,o,u
+PREPV!  = pRi|!,pro|!,do|!,ke|!,na|!,po|!,ve|!,za|!,ze|!,o|!,u|!
+PREPC   = pQed,pQez,skrz,zpod,bez,nad,pod,ob,od
+PREPC!  = pQet|!,pQes|!,skrs|!,spot|!,bes|!,nat|!,pot|!,op|!,ot|!
+PREDD1  = |pQe, |na, |po, |!o, |o       // JM 13.7.2002 - predpony koncici na -d (bez koncoveho 'd') - pro prepis ds, dš ??? mozna seznam moznych predpon neni uplny ???
+PREDD2  = |nepQe, |nena, |nepo, |ne!o, |neo
+PREDD3  = |bespQe, |nejpQe, |bezna, |nejna, |bespo, |nejpo, |bes!o, |nej!o, |bezo, |nejo
+// JM 28.1.2020: uprava zpracovani dvojitych hlasek
+//PREDZ1  = |be, |ro
+//PREDZ2  = |nebe, |nero
+//PREDZ3  = |nejbe, |nejro
+LPREDD  = pře,na,po,o      // predpona s "d" na konci: před, nad, pod, od
+LPREDR  = supe,hype,čtve   // predpona s "r" na konci: super, hyper, čtver
+LPREDZ  = skr,be,ro        // predpona s "z" na konci: skrz, bez, roz
+LPREDB  = o                // predpona s "b" na konci: ob
+CON     = p,b,t,d,T,D,k,g,c,w,C,W,f,v,s,z,R,Q,S,Z,j,x,h,r,l,m,n,N,J,L,P,H,G   // JM 2.7.2002
+CON!    = p|!,b|!,t|!,d|!,T|!,D|!,k|!,g|!,c|!,w|!,C|!,W|!,f|!,v|!,s|!,z|!,R|!,Q|!,S|!,Z|!,j|!,x|!,h|!,r|!,l|!,m|!,n|!,N|!,J|!,L|!,P|!,H|!,G|!
+CONjlr  = p,b,t,d,T,D,k,g,c,w,C,W,f,v,s,z,R,Q,S,Z,x,h,m,n,N,G,J     // souhlasky bez [r, l, j] a jejich slabikotvornych variant
+CONjlrJ = p,b,t,d,T,D,k,g,c,w,C,W,f,v,s,z,R,Q,S,Z,x,h,m,n,N,G       // souhlasky bez [r, l, j, J] a jejich slabikotvornych variant
+PAU     = #,$,%       // JM 25.6.2002
+PAU!    = #|!,$|!,%|!
+|PAU    = |#,|$,|%    // JM 25.6.2002
+PREFEX  = |ne!e, |ko!e, |koe, |nee, |e, |!e // predpona ex- (bez x)
+//20.90   = sedumdesA, osumdesA,devadesA,sedHdesA, CtiRice,osHdesA, padesA,SedesA, dvace,tQice
+20.90   = sedumde,osumdes,devades,sedHdes, CtiRice,osHdesA, padesA,SedesA, dvace,tQice // zda se, ze delka prvku muze byt max. 7!
+
+// JMa 5.12.2012: Jiz neni zapotrebi, 0 v kodu transkripce znaci "prazdny znak"
+// ANY     = a,A,e,E,i,I,o,O,u,U,y,Y,F,p,b,t,d,T,D,k,g,c,w,C,W,f,v,s,z,R,Q,S,Z,j,x,h,r,l,m,n,N,J,L,P,H,G
+// ANY0    = a0,A0,e0,E0,i0,I0,o0,O0,u0,U0,y0,Y0,F0,p0,b0,t0,d0,T0,D0,k0,g0,c0,w0,C0,W0,f0,v0,s0,z0,R0,Q0,S0,Z0,j0,x0,h0,r0,l0,m0,n0,N0,J0,L0,P0,H0,G0
+
+
+//-----------------------------------------------------------------------------
+[Set 1B]    // vyjimecna slova a zjednoduseni skupin
+
+
+ stimul   - stymul / _
+ rekogni  - rekogny / _
+ analyti  - analyty / _
+ multi    - multy / _
+ romanti  - romanty / _
+ ventila  - ventyla / _
+ ergeti   - ergety / _
+ senziti  - senzyty / _
+
+ iabeti - yjabety / d _
+
+
+ audio -  audyjo / _
+ kardio - kardyjo / _
+ fyzio  - fyzyjo / _
+ biolo  - byjolo / _
+ bio    - byjo   / _
+
+ přij   - při   / _ ď,ť
++přij   - přij  / _ ď,ť
+
+ džbán  - džbán / _
++džbán  - žbán  / _
+
+ džber  - džber / _
++džber  - žber  / _
+
+ srdc   - src   / _
++srdc   - srdc  / _
+
+ dce    - ce    / _ r,ř
++dce    - dce   / _ r,ř
+
+ ctn    - ctn   / _
++ctn    - cn    / _
+
+ ptsk   - ptsk  / _
++ptsk   - psk   / _
+
+ stsk   - stsk  / _
++stsk   - sk    / _
+//+stsk   - stk   / _
+
+//  zští   - zští  / _
+// +zští   - ští   / _
+//
+//  žští   - žští  / _
+// +žští   - ští   / _
+
+ stští      - stští  / _
++stští      - ští    / _
+
+ inkoust    - ingoust / _
++inkoust    - inkoust / _
+
+ plakát     - plagát / _
++plakát     - plakát / _
+
+ akát       - akát   / _
++akát       - agát   / _
+
+ ť - ť / š _ k        // Pr: "tloušťka" [tlySTka]
++ť - t / š _ k        // Pr: "tloušťka" [tlyStka]
+
+ zd - zd / _ ň,ni,ní,ně        // Pr: "prázdniny" [prAzdJini]
++zd - zď / _ ň,ni,ní,ně        // Pr: "prázdniny" [prAzDJini]
++zd - z  / _ ň,ni,ní,ně        // Pr: "prázdniny" [prAzJini]
+ zd - zd / _ n        // Pr: "prázdný" [prAzdnI],
++zd - z  / _ n        // Pr: "prázdný" [prAznI]
+
+ vz - vz / | _ b,p      // Pr: "vzbudit" [vzbuDit], "vzpomínka" [fspomINka]
++vz - z  / | _ b,p      // Pr: "vzbudit" [zbuDit], "vzpomínka" [spomINka]
+
+ js - s  / | _        // Pr: "jsem" [sem]
++js - js / | _        // Pr: "jsem" [jsem]
+
+ ie 	- ije 	/ _ |
+ ií 	- ijí 	/ _ |
+ ii 	- iji 	/ _ |
+ iím 	- ijím	/ _ |
+ iích	- ijích	/ _ |
+ iemi	- ijemi	/ _ |
+ ia 	- ija 	/ _ |
+ io 	- ijo 	/ _ |
+ iu 	- iju 	/ _ |
+ iem 	- ijem 	/ _ |
+ iách	- ijách	/ _ |
+ ium	- ijum	/ _ |
+ ius	- ijus	/ _ |
+ iémi	- ijémi	/ _ |
+ iami	- ijami	/ _ |
+ ye 	- yje 	/ _ |
+ yí 	- yjí 	/ _ |
+ yi 	- yji 	/ _ |
+ yím 	- yjím	/ _ |
+ yích	- yjích	/ _ |
+ yemi	- yjemi	/ _ |
+ ya 	- yja 	/ _ |
+ yo 	- yjo 	/ _ |
+ yu 	- yju 	/ _ |
+ yem 	- yjem 	/ _ |
+ yách	- yjách	/ _ |
+ yum	- yjum	/ _ |
+ yus	- yjus	/ _ |
+ yémi	- yjémi	/ _ |
+ yami	- yjami	/ _ |
+
+
+ DBLC - SGLC / _
+ h    - h / c _ h
+ h    - 0 / _ h
+
+ DBLC2 - SGLC2 / _
++DBLC2 - DBLC2 / _
+
+ cc - cc / _
++cc - c / _ 
+
+
+d - d / LPREDD _ d
+d - 0 /  _ d
+
+m - m /  _ me|
+m - 0 /  _ m
+
+r - r / LPREDR _ r
+r - 0 / _ r
+
+z - z / LPREDZ _ z
+z - 0 / _ z
+
+b - b / LPREDB _ b
+b - 0 / _ b
+
+// Vcetne spodoby znelosti
+ z - s / LPREDZ _ s
+ z - 0 / _ s
+ z - s / LPREDZ _ š
+ z - 0 / _ š
+
+ k - k / ja _ koli
+ k - 0 / _ k
+
+ l - l / pů _ l
+ l - 0 / _ l
+
+// JM 28.1.2020: jj vzdy zustava
+
+//-----------------------------------------------
+// -ism-
+
+//ismu  - izmu    / _ s|,|
+//isme - izme     / _ m|,ch,|
+//ismi  - izmi    / _ |
+//ismy  - izmy    / _ |
+//ismů  - izmů    / _ m|,|
+//isma  - izma    / _ |
+
+
+//-----------------------------------------------------------------------------
+[Set 2B]    // Jednoduchy prepis
+
+// zmekcovani
+// POZOR: musi byt umisteno pred prepisem "y"
+DTNI.L - DTNI.P / _ // di, ti, ni - "divadlo" [Divadlo], dítě" [DITe], "tíha" [TIha], "protiva" [proTiva], "koník" [koJIk], "ničit" [JiCit]
+DTNE.L - DTNE.P / _ // dě, tě, ně -  dělat" [Delat], "štěně" [STeJe], "koně" [koJe]
+mě - mJe / _  // JM 4.7.2002: Aby bylo mozno prepsat slabikotvorne "m", je treba nejdriv prepsat mě
+              // Pr: "město" [mJesto]
+
+// ai - aj / _  // nefunguje, kdyz 'a' je konec predpony
+// oi - oj / _  // atd. ei, ui
+
+// th - t / _   // JM 25.6.2002 // Prepis th - nefunguje napr. Pithart, čvrthodina, ...
+
+//-----------------------------------------------
+// Jednoduchy prepis
+LTR     - PHN   / _ // jednoduchy prepis "1 ku 1"
+LTR12   - PHN12 / _ // jednoduchy prepis "1 ku 2"
+LTR21   - PHN21 / _ // jednoduchy prepis "2 ku 1"
+
+s - s / i _ man   // talisman
+s - s / proti _ m   // -ism-  JM 13.7.2002          // Pr: "protisměr" [proTismJer]
+s - z / i _ m       // nemelo by byt uvedeno pred y - i ?  // Pr: "alibismus" [alibizmus] // nefunguje na talisman, atd.
+
+//-----------------------------------------------
+// Diftongy // JM 2.7.2002 -> musi byt pred pravidly pro prepis razu
+//au - Y / _  // Pr: auto [Yto]
+//ou - y / _  // Pr: nouze [nyze]
+//eu - F / _    // ??? JM 25.6.2002: eu se nebude defaultne prepisovat jako diftong, protoze diftongu 'eu' je oproti 'au' a 'ou' velice malo
+                // Pr: "nedělat" [neuDelat]
+// eu - e!u / _   // "eu" se bude prepisovat jako [eu]
+//+eu - eu  / _
+
+ // ou   - y     / _ |         // JM 1.3.2014: Na konci se slova se "ou" prepise jako diftong
+ // au   - Y     / | _ |       // JM 1.8.2016: Cele slovo "au" prepise jako diftong
+
+// JM 4.10.2018: Revize prepisu diftongu
+ eu - eu / _ |,m|   // Na konci slova se "eu" neprepise jako diftong
+ eu - F  / _        // V ostatnich pripadech se prepise jako diftong
+ au - au / k _ |    // Na konci slova po "k" se "au" neprepise jako diftong
+ au - Y / _         // V ostatnich pripadech se prepise jako diftong
+ ou - y / _         // "ou" se vzdy prepisi jako diftong (pokud mezi ne neni vlozen pomocny symbol)
+
+ // // LDIF - PNDIF / | _ |       // JM 1.3.2014: Na konci se slova se "au, eu" neprepisi jako diftongy s vyjimkou celeho slova
+ // LDIF - PNDIF / _ |,m|
+ // // +LDIF - PDIF  / _ |     //              alternativne se prepisi jako diftongy
+ // LDIF - PDIF  / _           //              V ostatnich pripadech se prepisi jako diftongy
+
+ a^u - a!u / _  // JM 13.7.2002 : pomocne znaceni ^ udava, ze au, ou, eu se neprepisi jako diftong
++a^u - au  / _  //                vyuzije se v pripade slovniku s "pocestenymi" zapisy slov, napr. použít po^užít
+ o^u - o!u / _
++o^u - ou  / _
+// e^u - F / _   // v pripade e^u se naopak dava zapisem ^ najevo, ze ma byt diftong, napr. eunuch e^unuch
+ e^u - e!u / _
++e^u - eu  / _
+
+ a~u - au  / _  // JM 29.9.2014 : pomocne znaceni ~ udava, ze au, ou, eu se neprepisi jako diftong, ale primarne jako posloupnost dvou samohlasek bez razu
++a~u - a!u / _  //                vyuzije se v pripade slovniku s "pocestenymi" zapisy slov, napr. muzeum muze~um
+ o~u - ou  / _
++o~u - o~u / _
+ e~u - eu  / _
++e~u - e!u / _
+
+ ^ - ! / s,z _ VOCDIF      // JMa 12.4.2010: pomocne znaceni ^ tady udava, ze napr. "z^organizuje" se reklo s razem jako [s!organyzuuje]
+
+
+[Set 3B]
+
+//-----------------------------------------------------------------------------
+// Spodoba znelosti
+
+ sh - sx /_   // Pr: "shoda"
++sh - zh /_   // Pozor na slova "shluk, shůry, shora, ..." - nelze prepisovat na sx -> nutno uchovavat ve slovniku vyjimek
+
+ PREFZ.1 - PREFZ.2 / | _ |ZPC,|SON,|R,|VOCDIF     // JM 25.6.2002 oprava
+
+ k - k / | _ |SON,|v
+ z - z / | _ |SON,|v
+ v - v / | _ |SON
+
+  // Koncovka -me (1.os. mn.c)  // JM 2.7.2002
+// ZPC - ZPC / _ me|      // Pr: "buďme" [buDme] nefunguje na vezme
+//+ZPC - NPC / _ me|      // Pr: "buďme" [buTme]
+ D - T / _ me|          // Pr: "buďme" [buTme]
++D - D / _ me|          // Pr: "buďme" [buDme]
+ Z - S / _ me|          // Pr: "snažme" [snaSme]
++Z - Z / _ me|          // Pr: "snažme" [snaZme]
+ v - f / _ me|          // Pr: "bavme" [bafme]
++v - v / _ me|          // Pr: "bavme" [bavme]
+ b - p / _ me|          // Pr: "hubme" [hupme]
++b - b / _ me|          // Pr: "hubme" [hubme]
+ R - Q / _ me|          // Pr: "vařme" [vaQme]
++R - R / _ me|          // Pr: "vařme" [vaRme]
+
+ ZPC - NPC   / _ NPC,|NPC,|SON,|VOCDIF,|v,PAU,|PAU,!,|!    // JM 25.6.2002
+ NPC - NPC   / _ v,|v
+ NPC - ZPCAZ / _ ZPC,|ZPC,|R  // EXT: Pokud pouzivame "znele ch" [G], pouzijeme tuto radku
+ //NPC - ZPC   / _ ZPC,|ZPC,|R  // Pokud NEpouzivame "znele ch" [G], pouzijeme tuto radku
+
+ R - Q / _ NPC,|NPC,|SON,|VOCDIF,|v,PAU,|PAU,!,|!        // JM 25.6.2002
+ R - Q / NPC _
+
+//-----------------------------------------------
+// -ism- - alternativni prepis
+
+//ismu  - izmu    / _ s|,|
+//isme - izme     / _ m|,x|,G|,|
+//ismi  - izmi    / _ |
+//ismU  - izmU    / _ m|,|
+//isma  - izma    / _ |
+
+
+[Set 4B]
+
+//-----------------------------------------------
+// Slabikotvorne hlasky // JM 9.11.2002
+// EXT: Nechceme-li pouzivat -> nutno zakomentovat
+ r       - P        / CONjlr _ CONjlr,|      // Pr: "krk" [kPk], "bratr" [bratP]
+ l       - L        / CONjlr _ CONjlr,|      // Pr: "vlk" [vLk], "kradl" [kradL]
+ sedm    - sedH     / _ CONjlrJ,|
++sedm    - sedum    / _ CONjlrJ,|
+ osm     - osH      / _ CONjlrJ,|
++osm     - osum     / _ CONjlrJ,|
+ sedma   - sedHa    / | _ 20.90
++sedma   - sedH!a   / | _ 20.90
++sedma   - seduma   / | _ 20.90
+ osma    - osHa     / | _ 20.90
++osma    - osH!a    / | _ 20.90
++osma    - osuma    / | _ 20.90
+//m - H / CON _ CONjlr,|   // Pr: "osm" [osH], "smlouva" [smlyva] !!! problematicke u slozenych slov, atd.
+// m -> H se uplne vyresi, jen kdyz budeme znat slozeni slov
+
+//-----------------------------------------------
+// Foneticky stejne hlasky
+// JM 11.7.2002 Vyjimky nasledujich pravidel o zjednodusovani foneticky stejnych hlasek
+// Na hranici predpony a slovniho zakladu se doporucuje plna vyslovnost
+//  ss     - ss    / |ro,|be _     // Pr: "rozsvítit" [rossvITit]
+// +ss     - s     / |ro,|be _
+
+// JM 28.1.2020: presunuto do SET1B - reseno na pismenech
+//// JM 3.6.2010
+// ss     - ss    / PREDZ1, PREDZ2, PREDZ3 _     // Pr: "rozsvítit" [rossvITit]
+//+ss     - s     / PREDZ1, PREDZ2, PREDZ3 _
+// ss     - s     / _                            // Pr: "plasská" [plaskA]
+//+ss     - ss    / _
+// sS     - sS    / PREDZ1, PREDZ2, PREDZ3 _     // Pr: "rozšířit" [rosSIRit]
+//+sS     - S     / PREDZ1, PREDZ2, PREDZ3 _
+// sS     - S     / _                            // Pr. "francouzští" [francySTI]
+//+sS     - sS    / _
+
+// JM 28.1.2020: presunuto do SET1B - reseno na pismenech
+// jakk   - jakk  / | _           // Pr: "jakkoliv" [jakkolif]  je v seznamu vyjimek
+//+jakk   - jak   / | _
+// pUll   - pUll  / | _           // Pr: "půllitr" [pUllitP] je vseznamu vyjimek
+//+pUll   - pUl   / | _           //
+
+// JM 28.1.2020: presunuto do SET1B - reseno na pismenech
+//// JM: 1.varianta prepisu 2 foneticky stejnych hlasek je zjednoduseni na jednu hlasku (podle fonetiku se silne doporucuje zvlaste uvnitr slova, kde neni pocitovan sev pripony)
+////     2. varianta je zachovani obou hlasek
+// DBL - SGL / _    // Pr: "panna" [pana], "měkký" [mJekI]
+//+DBL - DBL / _    // Pr: "panna" [panna], "měkký" [mJekkI]
+
+// JM 28.1.2020: presunuto do SET1B - reseno na pismenech
+// nJ - J / _    // JM 25.6.2002 Pr: "korunní", "vinni", "plynně"
+
+//-----------------------------------------------
+// Prepis x, ktere bylo predprepsano jako X // JM 2.7.2002
+
+ X - gz / PREFEX _ VOCDIF  // Pr: "exaktní" [egzaktJI], "neexistuje" [neegzistuje]
+ X - gz / _ ZPC,|ZPC               // Pr: "exhumace" [egzhumace], "exmanželka" [egzmanZelka]
+ X - ks / _                   // Pr: "extrakce" [ekstrakce], "neexponovat" [neekxponovat], "sex" [seks], "pexeso" [pekseso]
+
+
+//-----------------------------------------------
+// Spodoba artikulacni
+ n - N / _ k,g        // Pr: "banka" [baNka], "tango" [tango]
+
+// EXT: Nechceme-li pouzivat -> nutno zakomentovat
+ m - M / _ v,f        // Pr: "tramvaj" [traMvaj], "nymfa" [niMfa] // JM 4.7.2002
++m - m / _ v,f        // Pr: "tramvaj" [tramvaj], "nymfa" [nimfa]
+
+ t - t / _ J          // Pr: "špatně" [SpatJe]
++t - T / _ J          // Pr: "špatně" [SpaTJe]
+ d - d / _ J          // Pr: "vodník" [vodJIk]
++d - D / _ J          // Pr: "vodník" [voDJIk]
+ n - n / _ T,D        // Pr: "studenti" [studenTi]
++n - J / _ T,D        // Pr: "studenti" [studeNTi]
+
+//-----------------------------------------------------------------------------
+// Nasledujici radky je treba odkomentovat, pokud nechceme provadet jednoduchou
+// detekci predpony ve slovech. V tom pripade se budou pro ts, tS, ds, dS, dz, dZ
+// vzdy uvazovat obe varianty transkripce.
+// dz - dz / _
+//+dz - w  / _
+// dZ - dZ / _
+//+dZ - W  / _
+// ts - ts / _
+//+ts - c  / _
+// ds - ts /_
+//+ds - c  /_
+// tS - tS /_
+//+tS - C  /_
+// dS - tS /_       // !!! JM 25.6.2002 POZOR: zde byla chyba  dS - dS /_
+//+dS - C /_
+//-----------------------------------------------------------------------------
+
+//-----------------------------------------------------------------------------
+// Nasledujici radky provadeji jednoduchou detekci predpon ve slovech a v pripade,
+// ze je nalezena predpona je mozna pouze plna transkripce ts, tS, ds, dS, dz, dZ.
+// Nejedna-li se o predponu, provede se zjednodusena transkripce na c, C, w, W.
+//  ts - c  / _    // Pr: "dětský" [DeckI]
+// +ts - ts / _    // Pr: "dětský" [DetskI]
+//  tS - C  / _    // Pr: "většina" [vjeCina]
+// +tS - tS / _    // Pr: "většina" [vjetSina]
+// JM 13.7.2002 : ts se zachova na hranici predpony a hranice slova
+ ts - ts / PREDD1, PREDD2, PREDD3 _  // Pr: "předsíň" [pQetsIJ]
++ts - c  / PREDD1, PREDD2, PREDD3 _
+ ts - c  / _                         // Pr: "lidský" [lickI]
++ts - ts / _
+// JM 13.7.2002 : tS se zachova na hranici predpony a hranice slova
+ tS - tS / PREDD1, PREDD2, PREDD3 _  // Pr: "nadšení" [natSeJI]
++tS - C  / PREDD1, PREDD2, PREDD3 _  // Pr: "nadšení" [natSeJI]
+ tS - C  / _                         // Pr: "mladší" [mlaCI]
++tS - tS / _
+// JM 13.7.2002 : dz se zachova na hranici predpony a hranice slova
+ dz - dz / PREDD1, PREDD2, PREDD3 _  // Pr: "nadzemní" [nadzemJI]
++dz - w  / PREDD1, PREDD2, PREDD3 _
+ dz - w  / _                         //
++dz - dz / _
+// JM 13.7.2002 : dZ se zachova na hranici predpony a hranice slova
+ dZ - dZ / PREDD1, PREDD2, PREDD3 _  // Pr: "nadživotní" [nadZivotJI]
++dZ - W  / PREDD1, PREDD2, PREDD3 _
+ dZ - W  / _                         // Pr: "džbán" [WbAn]
++dZ - dZ / _
+//-----------------------------------------------------------------------------
+
+
+[Set 5B]
+
+//-----------------------------------------------
+// Prepis razu + vkladani [j]
+
+// Vkladani [j]
+// "Bezpecne" vkladani [j] mezi dve [i] na konci slova
+ ii - iji / _ |
+
+// EXT: Nechceme-li raz pouzivat -> nutno zakomentovat
+
+//---
+// Hranice slov
+//
+// Obecny pripad na hranici slov: raz se vklada VZDY na zacatek slova zacinajiciho samohlaskou
+ VOCDIF - !VOCDIF   / | _
++VOCDIF - VOCDIF    / | _
+//// Pokud chceme odlisit jednotlive pripady (slovo koncici samohlaskou/souhlaskou) -- odkomentovat nasledujici radky
+// // Povinny prepis razu na hranici slov
+//  PREP1 - PREP1! / | _ |VOCDIF    // po neslabicnych predlozkach Pr: "s uchem" [s !uxem], "k autu" [k !Ytu]
+// +PREP1 - PREP1  / | _ |VOCDIF    // po neslabicnych predlozkach Pr: "s uchem" [s !uxem], "k autu" [k !Ytu]
+//  PAU   - PAU!   / | _ |VOCDIF    // po absolutni pauze
+// +PAU   - PAU    / | _ |VOCDIF    // po absolutni pauze
+// Doporuceny prepis razu na hranici slov
+//  PREPV  - PREPV!    / | _ |VOCDIF   // predlozka koncici na samohlasku
+// +PREPV  - PREPV     / | _ |VOCDIF
+//  PREPC  - PREPC!    / | _ |VOCDIF   // predlozka koncici na souhlasku
+// +PREPC  - PREPC     / | _ |VOCDIF
+//  VOCDIF - VOCDIF!   /   _ |VOCDIF   // slovo koncici na samohlasku a dalsi zacina na samohlasku
+// +VOCDIF - VOCDIF    /   _ |VOCDIF
+//  CON    - CON       / _ |VOCDIF
+// +CON    - CON!      / _ |VOCDIF // samohlaska na zacatku slova (po souhlasce)
+// jeste by sel mel raz vyslovovat pred vokalem po jednoslabicnem neprizvucnem slove
+//---
+
+//---
+// Konec slov
+//
+// samohlasky na konci slova se prepisi bez razu
+VOCDIF - VOCDIF / VOCDIF _ |
+
+//---
+// Uvnitr slov
+// Doporuceny prepis razu uvnitr slov
+ PREFV  - PREFV!    / | _ VOCDIF    // predpona koncici na samohlasku
++PREFV  - PREFV     / | _ VOCDIF
+
+// raz se spise nedoporucuje
+// stejne samohlasky uvnitr slova
+ a      - a         / _ a,A     // dva[!]advacet
++a      - a!        / _ a,A
+ e      - e         / _ e,E
++e      - e!        / _ e,E
+ i      - i         / _ i,I
++i      - i!        / _ i,I
+ o      - o         / _ o,O
++o      - o!        / _ o,O
+ u      - u         / _ u,U
++u      - u!        / _ u,U
+ VOCDIF - VOCDIF    / VOCDIF _  // samohlasky uvnitr kmene slova
++VOCDIF - !VOCDIF   / VOCDIF _
+// VOCDIF - VOCDIF    / _ VOCDIF  // samohlasky uvnitr kmene slova
+//+VOCDIF - VOCD!2    / _ VOCDIF
+
+ PREFK - PREFK  / | _ VOCDIF    // nutno detekovat predponu (zatim neni jednoznacne: nejobecnější x nejezdit, bezodkladně, bezovka, ...)
++PREFK - PREFK! / | _ VOCDIF
+
+// TODO: pravidla nepodporuji v kontextu zapisy typu VOC|, VOC! -> pomoci techto zapisu by bylo mozne odlisit napr.
+// vokal na zacatku fraze (po jiste pauze) a vokal na zacatku slova uvnitr fraze
+// WA: nutno posttranskripci |!| -> |!
+
+
+//-----------------------------------------------------------------------------
+// Mazani "nechtenych" nebo nahrazovanych fonu (JM 10.8.08)
+//-----------------------------------------------------------------------------
+[Set 6B]
+
+ ^ - ! / _      // JMa 12.4.2010: pomocne ^ se prepise jako raz [!]
+//  ! - 0 / _   // JMa 5.12.2012: vynechani razu
+
+ ~ - 0 / _      // JMa 29.9.2014: bezpecnostni vymazani pomocneho symbolu ~
+
+//  G - h / _
+//  H - m / _
+//  M - m / _
+//  L - l / _
+//  N - n / _
+//  P - r / _
+
+//  ANY0   - ANY   / _  // JMa 5.12.2012: Jiz neni zapotrebi, 0 v kodu transkripce znaci "prazdny znak"
+
+
+//-----------------------------------------------------------------------------
+[Stop Symbols]
+SON
+VOCDIF
+
+[RC Influence Set]
+NPC - ZPC / _ ZPC,R
+//NPC - ZPC / _ |ZPC0V,|R // EXT: Pokud NEpouzivame "znele ch" [G], pouzijeme tuto radku
+NPC - ZPCAZ / _ |ZPC0V,|R // Pokud pouzivame "znele ch" [G], pouzijeme tuto radku
+//ZPC - NPC / _ |NPC
+
+[Voiced RC Impact Symbols]
+ZPC
+|ZPC
+//|NPC

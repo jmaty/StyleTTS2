@@ -1,0 +1,13 @@
+[
+	{
+		"action": "Rules",
+		"comment": "e-mail - oznaci cast textu jako email - urceno regexem",
+		"rules": [
+			{"regex": "[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]{2,3}.[a-zA-Z0-9-]{2,3}", "mergeInto": "email", "regexMap": [ "value" ] },
+			{"regex": "[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-]{2,3}", "mergeInto": "email", "regexMap": [ "value" ] },
+			{"regex": "(http|ftp|https):\/\/([\\w_-]+(?:(?:\\.[\\w_-]+)+))([\\w.,@?^=%&:\/~+#-]*[\\w@?^=%&\/~+#-])", "mergeInto": "email", "regexMap": [ "value" ]},
+			{"regex": "(https?://)?(www.)?[a-z]+\\.[a-z]{2,3}", "mergeInto": "email", "regexMap": [ "value" ], "matchCase": true },
+			{"regex": "(https?://)?(www.)?[A-Z]+\\.[A-Z]{2,3}", "mergeInto": "email", "regexMap": [ "value" ], "matchCase": true }
+		]
+	}
+]

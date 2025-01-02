@@ -1,0 +1,62 @@
+[
+	{
+		"action" : "ApplyDict",
+		"path"	 : "ortexcps_general.tdict",
+		"comment": "ortexcps_general.tdict"
+	},
+	{
+		"action" : "ApplyDict",
+		"path"	 : "ortexcps_streets.tdict",
+		"comment": "ortexcps_streets.tdict"
+	},
+	{
+		"action" : "ApplyDict",
+		"path"   : "ortexcps_names.tdict",
+		"comment": "ortexcps_names.tdict"
+	},
+	{
+		"action" : "ApplyDict",
+		"path"	 : "ortexcps_geographic.tdict",
+		"comment": "ortexcps_geographic.tdict"
+	},
+	{
+		"action" : "ApplyDict",
+		"path"	 : "ortexcps_foreign_la.tdict",
+		"comment": "ortexcps_foreign_la.tdict"
+	},
+	{
+		"action" : "ApplyDict",
+		"path"	 : "ortexcps_foreign_fr.tdict",
+		"comment": "ortexcps_foreign_fr.tdict"
+	},
+	{
+		"action" : "ApplyDict",
+		"path"	 : "ortexcps_foreign_en.tdict",
+		"comment": "ortexcps_foreign_en.tdict"
+	},
+	{
+		"action" : "ApplyDict",
+		"path"	 : "ortexcps_foreign_de.tdict",
+		"comment": "ortexcps_foreign_de.tdict"
+	},
+	{
+		"action" : "ApplyDict",
+		"path"	 : "ortexcps_firms.tdict",
+		"comment": "ortexcps_firms.tdict"
+	},
+	{
+		"action" : "ApplyDict",
+		"path"	 : "ortexcps_alza.tdict",
+		"comment": "ortexcps_alza.tdict"
+	},
+	{ "action": "@split", "after": "sentenceBreak" },
+	{ "action": "Rules", "rules": [
+			{ "condition": { "type": "word", "partOfSpeech": "preposition", "syllables": 1 }, "data": { "incline": "right" } },
+			{ "condition": { "type": "word", "partOfSpeech": "preposition", "syllables": 0 }, "data": { "incline": "right" } }
+	]},
+	{ "action": "BuildProsodicWords" },
+	{ "action": "InsertPauses" },
+	{ "action": "FinishWords" },
+	{ "action": "Phonify", "rules": "phnrules.rul" },
+	{ "action": "ConvertAlphabet", "config": "reduce_alphabet_pauses_config.json" }
+]

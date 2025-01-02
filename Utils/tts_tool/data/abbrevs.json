@@ -1,0 +1,285 @@
+{
+    "sets": [
+        {
+            "data": {
+                "spell": true,
+                "check": false
+            },
+            "keys": [
+                "SOL",
+                "ZTE",
+                "PID",
+                "OK",
+                "ISŠ",
+                "OÚ",
+                "PI",
+                "SI",
+                "ČNB",
+                "CD",
+                "DVD",
+                "EU",
+                "ODS",
+                "ČR",
+                "CZ",
+                "ZČU",
+                "ČSSD",
+                "ČSOB",
+                "USA",
+                "SMS",
+                "USD",
+                "IPA",
+                "EPA",
+                "TTS",
+                "TSD",
+                "ID",
+                "FFUK",
+                "UK",
+                "ÚOHS",
+                "StB",
+                "STB"
+            ]
+        },
+        {
+            "data": {
+                "spell": false,
+                "check": false
+            },
+            "keys": [
+                "NATO",
+                "BESIP",
+                "URNA",
+                "ČEZ",
+                "SAPI",
+                "CEFTA",
+                "CERN",
+                "JAMU",
+                "JAR",
+                "SIPO",
+                "UFO",
+                "UJEP",
+                "SEČ",
+                "SELČ",
+                "LIFO",
+                "OSA",
+                "VIN",
+                "OSPOD",
+                "AISA",
+                "NARVAL",
+                "ANO",
+                "BBC",
+                "CNN",
+                "NKÚ",
+                "ČSÚ",
+                "VÚB",
+                "ČHMÚ",
+                "BMW",
+                "MMA",
+                "mma",
+                "HBO",
+                "GDPR",
+                "FBI",
+                "NBA",
+                "PCR",
+                "SÚKL",
+                "ÚOHS"
+            ]
+        }
+    ],
+    "dict": {
+        "UNESCO": {
+            "norm": "unesko"
+        },
+        "AIDS": {
+            "norm": "ajc"
+        },
+        "ASCII": {
+            "norm": "aski"
+        },
+        "IFOR": {
+            "norm": "aj for"
+        },
+        "DIČ": {
+            "norm": "dyč"
+        },
+        "IČO": {
+            "norm": "yčo"
+        },
+        "IP": {
+            "norm": "aj pí",
+            "spell": true
+        },
+        "COOP": {
+            "norm": "ko op"
+        },
+        "KFOR": {
+            "norm": "ká for"
+        },
+        "SFOR": {
+            "norm": "es for"
+        },
+        "VIP": {
+            "norm": "ví aj pí",
+            "spell": true
+        },
+        "CIA": {
+            "norm": "sí aj ej",
+            "spell": true
+        },
+        "IBM": {
+            "norm": "aj bí em",
+            "spell": true
+        },
+        "JAWS": {
+            "norm": "džóvs"
+        },
+        "WORLD": {
+            "norm": "vórld"
+        },
+        "GPRS": {
+            "norm": "dží pí ár es",
+            "spell": true
+        },
+        "GPS": {
+            "norm": "dží pí es",
+            "spell": true
+        },
+        "LG": {
+            "norm": "el dží",
+            "spell": true
+        },
+        "ACCU": {
+            "norm": "aku"
+        },
+        "ACME": {
+            "norm": "akme"
+        },
+        "AKAI": {
+            "norm": "akaj"
+        },
+        "COM": {
+            "norm": "kom"
+        },
+        "CTEK": {
+            "norm": "sí tek"
+        },
+        "D-SUB": {
+            "norm": "dé sub"
+        },
+        "ECO": {
+            "norm": "eko"
+        },
+        "IOMEGA": {
+            "norm": "ájoumega"
+        },
+        "IRIVER": {
+            "norm": "ájrivr"
+        },
+        "ISO": {
+            "norm": "izo"
+        },
+        "JBIG": {
+            "norm": "džejbig"
+        },
+        "JPEG": {
+            "norm": "džejpeg"
+        },
+        "JPG": {
+            "norm": "džejpeg"
+        },
+        "KGUARD": {
+            "norm": "kejgárd"
+        },
+        "LEA": {
+            "norm": "líja"
+        },
+        "MIO": {
+            "norm": "míjo"
+        },
+        "NETGEAR": {
+            "norm": "netgír"
+        },
+        "NICI": {
+            "norm": "nyki"
+        },
+        "NVIDIA": {
+            "norm": "envídya"
+        },
+        "OKI": {
+            "norm": "oky"
+        },
+        "RAID": {
+            "norm": "rejd"
+        },
+        "RAIKKO": {
+            "norm": "rajko"
+        },
+        "TIFF": {
+            "norm": "tyf"
+        },
+        "ABBYY": {
+            "norm": "aby"
+        },
+        "ICEMAT": {
+            "norm": "ajsmat"
+        },
+        "NARVAL":{
+            "norm": "narval"
+        },
+        "ANO":{
+            "norm": "ano"
+        },
+        "NKÚ":{
+            "norm": "en ká ú",
+            "spell": true
+        },
+        "ČSÚ":{
+            "norm": "čé es ú",
+            "spell": false
+        },
+        "VÚB":{
+            "norm": "vé ú bé"
+        },
+        "ČHMÚ":{
+            "norm": "čé há em ú"
+        },
+        "BMW":{
+            "norm": "bé em vé"
+        },
+        "MMA":{
+            "norm": "em em ej"
+        },
+        "mma":{
+            "norm": "em em ej"
+        },
+        "HBO":{
+            "norm": "ejdž bí ou"
+        },
+        "GDPR":{
+            "norm": "dží dí pí ár"
+        },
+        "FBI":{
+            "norm": "ef bí aj"
+        },
+        "NBA":{
+            "norm": "en bí ej"
+        },
+        "PCR":{
+            "norm": "pí cí ár"
+        },
+        "SÚKL":{
+            "norm": "súkl"
+        },
+        "ÚOHS":{
+            "norm": "ú ó há es",
+            "spell": false
+        },
+        "StB":{
+            "norm": "es té bé",
+            "spell": false
+        },
+        "STB":{
+            "norm": "es té bé",
+            "spell": false
+        }
+    }
+}

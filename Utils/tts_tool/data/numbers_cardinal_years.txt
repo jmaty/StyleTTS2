@@ -1,0 +1,86 @@
+# tohle je komentář
+once {
+	^0		nula_
+	^0		@exit
+	
+	^00		nula_nula_
+	^00		@exit	
+}
+
+one_of {
+	10              deset
+	1*              náct
+}
+
+one_of {                
+	11              jede
+	12              dva
+	13              tři
+	14              čtr
+	15              pat
+	16              šest
+	17              sedm
+	18              osm
+	19              devate
+	1               jedna
+	2               dva
+	3               tři
+	4               čtyři   
+	5               pět 
+	6               šest
+	7               sedm
+	8               osm 
+	9               devět
+}
+
+^*		@exit
+
+one_of {      
+	[2-4]*          cet_      
+	[5-9]*          desát_        
+}
+
+
+one_of {                     
+	2*              dva
+	3*              tři
+	4*              čtyři
+	5*              pa
+	6*              še
+	7*              sedm
+	8*              osm
+	9*              deva
+}
+
+^**		@exit
+
+# skloňování stovek, tisíců apod.
+
+one_of {
+        11**                jedenáct_set_
+        12**                dvanáct_set_
+        13**                třináct_set_
+        14**                čtrnáct_set_
+        15**                patnáct_set_
+        16**                šestnáct_set_
+        17**                sedmnáct_set_
+        18**                osmnáct_set_
+        19**                devatenáct_set_
+        20**                dva_tisíce_
+        1**                 sto_
+        2**                 dvě_stě_
+        3**                 tři_sta_
+        4**                 čtyři_sta_
+        5**                 pět_set_
+        6**                 šest_set_
+        7**                 sedm_set_
+        8**                 osm_set_ 
+        9**                 devět_set_
+        }	
+_
+^***			@exit
+^****			@exit
+
+@error
+
+

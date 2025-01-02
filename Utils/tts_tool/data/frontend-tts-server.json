@@ -1,0 +1,8 @@
+[
+	{ "action": "@include", "file": "tts-server.json" },
+	{ "action": "@split", "after": "sentenceBreak" },
+	{ "action": "InsertPauses" },
+	{ "action": "FinishWords" },
+	{ "action": "TranslateAlphabet", "config": "phonetic_alphabet.json", "target": "epa" },
+	{ "action": "Phonify", "rules": "phnrules.rul" }
+]

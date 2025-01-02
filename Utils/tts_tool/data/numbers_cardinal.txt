@@ -1,0 +1,188 @@
+# tohle je komentář
+once {
+	^0		nula_
+	^0		@exit
+	
+	^00		nula_nula_
+	^00		@exit	
+}
+
+one_of {
+	10              deset [2367]:*:deseti
+	1*              náct  [2367]:*:nácti
+}
+
+one_of {                
+	11              jede
+	12              dva
+	13              tři
+	14              čtr
+	15              pat
+	16              šest
+	17              sedm
+	18              osm
+	19              devate
+	1               jedna  [15]:m:jeden [15]:n:jedno 2:m:jednoho 2:n:jednoho 2:f:jedné 3:n:jednomu 3:m:jednomu 3:f:jedné 4:m:jednoho 4:m:jeden 4:f:jednu 4:n:jedno 6:m:jednom 6:n:jednom 6:f:jedné 7:m:jedním 7:n:jedním 7:f:jednou
+	2               dva    [145]:f:dvě [145]:n:dvě [26]:*:dvou [37]:*:dvěma 
+	3               tři    2:*:tří 3:*:třem 6:*:třech 7:*:třemi     
+# TODO: třema
+	4               čtyři  2:*:čtyř 3:*:čtyřem 6:*:čtyřech 7:*:čtyřmi     
+# TODO: čtyřma
+	5               pět    [2367]:*:pěti
+	6               šest   [2367]:*:šesti
+	7               sedm   [2367]:*:sedmi
+	8               osm    [2367]:*:osmi
+	9               devět  [2367]:*:devíti
+}
+
+^*		@exit
+
+one_of {      
+	[2-4]*          cet_   [2367]:*:ceti_      
+	[5-9]*          desát_ [2367]:*:desáti_        
+}
+
+
+one_of {                     
+	2*              dva
+	3*              tři
+	4*              čtyři
+	5*              pa
+	6*              še
+	7*              sedm
+	8*              osm
+	9*              deva
+	^0*             nula_
+}
+
+^**		@exit
+
+# skloňování stovek, tisíců apod.
+
+one_of {                   
+	1**             sto_
+	2**             stě_   2:*:set_ 3:*:stům_ 6:*:stech_ 7:*:sty_
+	[3-4]**         sta_   2:*:set_ 3:*:stům_ 6:*:stech_ 7:*:sty_
+	[5-9]**         set_   2:*:set_ 3:*:stům_ 6:*:stech_ 7:*:sty_
+	^0**            nula_
+}
+
+one_of {                   
+	2**             dvě_   [26]:*:dvou_ [37]:*:dvěma_
+	3**             tři_   2:*:tří_ 3:*:třem_ 6:*:třech_ 7:*:třemi_
+	4**             čtyři_ 2:*:čtyř_ 3:*:čtyřem_ 6:*:čtyřech_ 7:*:čtyřmi_
+	5**             pět_   [2367]:*:pěti_
+	6**             šest_  [2367]:*:šesti_
+	7**             sedm_  [2367]:*:sedmi_
+	8**             osm_   [2367]:*:osmi_
+	9**             devět_ [2367]:*:devíti_
+}
+
+^***	@exit
+
+
+once {	
+	one_of {
+		^1***        _    2:*:e_ 3:*:i_ 6:*:i_ 7:*:em_ 
+		^[2-4]***    e_   2:*:_ 3:*:ům_ 6:*:ích_ 7:*:i_ 
+		^[5-9]***    _    2:*:_ 3:*:ům_ 6:*:ích_ 7:*:i_
+		****         _
+	}
+	one_of {
+	    [1-9]***            tisíc
+	    [1-9]0***           tisíc
+	    [1-9]00***          tisíc
+	}	
+	^1***			@exit
+	_
+	@shift3       
+	@loop	
+}
+
+
+once {	
+	one_of {
+		^1***        _   [236]:*:u_ 7:*:em_ 
+		^[2-4]***    y_  [236]:*:ů_ 7:*:y_ 
+		^[5-9]***    ů_  3:*:ům_ 6:*:ech_ 7:*:y_
+		000***       _ 
+		****         ů_  3:*:ům_ 6:*:ech_ 7:*:y_ 
+	}
+	one_of {
+	    [1-9]***        _milión
+	    [1-9]0***       _milión
+	    [1-9]00***      _milión
+	}
+	^1***			jeden_
+	^1***           @exit		
+	@shift3                
+	@loop	
+}
+
+once {
+	one_of {
+		^1***        a_ 2:*:y_ [36]:*:ě_ [7]:*:ou_
+		^[2-4]***    y_ 2:*:_ 3:*:ám_ 6:*:ách_ 7:*:ami_
+		^[5-9]***    _  2:*:_ 3:*:ám_ 6:*:ách_ 7:*:ami_
+		000***       _
+		****         _  2:*:_ 3:*:ám_ 6:*:ách_ 7:*:ami_
+	}
+	one_of {
+	    [1-9]***        _miliard
+	    [1-9]0***       _miliard
+	    [1-9]00***      _miliard
+	}
+	^1***			jedna_
+	^1***			@exit			
+	@shift3                
+	@loop
+}
+
+once {
+	one_of {
+		^1***        _  [236]:*:u_ 7:*:em_
+		^[2-4]***    y_ [236]:*:ů_ 7:*:em_
+		^[5-9]***    ů_ 3:*:ům_ 6:*:ech_ 7:*:y_
+		000***      _ 
+		****        ů_ 3:*:ům_ 6:*:ech_ 7:*:y_       
+	}
+	one_of {
+	    [1-9]***        _bilión
+	    [1-9]0***       _bilión
+	    [1-9]00***      _bilión
+	}	
+	^1***			jeden_
+	^1***			@exit			
+	@shift3                
+	@loop
+}
+
+once {
+	one_of {
+		1***        a_  2:*:y_ [36]:*:ě_ [7]:*:ou_
+		^[2-4]***   y_  2:*:_ 3:*:ám_ 6:*:ách_ 7:*:ami_
+		^[5-9]***   _   2:*:_ 3:*:ám_ 6:*:ách_ 7:*:ami_
+		000***      _
+		****        _   2:*:_ 3:*:ám_ 6:*:ách_ 7:*:ami_		 
+	}
+	****            _biliard
+	^1***			jedna_	
+	^1***			@exit			
+	@shift3                
+	@loop
+}
+
+@error
+
+
+
+
+
+
+
+
+
+
+
+
+

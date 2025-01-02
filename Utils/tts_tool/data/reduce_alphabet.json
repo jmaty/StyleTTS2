@@ -1,0 +1,10 @@
+[
+	{   
+		"action": "ConvertAlphabet",
+		"config": "reduce_alphabet_config.json"
+	},
+    {
+        "action": "BuildPhoneId",
+        "config": "phonetic_alphabet_reduced.json"
+    }
+]

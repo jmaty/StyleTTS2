@@ -1,0 +1,26 @@
+[
+	{
+		"action": "Rules",
+		"comment": "rozsah",
+		"rules": [
+			{ "firstCharHint": "d", "regex": "(\\d+)–(\\d+)",        "replace": "$1 až $2"},
+			{ "firstCharHint": "d", "regex": "(\\d+) ?[-–] ?(\\d+)", "replace": "$1 až $2"},
+			{ "firstCharHint": "d", "regex": "(\\d+) ?[-–] ?(\\d+)", "replace": "$1 až $2", "right": ["let"]}
+		]
+	},
+	{
+		"action": "Rules",
+		"comment": "pomlčka mezi číslem a textem",
+		"active": true,
+		"rules": [
+			{ "search": "-",  "rightCondition": {"type": "number"}, "wholeWord": false, "replace": " ", "leftCondition": {"type": "text"}}
+		]
+	},
+	{
+		"action": "Rules",
+		"comment": "záporné číslo",
+		"rules": [
+			{ "search": "-", "rightCondition": {"type": "number"}, "wholeWord": false, "replace": "mínus " }
+		]
+	}
+]

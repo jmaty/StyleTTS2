@@ -1,0 +1,15 @@
+{
+	"dict": {
+		"ntis"  : {"norm"  : "entys" },
+		"com"   : {"norm"  : "kom" },
+		"gmail" : {"norm"  : "džímejl" },
+		"www"   : {"norm"  : "vé vé vé" },
+		"cz"    : {"spell" : true },
+		"zcu"   : {"spell" : true },
+		"kky"   : {"spell" : true },
+		"uk"    : {"spell" : true },
+		"https" : {"spell" : true },
+		"sk"    : {"spell" : true },
+		"cnn"   : {"spell" : true }
+	}
+}

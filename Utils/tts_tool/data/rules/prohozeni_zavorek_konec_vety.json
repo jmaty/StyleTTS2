@@ -1,0 +1,15 @@
+[
+	{
+		"action": "Rules",
+		"comment": "závorky a uvozovky za koncem věty - prohození",
+		"rules": [
+			{"search": ".\"", "wholeWord": false, "replace": "\"."},
+			{"search": "!\"", "wholeWord": false, "replace": "\"!"},
+			{"search": ".“",  "wholeWord": false, "replace": "“."},
+			{"search": "!“",  "wholeWord": false, "replace": "“!"},
+			{"search": ".)",  "wholeWord": false, "replace": ")."},
+			{"search": "!)",  "wholeWord": false, "replace": ")!"}
+		]
+	}
+
+]

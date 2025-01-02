@@ -1,0 +1,11 @@
+[
+	{ "action": "@include", "file": "pravnici.json" },	
+	{ "action": "@split", "after": "sentenceBreak" },
+	{ "action": "Rules", "rules": [
+			{ "condition": { "type": "word", "partOfSpeech": "preposition", "syllables": 1 }, "data": { "incline": "right" } },
+			{ "condition": { "type": "word", "partOfSpeech": "preposition", "syllables": 0 }, "data": { "incline": "right" } }
+	]},
+	{ "action": "BuildProsodicWords" },	
+	{ "action": "InsertPauses" },
+	{ "action": "Phonify", "rules": "phnrules.rul" }
+]
