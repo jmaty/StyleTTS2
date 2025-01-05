@@ -13,7 +13,7 @@ HOURS2a=30
 HOURS2b=72
 
 if [[ "$#" -lt 1 ]]; then
-     echo "Usage: run_capy.sh exp_dir [hours1] [hours2a] [hours2b]"
+     echo "Usage: run_capy.sh exp_dir [hours1=$HOURS1] [hours2a=$HOURS2a] [hours2b=$HOURS2b]"
      exit 1
 fi
 # Input experimental directory
@@ -36,4 +36,4 @@ jobid2a=$(./run_stage2a.sh $EXPDIR $QUEUE $HOURS2a $jobid1 2>/dev/null)
 # Run stage 2b
 jobid2b=$(./run_stage2b.sh $EXPDIR $QUEUE $HOURS2b $jobid2a 2>/dev/null)
 
-printf "jobid1 -> jobid2a -> jobid2b\n"
+printf "$jobid1 -> $jobid2a -> $jobid2b\n"

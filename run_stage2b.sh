@@ -97,9 +97,9 @@ fi
 sed -i "/^log_dir:/c\log_dir: $EXPDIR" $CFG
 # Set the pretrained model path
 sed -i "/^pretrained_model:/c\pretrained_model: $EXPDIR/stage2_pre-joint_00049.pth" $CFG
-# Transfer sigma_data from stage2a to stage2b
-sigma_data=$(grep -E '^[[:space:]]*sigma_data:' $EXPDIR/config2.processed.yml)
-sed -i "/^[[:space:]]*sigma_data:/c\\$sigma_data" $CFG
+# # Transfer sigma_data from stage2a to stage2b
+# sigma_data=$(grep -E '^[[:space:]]*sigma_data:' $EXPDIR/config2.processed.yml)
+# sed -i "/^[[:space:]]*sigma_data:/c\\$sigma_data" $CFG
 
 # -----------------------------------------------------------------------------
 # RUN TRAINING
