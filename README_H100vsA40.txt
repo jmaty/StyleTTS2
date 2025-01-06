@@ -1,0 +1,3 @@
+- 23.08 = 23.12
+- trénovací data: 1k vs all - A40 > H100, ale na H100 již není NaN
+- FVUSER=1: nepomáhá
