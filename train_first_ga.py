@@ -89,7 +89,6 @@ def main():
     train_path = data_params["train_data"]
     val_path = data_params["val_data"]
     root_path = data_params["root_path"]
-    min_length = data_params["min_length"]
     ood_data = data_params["OOD_data"]
     save_val_audio = data_params.get("save_val_audio", False)
     n_val_audios = config["data_params"].get("n_val_audios", 3)
@@ -135,42 +134,47 @@ def main():
 
     model = build_model(model_params, text_aligner, pitch_extractor, plbert)
 
-    bert_size = model.bert.config.max_position_embeddings
-    preprocess_text_fn = add_spaces_around_punctuation
-    print(f"BERT size: {bert_size}")
-    print(f"Text pre-processing function: {preprocess_text_fn.__name__}")
-
     for k in model:
         model[k] = accelerator.prepare(model[k])
 
     # Load data
     train_list, val_list = get_data_path_list(train_path, val_path)
 
+    preprocess_text_fn = add_spaces_around_punctuation
+    print(f"BERT size: {model.bert.config.max_position_embeddings}")
+    print(f"Text pre-processing function: {preprocess_text_fn.__name__}")
+
+    dataset_config = {
+        "sr": sr,
+        "min_length": data_params["min_length"],
+        "max_length": model.bert.config.max_position_embeddings,  # ALBERT config
+        "silence_beg": data_params["silence_beg"],
+        "silence_end": data_params["silence_end"],
+    }
+
     train_dataloader = build_dataloader(
         train_list,
         root_path,
-        text_cleaner=text_cleaner,
+        text_cleaner,
         preprocess_text_fn=preprocess_text_fn,
         OOD_data=ood_data,
-        min_length=min_length,
-        max_length=bert_size,
         batch_size=batch_size,
         num_workers=args.num_workers,
         device=device,
+        dataset_config=dataset_config,
     )
 
     val_dataloader = build_dataloader(
         val_list,
         root_path,
-        text_cleaner=text_cleaner,
+        text_cleaner,
         preprocess_text_fn=preprocess_text_fn,
         OOD_data=ood_data,
-        min_length=min_length,
-        max_length=bert_size,
         batch_size=batch_size,
         validation=True,
         num_workers=0,
         device=device,
+        dataset_config=dataset_config,
     )
 
     train_dataloader, val_dataloader = accelerator.prepare(train_dataloader, val_dataloader)

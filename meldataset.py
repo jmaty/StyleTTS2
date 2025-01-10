@@ -42,12 +42,10 @@ class FilePathDataset(torch.utils.data.Dataset):
         root_path,
         text_cleaner,
         preprocess_text_fn=None,
-        sr=24000,
         data_augmentation=False,
         validation=False,
         OOD_data="Data/OOD_texts.txt",
-        min_length=50,
-        max_length=512,
+        **kwargs,
     ):
 
         # spect_params = SPECT_PARAMS     # TODO: not reading from config!?
@@ -56,15 +54,19 @@ class FilePathDataset(torch.utils.data.Dataset):
         self.mean, self.std = -4, 4
         self.data_augmentation = data_augmentation and (not validation)
         self.max_mel_length = 192
-        self.min_length = min_length
-        self.max_length = max_length
         self._preprocess_text_fn = preprocess_text_fn
+
+        # Silence duration at the beginning and end of the waveform (in samples)
+        self.sr = kwargs.get("sr", 24000)
+        self.min_length = kwargs.get("min_length", 50)
+        self.max_length = kwargs.get("max_length", 512)
+        self.silence_beg = kwargs.get("silence_beg", 4800)
+        self.silence_end = kwargs.get("silence_end", 4800)
 
         # Load texts from the input data list
         self.data_list = self._load_texts(data_list)
 
         self.text_cleaner = text_cleaner
-        self.sr = sr
 
         self.df = pd.DataFrame(self.data_list)
 
@@ -184,8 +186,10 @@ class FilePathDataset(torch.utils.data.Dataset):
         if sr != 24000:
             wave = librosa.resample(wave, orig_sr=sr, target_sr=24000)
             logger.warning("%s: sampling rate is %d, resampling to 24000", wave_path, sr)
-        # Add padding to the waveform (200ms silence at both ends)
-        wave = np.concatenate([np.zeros([4800]), wave, np.zeros([4800])], axis=0)
+        # Add padding to the waveform
+        wave = np.concatenate(
+            [np.zeros([self.silence_beg]), wave, np.zeros([self.silence_end])], axis=0
+        )
 
         # Encode phonetic string as a list of phoneme IDs with padding
         text = [0] + self.text_cleaner(text) + [0]
@@ -285,8 +289,6 @@ def build_dataloader(
     preprocess_text_fn=None,
     validation=False,
     OOD_data="Data/OOD_texts.txt",
-    min_length=50,
-    max_length=512,
     batch_size=4,
     num_workers=1,
     device="cpu",
@@ -302,8 +304,6 @@ def build_dataloader(
         text_cleaner,
         preprocess_text_fn=preprocess_text_fn,
         OOD_data=OOD_data,
-        min_length=min_length,
-        max_length=max_length,
         validation=validation,
         **dataset_config,
     )
