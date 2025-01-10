@@ -1,5 +1,0 @@
-[
-	{ "action": "@include", "file": "normalize.json" },
-	{ "action": "@split", "after": "sentenceBreak" },
-	{ "action": "FinishWords" }
-]
