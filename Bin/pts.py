@@ -166,7 +166,7 @@ class Synthesizer:
 
                 # Generate wav
                 wav, s_prev = self._inference(
-                    ph_ids,
+                    torch.tensor(ph_ids, dtype=torch.long, device=self.device).unsqueeze(0),
                     noise=noise,
                     diffusion_steps=diffusion_steps,
                     embedding_scale=embedding_scale,
@@ -184,7 +184,7 @@ class Synthesizer:
         """_summary_
 
         Args:
-            ph_ids (list): Phoneme IDs
+            ph_ids (tensor): Phoneme IDs
             noise (tensor, optional): Noise for diffusion. Defaults to None.
             diffusion_steps (int, optional): Number of diffusion steps. Defaults to 5.
             embedding_scale (int, optional): Embedding scale. Defaults to 1.
@@ -233,15 +233,26 @@ class Synthesizer:
 
             # Encode prosody
             en = d.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0).to(self.device)
+            if self.model.decoder.type == "hifigan":
+                en_new = torch.zeros_like(en)
+                en_new[:, :, 0] = en[:, :, 0]
+                en_new[:, :, 1:] = en[:, :, 0:-1]
+                en = en_new
+
+            # Predict F0
             f0_pred, n_pred = self.model.predictor.F0Ntrain(en, s)
-            out = self.model.decoder(
-                t_en @ pred_aln_trg.unsqueeze(0).to(self.device),
-                f0_pred,
-                n_pred,
-                ref.squeeze().unsqueeze(0),
-            )
+            asr = t_en @ pred_aln_trg.unsqueeze(0).to(self.device)
+            if self.model.decoder.type == "hifigan":
+                asr_new = torch.zeros_like(asr)
+                asr_new[:, :, 0] = asr[:, :, 0]
+                asr_new[:, :, 1:] = asr[:, :, 0:-1]
+                asr = asr_new
+
+            out = self.model.decoder(asr, f0_pred, n_pred, ref.squeeze().unsqueeze(0))
 
         return out.squeeze().cpu().numpy(), s_curr
+        # weird pulse at the end of the model, need to be fixed later
+        # return out.squeeze().cpu().numpy()[..., :-50]
 
     @staticmethod
     def length_to_mask(lengths):
