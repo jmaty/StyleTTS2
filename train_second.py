@@ -385,15 +385,6 @@ def main():
             try:
                 bert_dur = model.bert(texts, attention_mask=(~text_mask).int())
             except RuntimeError as e:
-                # RuntimeError: The expanded size of the tensor (544) must match the
-                #               existing size (512) at non-singleton dimension 1.
-                #               Target sizes: [4, 544].  Tensor sizes: [1, 512]
-                # => 1 sample in the batch has a text length > 512
-                #    - max size of the ALBERT model, corresponding to maximum phoneme length
-                #    - denoted as `max_mel_length` and `max_position_embeddings` in ALBERT config
-                #    - should be extracted as model.bert.config.max_position_embeddings
-                # => skip this batch
-                # TODO: Ensure the input text is not longer than 512 phonemes
                 logger.warning("Error: %s", e)
                 # print(f"[!] Error: {e}")
                 continue  # skip batch
