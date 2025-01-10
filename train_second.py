@@ -799,8 +799,8 @@ def main():
                     # JMa: Fix: remove explicitly 2nd dimension
                     # otherwise all dimensions of size 1 are removed
                     # (resulting in error when current batch size is 1)
-                    s = torch.stack(ss).squeeze()
-                    # s = torch.stack(ss).squeeze(dim=-1)
+                    # s = torch.stack(ss).squeeze()
+                    s = torch.stack(ss).squeeze(dim=-1)
                     # gs = torch.stack(gs).squeeze()              # !!! JMa: not used anymore?
                     # # gs = torch.stack(gs).squeeze(dim=-1)        # !!! JMa: not used anymore?
                     # s_trg = torch.cat([s, gs], dim=-1).detach() # !!! JMa: not used anymore?
