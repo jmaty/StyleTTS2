@@ -21,7 +21,7 @@ from munch import Munch
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 
-from text_utils import TextCleaner, add_spaces_around_punctuation
+from text_utils import TextCleaner
 from losses import GeneratorLoss, WavLMLoss, DiscriminatorLoss, MultiResolutionSTFTLoss
 from meldataset import build_dataloader
 from models import load_ASR_models, load_F0_models, build_model, load_checkpoint, save_checkpoint
@@ -110,11 +110,12 @@ def main():
         config["log_dir"], config["data_params"].get("test_audio_dir", "test_audios")
     )
 
-    # Define pre-processing function and apply to test sentences
-    preprocess_text_fn = add_spaces_around_punctuation  # TODO: Add to config
-    print(f"Text pre-processing function: {preprocess_text_fn}")
-    test_sentences = list(map(preprocess_text_fn, data_params.get("test_sentences", [])))
-    print("\n".join(test_sentences))
+    # # Define pre-processing function and apply to test sentences
+    # preprocess_text_fn = add_spaces_around_punctuation
+    # print(f"Text pre-processing function: {preprocess_text_fn}")
+    # test_sentences = list(map(preprocess_text_fn, data_params.get("test_sentences", [])))
+    # print("\n".join(test_sentences))
+    test_sentences = data_params.get("test_sentences", [])
 
     # Set up loss and optimizer parameters
     loss_params = Munch(config["loss_params"])
@@ -163,7 +164,6 @@ def main():
         train_list,
         root_path,
         text_cleaner=text_cleaner,
-        preprocess_text_fn=preprocess_text_fn,
         OOD_data=ood_data,
         batch_size=batch_size,
         num_workers=args.num_workers,
@@ -175,7 +175,6 @@ def main():
         val_list,
         root_path,
         text_cleaner=text_cleaner,
-        preprocess_text_fn=preprocess_text_fn,
         OOD_data=ood_data,
         batch_size=batch_size,
         validation=True,

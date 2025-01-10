@@ -51,9 +51,10 @@ class FilePathDataset(torch.utils.data.Dataset):
         # spect_params = SPECT_PARAMS     # TODO: not reading from config!?
         # mel_params = MEL_PARAMS         # TODO: not reading from config!?
 
-        self.mean, self.std = -4, 4
+        self.mean, self.std = mean, std
         self.data_augmentation = data_augmentation and (not validation)
         self.max_mel_length = 192
+        self.root_path = root_path  # Set up path to waveform directory
         self._preprocess_text_fn = preprocess_text_fn
 
         # Silence duration at the beginning and end of the waveform (in samples)
@@ -63,10 +64,11 @@ class FilePathDataset(torch.utils.data.Dataset):
         self.silence_beg = kwargs.get("silence_beg", 4800)
         self.silence_end = kwargs.get("silence_end", 4800)
 
+        # Set up text cleaner for phone ID encoding and padding ID
+        self.text_cleaner = text_cleaner
+
         # Load texts from the input data list
         self.data_list = self._load_texts(data_list)
-
-        self.text_cleaner = text_cleaner
 
         self.df = pd.DataFrame(self.data_list)
 
@@ -74,9 +76,6 @@ class FilePathDataset(torch.utils.data.Dataset):
 
         # Load Out-of-distribution texts
         self.ptexts = self._load_ood_texts(OOD_data)
-
-        # Set up path to waveform directory
-        self.root_path = root_path
 
     def _load_texts(self, data_list):
         """
@@ -87,29 +86,28 @@ class FilePathDataset(torch.utils.data.Dataset):
             data_list (list): List of data lines.
 
         Returns:
-            list: List of texts.
+            list: (waveform_path, list of OOD phone IDs, speaker id).
         """
-        texts = []  # Initialize the list for processed data
+        ph_texts = []  # Initialize the list of data
 
         # Read input list of text data lines delimited by "|" and ignore too long lines
         for l in data_list:
             data = l.strip().split("|")  # Remove leading/trailing whitespaces and split the string
             # Ensure data has at least two elements
             assert len(data) in (2, 3), f"Invalid data format, 2-3 elements expected: {l}"
-            if callable(self._preprocess_text_fn):
-                data[1] = self._preprocess_text_fn(data[1])
+            # data[:, 1] is phonetic string
             # Check if the length of data[1] exceeds `max_length` characters (typically 512)
-            if len(data[1]) > self.max_length - 2:  # -2: padding at the start/end
+            # -2: padding at the start/end of the phonetic string
+            if len(self.text_cleaner.add_spaces_around_punctuation(data[1])) > self.max_length - 2:
                 logger.warning(
-                    "Skipping %s: phoneme length %d > %d\n%s",
+                    "Skipping %s: phone length %d > %d",
                     data[0],
-                    len(data[1]),
+                    len(self.text_cleaner.add_spaces_around_punctuation(data[1])),
                     self.max_length - 2,
-                    data[1],
                 )
                 continue  # Skip this item
-            texts.append(data if len(data) == 3 else data + ["0"])
-        return texts
+            ph_texts.append(data if len(data) == 3 else data + ["0"])
+        return ph_texts
 
     def _load_ood_texts(self, ood_file):
         """
@@ -117,8 +115,9 @@ class FilePathDataset(torch.utils.data.Dataset):
 
         Args:
             ood_file (str): Path to the file containing OOD texts.
-            min_length (int): Minimum length of the text to be considered.
-            max_length (int): Maximum length of the text to be considered.
+
+        Returns:
+            list: OOD phone IDs per text line.
         """
         # Load OOD texts from the specified file
         with open(ood_file, "r", encoding="utf-8") as f:
@@ -129,27 +128,23 @@ class FilePathDataset(torch.utils.data.Dataset):
         # Read the text parts from the lines and filter out lines
         # with text length not in `<min_length, max_length>`)
         # (to avoid incompatibility with ALBERT's input size and ensure minimum length)
-        ptexts = []
+        ph_texts = []
         for t in text_lines:
             parts = t.split("|")
-            text = (
-                self._preprocess_text_fn(parts[idx])
-                if callable(self._preprocess_text_fn)
-                else parts[idx]
-            )
-            length = len(text)
-            if self.min_length <= length <= self.max_length - 2:
-                ptexts.append(text)
-        return ptexts
+            # Length of the phonetic string after adding spaces around punctuation
+            ph_string_len = len(self.text_cleaner.add_spaces_around_punctuation(parts[idx]))
+            # Check if the length of the phonetic string is within the specified range
+            if self.min_length <= ph_string_len <= self.max_length - 2:
+                ph_texts.append(parts[idx])
+        return ph_texts
 
     def __len__(self):
         return len(self.data_list)
 
     def __getitem__(self, idx):
-        data = self.data_list[idx]  # [wavfile, phonetic_string, speaker_id]
-
+        data = self.data_list[idx]  # [wavfile, phone IDs, speaker_id]
+        # Load the waveform, phonetic string, and speaker ID
         wave, text_tensor, speaker_id = self._load_tensor(data)
-        # text_tensor is a list of phoneme IDs corresponding to the input phonetic string
 
         mel_tensor = preprocess(wave).squeeze()
 
@@ -163,15 +158,15 @@ class FilePathDataset(torch.utils.data.Dataset):
         ref_mel_tensor, ref_label = self._load_data(ref_data[:3])  # ref_label is speaker ID
 
         # Randomly select a phonetic sentence from the OOD texts
-        ps = self.ptexts[np.random.randint(0, len(self.ptexts) - 1)]
+        ref_ph_string = self.ptexts[np.random.randint(0, len(self.ptexts) - 1)]
         # Encode phonetic string as a list of phoneme IDs with padding
-        ref_text = [0] + self.text_cleaner(ps) + [0]
+        ref_ph_ids = self.text_cleaner(ref_ph_string, pad=True)
 
         return (
             speaker_id,  # speaker ID
             acoustic_feature,  # mel spectrogram of input waveform
             text_tensor,  # phoneme IDs of input text
-            torch.LongTensor(ref_text),  # phoneme IDs of OOD text
+            torch.LongTensor(ref_ph_ids),  # phone IDs of OOD text with padding
             ref_mel_tensor,  # reference mel vector of the given speaker
             ref_label,  # reference speaker ID
             data[0],  # wavfile
@@ -179,24 +174,21 @@ class FilePathDataset(torch.utils.data.Dataset):
         )
 
     def _load_tensor(self, data):
-        wave_path, text, speaker_id = data
+        wave_path, ph_string, speaker_id = data
         wave, sr = sf.read(osp.join(self.root_path, wave_path))
         if wave.shape[-1] == 2:
             wave = wave[:, 0].squeeze()
-        if sr != 24000:
+        if sr != self.sr:
             wave = librosa.resample(wave, orig_sr=sr, target_sr=24000)
-            logger.warning("%s: sampling rate is %d, resampling to 24000", wave_path, sr)
+            logger.warning("%s: sampling rate is %d, resampling to %d", wave_path, sr, self.sr)
         # Add padding to the waveform
         wave = np.concatenate(
             [np.zeros([self.silence_beg]), wave, np.zeros([self.silence_end])], axis=0
         )
 
-        # Encode phonetic string as a list of phoneme IDs with padding
-        text = [0] + self.text_cleaner(text) + [0]
-
         return (
             wave,  # raw waveform
-            torch.LongTensor(text),  # phoneme IDs of input text
+            torch.LongTensor(self.text_cleaner(ph_string, pad=True)),  # phone IDs with padding
             int(speaker_id),  # speaker ID
         )
 

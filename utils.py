@@ -83,7 +83,7 @@ def log_print(message, logger):
 def inference(
     sentence,
     model,
-    textcleaner,
+    text_cleaner,
     sampler,
     noise,
     ref_spk=None,
@@ -94,18 +94,19 @@ def inference(
     device="cuda",
 ):
     # Phoneme string expected at the input
-    ps = word_tokenize(sentence)
-    ps = " ".join(ps)
-    tokens = textcleaner(ps)
-    tokens.insert(0, 0)
-    tokens = torch.LongTensor(tokens).to(device).unsqueeze(0)
+    # ps = word_tokenize(sentence)
+    # ps = " ".join(ps)
+    # tokens = textcleaner(ps)
+    # tokens.insert(0, 0)
+    ph_ids = text_cleaner(sentence, pad=True)
+    ph_ids = torch.tensor(ph_ids, dtype=torch.long, device=device).unsqueeze(0)
 
     with torch.no_grad():
-        input_lengths = torch.LongTensor([tokens.shape[-1]]).to(tokens.device)
-        text_mask = length_to_mask(input_lengths).to(tokens.device)
+        input_lengths = torch.LongTensor([ph_ids.shape[-1]]).to(ph_ids.device)
+        text_mask = length_to_mask(input_lengths).to(ph_ids.device)
 
-        t_en = model.text_encoder(tokens, input_lengths, text_mask)
-        bert_dur = model.bert(tokens, attention_mask=(~text_mask).int())
+        t_en = model.text_encoder(ph_ids, input_lengths, text_mask)
+        bert_dur = model.bert(ph_ids, attention_mask=(~text_mask).int())
         d_en = model.bert_encoder(bert_dur).transpose(-1, -2)
 
         if ref_spk is not None:

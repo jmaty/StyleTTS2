@@ -20,17 +20,36 @@ class TextCleaner:
         # assert len(self) == 81, f'Number of symbols must be 81 but it is {len(self)}'
         assert pad in self._symbols, f"Pad symbol ({pad}) is not included in symbols!"
 
-    def __call__(self, text):
-        indexes = []
-        for c in text:
+    def __call__(self, text, pad=False):
+        """Call method for converting a phonetic string into a list of token IDs.
+
+        Args:
+            text (str): phonetic string
+
+        Returns:
+            list: list of token IDs
+        """
+        indexes = [self.pad[1]] if pad else []
+        # Add spaces around punctuation and convert the text into a list of token IDs
+        for c in self.add_spaces_around_punctuation(text):
             try:
                 indexes.append(self._symbols[c])
             except KeyError:
                 # JMa:
                 print(f'[!] Character  "{c}" not defined!\n    Utterance: {text}')
+        if pad:
+            indexes.append(self.pad[1])
         return indexes
 
     def declean(self, indexes):
+        """Convert a list of token IDs into a phonetic string.
+
+        Args:
+            indexes (list): list of token IDs
+
+        Returns:
+            str: phonetic string
+        """
         return "".join([self._symbols[i] for i in indexes])
 
     def check(self, symbols):
@@ -51,22 +70,78 @@ class TextCleaner:
         return unique_chars.issubset(valid_symbols)
 
     def __len__(self):
+        """Return the number of symbols in the symbol dict.
+
+        Returns:
+            int: number of symbols
+        """
         return len(self._symbols)
 
     def __contains__(self, symbols):
+        """Check if all input symbols are defined.
+
+        Args:
+            symbols (str): The input string of characters to be checked.
+
+        Returns:
+            bool: True if all input symbols are defined, otherwise False.
+        """
         return self.check(symbols)
 
     @property
     def symbols(self):
+        """Return the symbol dict.
+
+        Returns:
+            dict: symbol dict
+        """
         return self._symbols
 
     @property
     def pad(self):
+        """Return the pad symbol and its corresponding token ID.
+
+        Returns:
+            tuple(str, int): pad symbol and its corresponding token ID
+        """
         return self._pad, self._symbols[self._pad]
 
     @property
     def blank(self):
+        """Return the blank symbol and its corresponding token ID.
+
+        Returns:
+            tuple(str, int): blank symbol and its corresponding token ID
+        """
         return " ", self._symbols[" "]
+
+    @staticmethod
+    def add_spaces_around_punctuation(text):
+        """Add spaces around punctuation in a phonetic string.
+
+        Args:
+            text (str): phonetic string
+
+        Returns:
+            str: phonetic string with non-initial and non-final punctution surrounded by spaces
+        """
+        # Add a space before punctuation if it is not already preceded by a space
+        text = re.sub(r"(?<! )([.,!?;:])", r" \1", text)
+        # Add a space after punctuation if it is not already followed by a space
+        text = re.sub(r"([.,!?;:])(?! )", r"\1 ", text)
+        return text.strip()
+
+    @staticmethod
+    def remove_spaces(text):
+        """Remove spaces from a phonetic string.
+
+        Args:
+            text (str): phonetic string
+
+        Returns:
+            str: phonetic string with spaces removed
+        """
+        return text.replace(" ", "")
 
 
 def load_symbol_dict(fpath):
@@ -82,31 +157,3 @@ def load_symbol_dict(fpath):
         reader = csv.reader(f, delimiter=",", quotechar='"')
         symbol_dict = {row[0]: int(row[1]) for row in reader}
     return symbol_dict
-
-
-def add_spaces_around_punctuation(text):
-    """Add spaces around punctuation in a phonetic string.
-
-    Args:
-        text (str): phonetic string
-
-    Returns:
-        str: phonetic string with non-initial and non-final punctution surrounded by spaces
-    """
-    # Add a space before punctuation if it is not already preceded by a space
-    text = re.sub(r"(?<! )([.,!?;:])", r" \1", text)
-    # Add a space after punctuation if it is not already followed by a space
-    text = re.sub(r"([.,!?;:])(?! )", r"\1 ", text)
-    return text.strip()
-
-
-def remove_spaces(text):
-    """Remove spaces from a phonetic string.
-
-    Args:
-        text (str): phonetic string
-
-    Returns:
-        str: phonetic string with spaces removed
-    """
-    return text.replace(" ", "")
