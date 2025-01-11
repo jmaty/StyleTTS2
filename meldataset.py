@@ -41,10 +41,9 @@ class FilePathDataset(torch.utils.data.Dataset):
         data_list,
         root_path,
         text_cleaner,
-        preprocess_text_fn=None,
         data_augmentation=False,
         validation=False,
-        OOD_data="Data/OOD_texts.txt",
+        ood_data="Data/OOD_texts.txt",
         **kwargs,
     ):
 
@@ -55,7 +54,6 @@ class FilePathDataset(torch.utils.data.Dataset):
         self.data_augmentation = data_augmentation and (not validation)
         self.max_mel_length = 192
         self.root_path = root_path  # Set up path to waveform directory
-        self._preprocess_text_fn = preprocess_text_fn
 
         # Silence duration at the beginning and end of the waveform (in samples)
         self.sr = kwargs.get("sr", 24000)
@@ -75,7 +73,7 @@ class FilePathDataset(torch.utils.data.Dataset):
         self.to_melspec = torchaudio.transforms.MelSpectrogram(**MEL_PARAMS)
 
         # Load Out-of-distribution texts
-        self.ptexts = self._load_ood_texts(OOD_data)
+        self.ptexts = self._load_ood_texts(ood_data)
 
     def _load_texts(self, data_list):
         """
@@ -278,9 +276,8 @@ def build_dataloader(
     path_list,
     root_path,
     text_cleaner,
-    preprocess_text_fn=None,
     validation=False,
-    OOD_data="Data/OOD_texts.txt",
+    ood_data="Data/OOD_texts.txt",
     batch_size=4,
     num_workers=1,
     device="cpu",
@@ -294,8 +291,7 @@ def build_dataloader(
         path_list,
         root_path,
         text_cleaner,
-        preprocess_text_fn=preprocess_text_fn,
-        OOD_data=OOD_data,
+        ood_data=ood_data,
         validation=validation,
         **dataset_config,
     )

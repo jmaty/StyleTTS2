@@ -22,7 +22,7 @@ from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, Wa
 from meldataset import build_dataloader
 from models import build_model, load_ASR_models, load_checkpoint, load_F0_models, save_checkpoint
 from optimizers import build_optimizer
-from text_utils import TextCleaner, add_spaces_around_punctuation
+from text_utils import TextCleaner
 from utils import (
     get_data_path_list,
     get_image,
@@ -140,9 +140,7 @@ def main():
     # Load data
     train_list, val_list = get_data_path_list(train_path, val_path)
 
-    preprocess_text_fn = add_spaces_around_punctuation
     print(f"BERT size: {model.bert.config.max_position_embeddings}")
-    print(f"Text pre-processing function: {preprocess_text_fn.__name__}")
 
     dataset_config = {
         "sr": sr,
@@ -156,8 +154,7 @@ def main():
         train_list,
         root_path,
         text_cleaner,
-        preprocess_text_fn=preprocess_text_fn,
-        OOD_data=ood_data,
+        ood_data=ood_data,
         batch_size=batch_size,
         num_workers=args.num_workers,
         device=device,
@@ -168,8 +165,7 @@ def main():
         val_list,
         root_path,
         text_cleaner,
-        preprocess_text_fn=preprocess_text_fn,
-        OOD_data=ood_data,
+        ood_data=ood_data,
         batch_size=batch_size,
         validation=True,
         num_workers=0,
