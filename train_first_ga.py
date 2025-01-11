@@ -146,8 +146,8 @@ def main():
         "sr": sr,
         "min_length": data_params["min_length"],
         "max_length": model.bert.config.max_position_embeddings,  # ALBERT config
-        "silence_beg": data_params["silence_beg"],
-        "silence_end": data_params["silence_end"],
+        "silence_beg": config["preprocess_params"].get("silence_beg", 4800),
+        "silence_end": config["preprocess_params"].get("silence_end", 4800),
     }
 
     train_dataloader = build_dataloader(
