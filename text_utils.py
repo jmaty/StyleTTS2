@@ -20,6 +20,12 @@ class TextCleaner:
         # assert len(self) == 81, f'Number of symbols must be 81 but it is {len(self)}'
         assert pad in self._symbols, f"Pad symbol ({pad}) is not included in symbols!"
 
+        # Pre-compile regex for adding spaces
+        # Add a space before punctuation if it is not already preceded by a space
+        self._re_before_punctuation = re.compile(r"(?<! )([.,!?;:])")
+        # Add a space after punctuation if it is not already followed by a space
+        self._re_after_punctuation = re.compile(r"([.,!?;:])(?! )")
+
     def __call__(self, text, pad=False):
         """Call method for converting a phonetic string into a list of token IDs.
 
@@ -115,8 +121,7 @@ class TextCleaner:
         """
         return " ", self._symbols[" "]
 
-    @staticmethod
-    def add_spaces_around_punctuation(text):
+    def add_spaces_around_punctuation(self, text):
         """Add spaces around punctuation in a phonetic string.
 
         Args:
@@ -126,9 +131,9 @@ class TextCleaner:
             str: phonetic string with non-initial and non-final punctution surrounded by spaces
         """
         # Add a space before punctuation if it is not already preceded by a space
-        text = re.sub(r"(?<! )([.,!?;:])", r" \1", text)
+        text = self._re_before_punctuation.sub(r" \1", text)
         # Add a space after punctuation if it is not already followed by a space
-        text = re.sub(r"([.,!?;:])(?! )", r"\1 ", text)
+        text = self._re_after_punctuation.sub(r"\1 ", text)
         return text.strip()
 
     @staticmethod
