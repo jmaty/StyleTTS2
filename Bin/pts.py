@@ -21,7 +21,7 @@ from scipy.io.wavfile import write
 
 import models
 from Modules.diffusion.sampler import ADPM2Sampler, DiffusionSampler, KarrasSchedule
-from text_utils2 import TextCleaner
+from text_utils import TextCleaner
 from Utils.PLBERT.util import load_plbert
 
 
@@ -54,7 +54,7 @@ class Synthesizer:
         self.sampler = None
 
         self._load_symbols()
-        self.logger.info("Number of symbols: %s", {len(self.text_cleaner)})
+        self.logger.debug("Number of symbols: %s", {len(self.text_cleaner)})
         assert (
             len(self.text_cleaner) == 81
         ), f"Number of symbols must be 81 but it is {len(self.text_cleaner)}"
@@ -149,20 +149,28 @@ class Synthesizer:
         # Initialize previous style and wavs
         wavs = []
         s_prev = None
+        # Offset for silence used in training
+        offset_beg = self.config.preprocess_params.silence_beg
+        offset_end = self.config.preprocess_params.silence_end
+        self.logger.debug("Silence offset: %s, %s", offset_beg, offset_end)
 
         # Iterate over phonetic strings (lines in the input phonetic file)
         for ph_string in ph_strings:
+            self.logger.debug("Phonetic string: %s", ph_string)
             # Use the same noise within a phonetic string (one phonetic line) or
             # generate new noise for each sentence (None)
             noise = self.generate_noise() if fix_noise else None
 
-            # Iterate over sentences
-            for ph_sent in re.split(r"[.!?]", ph_string):
+            # Iterate over sentences in the phonetic string
+            for ph_sent in re.findall(r"[^.!?]*[.!?]", ph_string):
                 if not ph_sent.strip():  # skip empty phonetic string
                     continue
 
+                self.logger.debug("Phonetic sentence: %s", ph_sent)
+
                 # add padding and tokenize phonetic sentence
-                ph_ids = [0] + self.text_cleaner(ph_sent)
+                ph_ids = self.text_cleaner(ph_sent, pad=True)
+                self.logger.debug("Phone IDs: %s", ph_ids)
 
                 # Generate wav
                 wav, s_prev = self._inference(
@@ -173,8 +181,9 @@ class Synthesizer:
                     s_prev=s_prev,
                     alpha=alpha,
                 )
-            # Collect wavs
-            wavs.append(wav)
+
+                # Collect wavs (without silence forced in training)
+                wavs.append(wav[offset_beg:-offset_end])
 
         return wavs
 
@@ -357,7 +366,7 @@ def main():
     )
     parser.add_argument(
         "-n",
-        "--fixed_noise",
+        "--fix_noise",
         action="store_true",
         help="Fix noise across sentences. Cancel with a newline. Default=False.",
         default=False,
@@ -366,8 +375,8 @@ def main():
         "-d",
         "--diffusion_steps",
         type=float,
-        help="Diffusion steps. Default=5.",
-        default=5.0,
+        help="Diffusion steps. Default=5",
+        default=5,
     )
     parser.add_argument(
         "-e",
