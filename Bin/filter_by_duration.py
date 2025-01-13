@@ -6,20 +6,11 @@ import csv
 import os
 import sys
 
-import librosa
-import numpy as np
-from tqdm import tqdm
-
-
-# Funkce na získání délky zvukového souboru v sekundách pomocí librosa
-def get_audio_duration(file_path):
-    y, sr = librosa.load(file_path, sr=None)  # Načtení zvuku s původní vzorkovací frekvencí
-    duration = librosa.get_duration(y=y, sr=sr)
-    return duration
+import yaml
 
 
 # Funkce pro filtrování řádků podle délky zvukového souboru a výpočet celkových délek
-def filter_audio_files(input_csv, audio_directory, min_dur=0.0, max_dur=999.0):
+def filter_audio_files(input_csv, stats, min_dur=0.0, max_dur=999.0):
     with open(input_csv, encoding="utf-8") as infile:
         reader = csv.reader(infile, delimiter="|")
         writer = csv.writer(sys.stdout, delimiter="|", lineterminator="\n")
@@ -29,22 +20,19 @@ def filter_audio_files(input_csv, audio_directory, min_dur=0.0, max_dur=999.0):
         if headers:
             writer.writerow(headers)
 
-        for row in tqdm(reader, desc="Filtering", unit=" rows"):
+        for row in reader:
             file_name = row[0]  # Název souboru je první položka v řádce
 
             # Přidání přípony .wav, pokud tam není
             if not file_name.lower().endswith(".wav"):
                 file_name += ".wav"
 
-            audio_file_path = os.path.join(audio_directory, file_name)
+            # Get file duration
+            dur = stats.get(file_name)
 
-            # Pokud zvukový soubor existuje, zjisti jeho délku
-            if os.path.isfile(audio_file_path):
-                dur = get_audio_duration(audio_file_path)
-
-                # Pokud délka je menší než zadaná hodnota, zapiš řádek do výstupního souboru
-                if min_dur < dur < max_dur:
-                    writer.writerow(row)
+            # Write row if duration is within the specified range
+            if dur and min_dur < dur < max_dur:
+                writer.writerow(row)
 
 
 def main():
@@ -62,16 +50,19 @@ def main():
         "-m", "--min_dur", type=float, default=0.0, help="minimum audio duration (0.0 s)"
     )
     parser.add_argument(
-        "-a",
-        "--audio_dir",
+        "-s",
+        "--stats",
         type=str,
-        default="./wavs",
         required=True,
-        help="directory with audio files",
+        help="wav stats file in YAML format",
     )
     args = parser.parse_args()
 
-    filter_audio_files(args.inp_csv, args.audio_dir, args.min_dur, args.max_dur)
+    # Load wav statistics
+    with open(args.stats, "r", encoding="utf-8") as f:
+        stats = yaml.safe_load(f)
+
+    filter_audio_files(args.inp_csv, stats, args.min_dur, args.max_dur)
 
 
 if __name__ == "__main__":
