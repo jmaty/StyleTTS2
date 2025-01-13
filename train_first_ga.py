@@ -133,6 +133,8 @@ def main():
         plbert = load_plbert(bert_path)
 
     model = build_model(model_params, text_aligner, pitch_extractor, plbert)
+    bert_size = model.bert.config.max_position_embeddings  # ALBERT config
+    print(f"BERT size: {bert_size}")
 
     for k in model:
         model[k] = accelerator.prepare(model[k])
@@ -140,12 +142,10 @@ def main():
     # Load data
     train_list, val_list = get_data_path_list(train_path, val_path)
 
-    print(f"BERT size: {model.bert.config.max_position_embeddings}")
-
     dataset_config = {
         "sr": sr,
         "min_length": data_params["min_length"],
-        "max_length": model.bert.config.max_position_embeddings,  # ALBERT config
+        "max_length": bert_size,
         "silence_beg": config["preprocess_params"].get("silence_beg", 4800),
         "silence_end": config["preprocess_params"].get("silence_end", 4800),
     }
