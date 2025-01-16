@@ -79,7 +79,7 @@ SELECT="-l select=1:ncpus=$NCPUS:mem=$MEM:scratch_local=$LSCRATCH:ngpus=$NGPUS$C
 WALLTIME="-l walltime=$HOURS:00:00"
 
 # Extract name of the experiment
-EXP="$(basename $EXPDIR)_stage2"
+EXP="$(basename $EXPDIR)_stage2b"
 
 # Timestep to differentiate among runs with the same run name
 TIMESTEP=$(date +"%y%m%d-%H%M%S")
@@ -104,7 +104,7 @@ sed -i "/^pretrained_model:/c\pretrained_model: $EXPDIR/stage2_pre-joint_00049.p
 # -----------------------------------------------------------------------------
 # RUN TRAINING
 # -----------------------------------------------------------------------------
-OLOG=$EXPDIR/stage2.$TIMESTEP.log
+OLOG=$EXPDIR/stage2b.$TIMESTEP.log
 ONTB=$EXPDIR/$(basename "$INTB" .ipynb).processed.$TIMESTEP.ipynb
 
 # Run PBS script
