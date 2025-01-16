@@ -30,6 +30,8 @@ class Synthesizer:
         self,
         model_path,
         config_path,
+        use_glob_noise=False,
+        fix_noise_in_ph_string=False,
         device="cuda",
         log_level=logging.INFO,
     ):
@@ -52,6 +54,14 @@ class Synthesizer:
         self.device = device
         self.text_cleaner = None
         self.sampler = None
+
+        # Generate global noise if specified
+        self.glob_noise = self.generate_noise() if use_glob_noise else None
+        # In case of global noise, noise within phonetic string is always fixed;
+        # otherwise, it is optional according to `fix_noise_in_ph_string`
+        self.fix_noise_in_ph_string = fix_noise_in_ph_string if not use_glob_noise else True
+        self.logger.debug("Using global noise: %s", use_glob_noise)
+        self.logger.debug("Fix noise in phonetic string: %s", fix_noise_in_ph_string)
 
         self._load_symbols()
         self.logger.debug("Number of symbols: %s", {len(self.text_cleaner)})
@@ -132,7 +142,6 @@ class Synthesizer:
         diffusion_steps=5,
         embedding_scale=1,
         alpha=0.7,
-        fix_noise=False,
     ):
         """Synthesize speech from phonetic strings.
 
@@ -157,9 +166,16 @@ class Synthesizer:
         # Iterate over phonetic strings (lines in the input phonetic file)
         for ph_string in ph_strings:
             self.logger.debug("Phonetic string: %s", ph_string)
-            # Use the same noise within a phonetic string (one phonetic line) or
-            # generate new noise for each sentence (None)
-            noise = self.generate_noise() if fix_noise else None
+
+            if self.glob_noise is not None:
+                # Use the same noise for the entire document (across phonetic strings)
+                noise = self.glob_noise
+            elif self.fix_noise_in_ph_string:
+                # Use the same noise within a phonetic string (one phonetic line)
+                noise = self.generate_noise()
+            else:
+                # New noise will be generated for each sentence
+                noise = None
 
             # Iterate over sentences in the phonetic string
             for ph_sent in re.findall(r"[^.!?]*[.!?]", ph_string):
@@ -190,7 +206,7 @@ class Synthesizer:
     def _inference(
         self, ph_ids, noise=None, diffusion_steps=5, embedding_scale=1, s_prev=None, alpha=0.7
     ):
-        """_summary_
+        """Inference for a single phonetic sentence.
 
         Args:
             ph_ids (tensor): Phoneme IDs
@@ -212,7 +228,7 @@ class Synthesizer:
             d_en = self.model.bert_encoder(bert_dur).transpose(-1, -2)
 
             s_curr = self.sampler(
-                self.generate_noise() if noise is None else noise,
+                self.generate_noise() if noise is None else noise,  # noise for diffusion
                 embedding=bert_dur[0].unsqueeze(0),
                 num_steps=diffusion_steps,
                 embedding_scale=embedding_scale,
@@ -365,10 +381,17 @@ def main():
         help="Output wav file path.",
     )
     parser.add_argument(
-        "-n",
-        "--fix_noise",
+        "-g",
+        "--use_glob_noise",
         action="store_true",
-        help="Fix noise across sentences. Cancel with a newline. Default=False.",
+        help="Use the same noise for the entire documents. Default=False.",
+        default=False,
+    )
+    parser.add_argument(
+        "-n",
+        "--fix_noise_in_ph_string",
+        action="store_true",
+        help="Fix noise across sentences in phonetic string. Cancel with a newline. Default=False.",
         default=False,
     )
     parser.add_argument(
@@ -422,7 +445,14 @@ def main():
     logger.debug("Device: %s", device)
 
     # Define synthesizer
-    synth = Synthesizer(args.model, args.config, device=device, log_level=args.debug)
+    synth = Synthesizer(
+        args.model,
+        args.config,
+        use_glob_noise=args.use_glob_noise,
+        fix_noise_in_ph_string=args.fix_noise_in_ph_string,
+        device=device,
+        log_level=args.debug,
+    )
 
     # Synthesize speech
     with args.ifile as f:
@@ -431,7 +461,6 @@ def main():
             args.diffusion_steps,
             args.embedding_scale,
             args.alpha,
-            args.fix_noise,
         )
 
     # Save wavs as a single file
