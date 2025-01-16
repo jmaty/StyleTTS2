@@ -303,7 +303,13 @@ def main():
     print("BERT", optimizer.optimizers["bert"])
     print("decoder", optimizer.optimizers["decoder"])
 
-    running_std = []
+    # === Change sigma data calculation ===
+    # Working with running values to enable following calculation from already saved model
+    # running_std = []
+    # sigma data mean from already processed epochs stored in config
+    sigma_data = float(config["model_params"]["diffusion"]["dist"]["sigma_data"])
+    # Count of processed epochs stored
+    sigma_count = start_epoch - diff_epoch if start_epoch > diff_epoch else 0
 
     slmadv_params = Munch(config["slmadv_params"])
     slmadv = SLMAdversarialLoss(
@@ -400,11 +406,21 @@ def main():
                 num_steps = np.random.randint(3, 5)
 
                 if model_params.diffusion.dist.estimate_sigma_data:
-                    # batch-wise std estimation
+                    # Batch-wise std estimation
                     # model.diffusion.diffusion.sigma_data = s_trg.std(axis=-1).mean().item()
                     # running_std.append(model.diffusion.sigma_data)
-                    model.diffusion.module.diffusion.sigma_data = s_trg.std(axis=-1).mean().item()
-                    running_std.append(model.diffusion.module.diffusion.sigma_data)
+                    # model.diffusion.module.diffusion.sigma_data = s_trg.std(axis=-1).mean().item()
+                    # running_std.append(model.diffusion.module.diffusion.sigma_data)
+
+                    # Sigma data estimation from running values
+                    new_sigma_value = s_trg.std(axis=-1).mean().item()
+                    new_sigma_data = (sigma_data * sigma_count + new_sigma_value) / (
+                        sigma_count + 1
+                    )
+                    # Update sigma data
+                    model.diffusion.module.diffusion.sigma_data = new_sigma_data
+                    sigma_data = new_sigma_data  # update sigma_data
+                    sigma_count += 1  # increment count
 
                 if multispeaker:
                     s_preds = sampler(
@@ -798,8 +814,8 @@ def main():
                     # JMa: Fix: remove explicitly 2nd dimension
                     # otherwise all dimensions of size 1 are removed
                     # (resulting in error when current batch size is 1)
-                    # s = torch.stack(ss).squeeze()
-                    s = torch.stack(ss).squeeze(dim=-1)
+                    s = torch.stack(ss).squeeze()
+                    # s = torch.stack(ss).squeeze(dim=-1)
                     # gs = torch.stack(gs).squeeze()              # !!! JMa: not used anymore?
                     # # gs = torch.stack(gs).squeeze(dim=-1)        # !!! JMa: not used anymore?
                     # s_trg = torch.cat([s, gs], dim=-1).detach() # !!! JMa: not used anymore?
@@ -1014,10 +1030,14 @@ def main():
                 model, optimizer, epoch, iters, curr_loss, "epoch_2nd", log_dir, max_saved_models
             )
 
-            # if estimate sigma, save the estimated sigma
+            # if estimate sigma, save the estimated sigma to the config file
             if epoch >= diff_epoch and model_params.diffusion.dist.estimate_sigma_data:
-                config["model_params"]["diffusion"]["dist"]["sigma_data"] = float(
-                    np.mean(running_std)
+                # config["model_params"]["diffusion"]["dist"]["sigma_data"] = float(
+                #     np.mean(running_std)
+                # )
+                config["model_params"]["diffusion"]["dist"]["sigma_data"] = sigma_data
+                print(
+                    "Estimated sigma: %f", config["model_params"]["diffusion"]["dist"]["sigma_data"]
                 )
 
                 cfg_path = osp.join(log_dir, f"{cfg_name}.processed{cfg_ext}")
@@ -1085,7 +1105,11 @@ def main():
 
     # if estimate sigma, save the estimated sigma
     if epoch >= diff_epoch and model_params.diffusion.dist.estimate_sigma_data:
-        config["model_params"]["diffusion"]["dist"]["sigma_data"] = float(np.mean(running_std))
+        # config["model_params"]["diffusion"]["dist"]["sigma_data"] = float(np.mean(running_std))
+        config["model_params"]["diffusion"]["dist"]["sigma_data"] = sigma_data
+        logger.info(
+            "Estimated sigma: %f", config["model_params"]["diffusion"]["dist"]["sigma_data"]
+        )
 
         cfg_path = osp.join(log_dir, f"{cfg_name}.processed{cfg_ext}")
         with open(cfg_path, "w", encoding="utf-8") as outfile:
