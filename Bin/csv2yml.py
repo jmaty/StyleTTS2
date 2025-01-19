@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import argparse
+import csv
+import os
+from collections import defaultdict
+
+import librosa
+import yaml
+from tqdm import tqdm
+
+
+# Convert defaultdict to dict recursively
+def defaultdict_to_dict(d):
+    if isinstance(d, defaultdict):
+        d = {k: defaultdict_to_dict(v) for k, v in d.items()}
+    return d
+
+
+# Function for getting audio file duration in seconds using librosa
+def get_audio_duration(file_path):
+    y, sr = librosa.load(file_path, sr=None)  # Načtení zvuku s původní vzorkovací frekvencí
+    duration = librosa.get_duration(y=y, sr=sr)
+    return duration
+
+
+# Function for filtering rows by audio file duration and computing total durations
+def compute_stats(input_csv, audio_directory, default_spk_id=0):
+    stats = defaultdict(lambda: defaultdict(dict))
+    # Open CSV file
+    with open(input_csv, encoding="utf-8") as infile:
+        reader = csv.reader(infile, delimiter="|")
+
+        for row in tqdm(reader, desc="Computing stats", unit=" rows"):
+            print(row)
+            # Extract speaker ID from the row's 3rd column or use default_spk_id
+            spk_id = default_spk_id if len(row) < 3 else int(row[2])
+            file_name = row[0]  # the first column is the file name
+            text = row[1]  # the second column is the text
+
+            # Add .wav extension if not present
+            if not file_name.lower().endswith(".wav"):
+                file_name += ".wav"
+
+            audio_file_path = os.path.join(audio_directory, file_name)
+
+            # If the audio file exists, get its duration
+            if os.path.isfile(audio_file_path):
+                dur = get_audio_duration(audio_file_path)
+            else:
+                dur = None
+
+            # Store the duration in the stats dictionary
+            stats[spk_id][file_name]["text"] = text
+            stats[spk_id][file_name]["duration"] = dur
+    return stats
+
+
+def main():
+    # pylint: disable=bad-option-value
+    parser = argparse.ArgumentParser(
+        description="""Compute statistics.\n\n
+        """,
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    parser.add_argument("inp_csv", default=None, help="input file list in CSV format")
+    parser.add_argument("out_yaml", default=None, help="output file stats in YAML format")
+    parser.add_argument(
+        "-a",
+        "--audio_dir",
+        type=str,
+        default="./wavs",
+        required=True,
+        help="directory with audio files",
+    )
+    parser.add_argument(
+        "-s",
+        "--spk_id",
+        type=int,
+        default=0,
+        help="defaut speaker ID. Default is 0",
+    )
+    args = parser.parse_args()
+
+    # Compute wabeform statistics
+    stats = compute_stats(args.inp_csv, args.audio_dir)
+    # Convert defaultdict to dict
+    stats = defaultdict_to_dict(stats)
+
+    # Write statistics to stdout as YAML
+    with open(args.out_yaml, "w", encoding="utf-8") as yamlfile:
+        yaml.dump(stats, yamlfile, default_flow_style=False, allow_unicode=True, width=999)
+
+
+if __name__ == "__main__":
+    main()
