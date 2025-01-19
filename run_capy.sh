@@ -11,9 +11,12 @@ QUEUE="dgx"
 HOURS1=60
 HOURS2a=30
 HOURS2b=72
+NGPUS1=2
+NGPUS2a=2
+NGPUS2b=2
 
 if [[ "$#" -lt 1 ]]; then
-     echo "Usage: run_capy.sh exp_dir [hours1=$HOURS1] [hours2a=$HOURS2a] [hours2b=$HOURS2b]"
+     echo "Usage: run_capy.sh exp_dir [hours1=$HOURS1] [hours2a=$HOURS2a] [hours2b=$HOURS2b] [ngpus1=$NGPUS1] [ngpus2a=$NGPUS2a] [ngpus2b=$NGPUS2b]" >&2
      exit 1
 fi
 # Input experimental directory

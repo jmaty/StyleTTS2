@@ -19,7 +19,7 @@ NCPUS=8
 NGPUS=2
 
 if [[ "$#" -lt 1 ]]; then
-     printf "Usage: run_stage2a.sh exp_dir [specification: iti dgx gpu<3-4>] [hours] [jobid]" >&2
+     printf "Usage: run_stage2b.sh exp_dir [specification: iti dgx gpu<3-4>] [hours] [ngpus] [jobid]\n" >&2
      exit 1
 fi
 
@@ -36,8 +36,12 @@ if [[ "$#" -gt 2 ]]; then
      HOURS=$3
 fi
 if [[ "$#" -gt 3 ]]; then
+     # Number of GPUs
+     NGPUS=$4
+fi
+if [[ "$#" -gt 4 ]]; then
      # JOBID to continue run
-     JOBID=$4
+     JOBID=$5
 fi
 
 # Check dependencies
