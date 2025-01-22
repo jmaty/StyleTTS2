@@ -8,9 +8,7 @@ export LC_NUMERIC="en_US.UTF-8"
 # -----------------------------------------------------------------------------
 # Default params
 SPEC="gpu3"
-RUNS=1
 HOURS=72
-MODELS=""
 INTB=Train_second.ipynb
 # QSUB ARGUMENTS
 MEM=64gb

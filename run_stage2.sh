@@ -8,23 +8,22 @@ export LC_NUMERIC="en_US.UTF-8"
 # -----------------------------------------------------------------------------
 # Default params
 SPEC="gpu3"
-RUNS=1
-HOURS=24
-MODELS=""
+HOURS=168
 INTB=Train_second.ipynb
 # QSUB ARGUMENTS
-MEM=64gb
+MEM=128gb
 LSCRATCH=20gb
 NCPUS=8
 NGPUS=2
 
 if [[ "$#" -lt 1 ]]; then
-     echo "Usage: run_stage1.sh exp_dir [specification: iti dgx gpu<3-4>] [hours]"
+     printf "Usage: run_stage2b.sh exp_dir [specification: iti dgx gpu<3-4>] [hours] [ngpus] [jobid]\n" >&2
      exit 1
 fi
 
 # Input experimental directory
 EXPDIR=$1
+CFG=$EXPDIR/config2.yml
 
 if [[ "$#" -gt 1 ]]; then
      # specification to run on (iti, gdx, gpu<3-4>)
@@ -33,6 +32,22 @@ fi
 if [[ "$#" -gt 2 ]]; then
      # Number of hours
      HOURS=$3
+fi
+if [[ "$#" -gt 3 ]]; then
+     # Number of GPUs
+     NGPUS=$4
+fi
+if [[ "$#" -gt 4 ]]; then
+     # JOBID to continue run
+     JOBID=$5
+fi
+
+# Check dependencies
+if [[ -z $JOBID ]]; then
+     # No deps at the beginning
+     DEPS=""
+else
+     DEPS="-W depend=afterany:$JOBID"
 fi
 
 # Check run specification and set queue and cluster to run on
@@ -74,7 +89,6 @@ TIMESTEP=$(date +"%y%m%d-%H%M%S")
 SINGULARITY=/storage/plzen4-ntis/home/jmatouse/singularity/papermill_23.12-latest.sh
 
 # Check that config file exists
-CFG=$EXPDIR/config2.yml
 if [[ ! -e $CFG ]]; then
      echo "Config file $CFG does not exists!"
      exit 1
@@ -90,12 +104,25 @@ sed -i "/^log_dir:/c\log_dir: $EXPDIR" $CFG
 OLOG=$EXPDIR/stage2.$TIMESTEP.log
 ONTB=$EXPDIR/$(basename "$INTB" .ipynb).processed.$TIMESTEP.ipynb
 
+# # Run PBS script
+# qsub -N "$EXP" \
+#      $QUEUE \
+#      -j oe \
+#      -o $OLOG \
+#      $WALLTIME \
+#      $SELECT \
+#      -- $SINGULARITY "$INTB" "$CFG" "$ONTB"
+# echo "$EXP: $QUEUE $SELECT, HOURS: $HOURS"
+
 # Run PBS script
-qsub -N "$EXP" \
+JOBID=$(qsub -N "$EXP" \
      $QUEUE \
      -j oe \
      -o $OLOG \
      $WALLTIME \
      $SELECT \
-     -- $SINGULARITY "$INTB" "$CFG" "$ONTB"
-echo "$EXP: $QUEUE $SELECT, HOURS: $HOURS"
+     $DEPS \
+     -- $SINGULARITY "$INTB" "$CFG" "$ONTB")
+
+printf "$EXP: $QUEUE $SELECT, HOURS: $HOURS\n" >&2
+printf "$JOBID"
