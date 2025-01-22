@@ -143,6 +143,7 @@ def main():
     # Build model
     model_params = recursive_munch(config["model_params"])
     model = build_model(model_params, text_aligner, pitch_extractor, plbert)
+    sigma_data = float(model_params.diffusion.dist.sigma_data)
 
     # Set up single/multi-speaker training
     multispeaker = model_params.multispeaker
@@ -202,7 +203,7 @@ def main():
         if config.get("first_stage_path", "") != "":
             first_stage_path = osp.join(log_dir, config.get("first_stage_path", "first_stage.pth"))
             print(f"Loading the first stage model at {first_stage_path} ...")
-            model, _, start_epoch, iters = load_checkpoint(
+            model, _, start_epoch, iters, sigma_data = load_checkpoint(
                 model,
                 None,
                 first_stage_path,
@@ -280,7 +281,7 @@ def main():
 
     # load models if there is a model
     if load_pretrained:
-        model, optimizer, start_epoch, iters = load_checkpoint(
+        model, optimizer, start_epoch, iters, sigma_data = load_checkpoint(
             model,
             optimizer,
             config["pretrained_model"],
@@ -307,7 +308,7 @@ def main():
     # Working with running values to enable following calculation from already saved model
     # running_std = []
     # sigma data mean from already processed epochs stored in config
-    sigma_data = float(config["model_params"]["diffusion"]["dist"]["sigma_data"])
+
     # Count of processed epochs stored
     sigma_count = start_epoch - diff_epoch if start_epoch > diff_epoch else 0
 
@@ -329,6 +330,12 @@ def main():
 
     # Total number of steps given the batch size
     tot_num_steps = len(train_list) // batch_size
+
+    print(" > Start training cycles:")
+    print(f" | > Starting epoch: {start_epoch}")
+    print(f" | > Total epochs: {epochs}")
+    print(f" | > Iterations: {iters}")
+    print(f" | > Sigma data: {sigma_data}")
 
     # Train model
     for epoch in range(start_epoch, epochs):
@@ -406,9 +413,9 @@ def main():
                 num_steps = np.random.randint(3, 5)
 
                 if model_params.diffusion.dist.estimate_sigma_data:
-                    # Batch-wise std estimation
-                    # model.diffusion.diffusion.sigma_data = s_trg.std(axis=-1).mean().item()
-                    # running_std.append(model.diffusion.sigma_data)
+                    ## Batch-wise std estimation
+                    ## model.diffusion.diffusion.sigma_data = s_trg.std(axis=-1).mean().item()
+                    ## running_std.append(model.diffusion.sigma_data)
                     # model.diffusion.module.diffusion.sigma_data = s_trg.std(axis=-1).mean().item()
                     # running_std.append(model.diffusion.module.diffusion.sigma_data)
 
@@ -1027,25 +1034,34 @@ def main():
             if curr_loss < best_loss:
                 best_loss = curr_loss
             save_checkpoint(
-                model, optimizer, epoch, iters, curr_loss, "epoch_2nd", log_dir, max_saved_models
+                model,
+                optimizer,
+                epoch,
+                iters,
+                curr_loss,
+                "epoch_2nd",
+                log_dir,
+                max_saved_models,
+                sigma_data if model_params.diffusion.dist.estimate_sigma_data else None,
             )
 
-            # if estimate sigma, save the estimated sigma to the config file
-            if epoch >= diff_epoch and model_params.diffusion.dist.estimate_sigma_data:
-                # config["model_params"]["diffusion"]["dist"]["sigma_data"] = float(
-                #     np.mean(running_std)
-                # )
-                config["model_params"]["diffusion"]["dist"]["sigma_data"] = sigma_data
-                print(
-                    "Estimated sigma: %f", config["model_params"]["diffusion"]["dist"]["sigma_data"]
-                )
+            # # if estimate sigma, save the estimated sigma to the config file
+            # if epoch >= diff_epoch and model_params.diffusion.dist.estimate_sigma_data:
+            #     # config["model_params"]["diffusion"]["dist"]["sigma_data"] = float(
+            #     #     np.mean(running_std)
+            #     # )
+            #     config["model_params"]["diffusion"]["dist"]["sigma_data"] = sigma_data
+            #     print(
+            #         "Estimated sigma: %f", config["model_params"]["diffusion"]["dist"]["sigma_data"]
+            #     )
 
-                cfg_path = osp.join(log_dir, f"{cfg_name}.processed{cfg_ext}")
-                with open(cfg_path, "w", encoding="utf-8") as outfile:
-                    yaml.dump(config, outfile, default_flow_style=False)
+            #     cfg_path = osp.join(log_dir, f"{cfg_name}.processed{cfg_ext}")
+            #     with open(cfg_path, "w", encoding="utf-8") as outfile:
+            #         yaml.dump(config, outfile, default_flow_style=False)
 
-            # JMa: synthesize test audios (makes sense after diffusion training started)
-            if save_test_audio and epoch >= diff_epoch:
+            # Synthesize test audios to evaluate the model's performance after diffusion training has started.
+            # Does not work for multispeaker mode so far.
+            if not multispeaker and save_test_audio and epoch >= diff_epoch:
                 synth_test_files(
                     model,
                     test_sentences,
@@ -1080,6 +1096,7 @@ def main():
                     loss_test / iters_test,
                     "stage2_pre-joint",
                     log_dir,
+                    sigma_data=sigma_data,
                 )
 
     # Save the final checkpoint
@@ -1103,17 +1120,17 @@ def main():
             f"Symlink or file {final_model_symlink} already exists => {final_filepath} was not symlinked!"
         )
 
-    # if estimate sigma, save the estimated sigma
-    if epoch >= diff_epoch and model_params.diffusion.dist.estimate_sigma_data:
-        # config["model_params"]["diffusion"]["dist"]["sigma_data"] = float(np.mean(running_std))
-        config["model_params"]["diffusion"]["dist"]["sigma_data"] = sigma_data
-        logger.info(
-            "Estimated sigma: %f", config["model_params"]["diffusion"]["dist"]["sigma_data"]
-        )
+    # # if estimate sigma, save the estimated sigma
+    # if epoch >= diff_epoch and model_params.diffusion.dist.estimate_sigma_data:
+    #     # config["model_params"]["diffusion"]["dist"]["sigma_data"] = float(np.mean(running_std))
+    #     config["model_params"]["diffusion"]["dist"]["sigma_data"] = sigma_data
+    #     logger.info(
+    #         "Estimated sigma: %f", config["model_params"]["diffusion"]["dist"]["sigma_data"]
+    #     )
 
-        cfg_path = osp.join(log_dir, f"{cfg_name}.processed{cfg_ext}")
-        with open(cfg_path, "w", encoding="utf-8") as outfile:
-            yaml.dump(config, outfile, default_flow_style=False)
+    #     cfg_path = osp.join(log_dir, f"{cfg_name}.processed{cfg_ext}")
+    #     with open(cfg_path, "w", encoding="utf-8") as outfile:
+    #         yaml.dump(config, outfile, default_flow_style=False)
 
     # Ending work with NVIDIA NVLM
     nvidia_smi.nvmlShutdown()
