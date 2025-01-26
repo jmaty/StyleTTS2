@@ -9,12 +9,10 @@ export LC_NUMERIC="en_US.UTF-8"
 # Default params
 JOBID=""
 SPEC="gpu3"
-RUNS=1
 HOURS=24
-MODELS=""
 INTB=Train_second.ipynb
 # QSUB ARGUMENTS
-MEM=64gb
+MEM=128gb
 LSCRATCH=20gb
 NCPUS=8
 NGPUS=2
