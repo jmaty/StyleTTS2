@@ -161,7 +161,7 @@ class Synthesizer:
         # Offset for silence used in training
         offset_beg = self.config.preprocess_params.silence_beg
         offset_end = self.config.preprocess_params.silence_end
-        self.logger.debug("Silence offset: %s, %s", offset_beg, offset_end)
+        self.logger.debug("Silence offset: %d, %d", offset_beg, offset_end)
 
         # Iterate over phonetic strings (lines in the input phonetic file)
         for ph_string in ph_strings:
@@ -212,7 +212,7 @@ class Synthesizer:
             ph_ids (tensor): Phoneme IDs
             noise (tensor, optional): Noise for diffusion. Defaults to None.
             diffusion_steps (int, optional): Number of diffusion steps. Defaults to 5.
-            embedding_scale (int, optional): Embedding scale. Defaults to 1.
+            embedding_scale (int, optional): Embedding scale. Defaults to 1.0.
             s_prev (tensor, optional): Previous sentence style embedding. Defaults to None.
             alpha (float, optional): Weight for convex combination of current and previous styles. Defaults to 0.7.
 
