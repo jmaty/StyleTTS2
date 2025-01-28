@@ -1,29 +1,26 @@
 # coding:utf-8
 
+import math
 import os
 from collections import OrderedDict
-import math
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.utils import weight_norm, spectral_norm  # , remove_weight_norm
+import yaml
+from munch import Munch
+from torch.nn.utils import spectral_norm, weight_norm  # , remove_weight_norm
 
-from Utils.ASR.models import ASRCNN
-from Utils.JDC.model import JDCNet
-
-from Modules.diffusion.sampler import KDiffusion, LogNormalDistribution
-from Modules.diffusion.modules import Transformer1d, StyleTransformer1d
 from Modules.diffusion.diffusion import AudioDiffusionConditional
-
+from Modules.diffusion.modules import StyleTransformer1d, Transformer1d
+from Modules.diffusion.sampler import KDiffusion, LogNormalDistribution
 from Modules.discriminators import (
     MultiPeriodDiscriminator,
     MultiResSpecDiscriminator,
     WavLMDiscriminator,
 )
-
-from munch import Munch
-import yaml
+from Utils.ASR.models import ASRCNN
+from Utils.JDC.model import JDCNet
 
 
 class LearnedDownSample(nn.Module):
@@ -876,19 +873,25 @@ def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_module
         # advance start epoch or we'd re-train and rewrite the last epoch file
         epoch = state["epoch"] + 1
         iters = state["iters"]
-        sigma_data = state.get("sigma_data", 0.0)
         optimizer.load_state_dict(state["optimizer"])
     else:
         epoch = 0
         iters = 0
-        sigma_data = 0.0
 
-    return model, optimizer, epoch, iters, sigma_data
+    return model, optimizer, epoch, iters
 
 
 # JMa: Save model and delete old models
 def save_checkpoint(
-    model, optimizer, epoch, iters, loss, basename, save_dir, max_saved_models=None, sigma_data=0.0
+    model,
+    optimizer,
+    epoch,
+    iters,
+    loss,
+    basename,
+    save_dir,
+    max_saved_models=None,
+    use_epoch_in_name=True,
 ):
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
@@ -900,11 +903,10 @@ def save_checkpoint(
         "iters": iters,
         "val_loss": loss,
         "epoch": epoch,
-        "sigma_data": sigma_data,
     }
 
     # Save the model
-    filename = f"{basename}_{epoch:05d}.pth"
+    filename = f"{basename}_{epoch:05d}.pth" if use_epoch_in_name else f"{basename}.pth"
     filepath = os.path.join(save_dir, filename)
     if os.path.isfile(filepath):
         # Skip saving model when already exists
