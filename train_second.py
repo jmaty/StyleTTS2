@@ -1047,7 +1047,9 @@ def main():
             if epoch >= diff_epoch and model_params.diffusion.dist.estimate_sigma_data:
                 sigma_sum = inp_sigma_count * inp_sigma_data + np.sum(running_std)
                 sigma_count = inp_sigma_count + len(running_std)
-                config["model_params"]["diffusion"]["dist"]["sigma_data"] = sigma_sum / sigma_count
+                config["model_params"]["diffusion"]["dist"]["sigma_data"] = float(
+                    sigma_sum / sigma_count
+                )
                 print(
                     f'Estimated sigma: {config["model_params"]["diffusion"]["dist"]["sigma_data"]}'
                 )
