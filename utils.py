@@ -176,8 +176,10 @@ def synth_test_files(
     test_sentences,
     outdir,
     outfile_template,
-    sr,
     text_cleaner,
+    sr,
+    silence_beg=0,
+    silence_end=0,
     sampler=None,
     diffusion_steps=5,
     embedding_scale=1,
@@ -209,5 +211,5 @@ def synth_test_files(
         scipy.io.wavfile.write(
             filename=os.path.join(outdir, outfile),
             rate=sr,
-            data=wav,
+            data=wav[silence_beg:-silence_end],
         )

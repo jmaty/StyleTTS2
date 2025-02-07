@@ -99,6 +99,8 @@ def main():
 
     data_params = config.get("data_params", None)
     sr = config["preprocess_params"].get("sr", 24000)
+    silence_beg = config["preprocess_params"].get("silence_beg", 4800)
+    silence_end = config["preprocess_params"].get("silence_end", 4800)
     train_path = data_params["train_data"]
     val_path = data_params["val_data"]
     root_path = data_params["root_path"]
@@ -156,8 +158,8 @@ def main():
         "sr": sr,
         "min_length": data_params["min_length"],
         "max_length": model.bert.config.max_position_embeddings,  # ALBERT config
-        "silence_beg": config["preprocess_params"].get("silence_beg", 4800),
-        "silence_end": config["preprocess_params"].get("silence_end", 4800),
+        "silence_beg": silence_beg,
+        "silence_end": silence_end,
     }
 
     train_dataloader = build_dataloader(
@@ -917,8 +919,8 @@ def main():
 
                     y_rec = model.decoder(en, f0_real, real_norm, s)
 
-                    # Write and save val audio
-                    wav = y_rec.cpu().numpy().squeeze()
+                    # Write and save val audio (removing artificial silence)
+                    wav = y_rec.cpu().numpy().squeeze()[silence_beg:-silence_end]
                     writer.add_audio(f"eval/y{idx}", wav, epoch, sample_rate=sr)
                     if save_val_audio and epoch % saving_epoch == 0:
                         outfile_template = f"epoch_2nd_{epoch:0>5}"
@@ -934,7 +936,10 @@ def main():
 
                     y_pred = model.decoder(en, f0_fake, n_fake, s)
                     writer.add_audio(
-                        f"pred/y{idx}", y_pred.cpu().numpy().squeeze(), epoch, sample_rate=sr
+                        f"pred/y{idx}",
+                        y_pred.cpu().numpy().squeeze()[silence_beg:-silence_end],
+                        epoch,
+                        sample_rate=sr,
                     )
 
                     # Save ground truth
@@ -1014,8 +1019,8 @@ def main():
                         ref.squeeze().unsqueeze(0),
                     )
 
-                    # Write and save val audio
-                    wav = out.cpu().numpy().squeeze()
+                    # Write and save val audio (removing artificial silence)
+                    wav = out.cpu().numpy().squeeze()[silence_beg:-silence_end]
                     writer.add_audio("pred/y" + str(idx), wav, epoch, sample_rate=sr)
                     if save_val_audio and epoch % saving_epoch == 0:
                         outfile_template = f"epoch_2nd_{epoch:0>5}"
@@ -1069,8 +1074,10 @@ def main():
                     test_sentences,
                     test_audio_dir,
                     f"epoch_2nd_{epoch:0>5}_test",
+                    text_cleaner,
                     sr,
-                    text_cleaner=text_cleaner,
+                    silence_beg=silence_beg,
+                    silence_end=silence_end,
                     sampler=None,
                     diffusion_steps=5,
                     embedding_scale=1,
