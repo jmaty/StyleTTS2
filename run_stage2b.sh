@@ -11,18 +11,21 @@ SPEC="gpu3"
 HOURS=72
 INTB=Train_second.ipynb
 # QSUB ARGUMENTS
-MEM=128gb
+MEM=256gb
 LSCRATCH=20gb
 NCPUS=8
 NGPUS=2
 
 if [[ "$#" -lt 1 ]]; then
-     printf "Usage: run_stage2b.sh exp_dir [specification: iti dgx gpu<3-4>] [hours] [ngpus] [jobid]\n" >&2
+     printf "Usage: run_stage2b.sh pretrained_model [specification: iti dgx gpu<3-4>] [hours] [ngpus] [jobid]\n" >&2
      exit 1
 fi
 
-# Input experimental directory
-EXPDIR=$1
+PRETRAINED_MODEL=$1  # Path to the pretrained model
+# Set up experiment directory and config file:
+# - experiment directory is the directory of the pretrained model
+# - config file is the config2b.yml in the experiment directory
+EXPDIR=$(dirname $PRETRAINED_MODEL)
 CFG=$EXPDIR/config2b.yml
 
 if [[ "$#" -gt 1 ]]; then
@@ -98,7 +101,7 @@ fi
 # (the original log dir in the config file serves just as a placeholder)
 sed -i "/^log_dir:/c\log_dir: $EXPDIR" $CFG
 # Set the pretrained model path
-sed -i "/^pretrained_model:/c\pretrained_model: $EXPDIR/stage2_pre-joint.pth" $CFG
+sed -i "/^pretrained_model:/c\pretrained_model: $PRETRAINED_MODEL" $CFG
 # Transfer sigma_data from stage2a to stage2b
 if [[ -e $EXPDIR/config2.processed.yml ]]; then     
      sigma_data=$(grep -E '^[[:space:]]*sigma_data:' $EXPDIR/config2.processed.yml)

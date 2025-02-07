@@ -1049,7 +1049,7 @@ def main():
                 sigma_count = inp_sigma_count + len(running_std)
                 config["model_params"]["diffusion"]["dist"]["sigma_data"] = sigma_sum / sigma_count
                 print(
-                    "Estimated sigma: %f", config["model_params"]["diffusion"]["dist"]["sigma_data"]
+                    f'Estimated sigma: {config["model_params"]["diffusion"]["dist"]["sigma_data"]}'
                 )
 
                 #     config["model_params"]["diffusion"]["dist"]["sigma_data"] = float(np.mean(running_std))
@@ -1151,7 +1151,7 @@ def main():
     if epoch >= diff_epoch and model_params.diffusion.dist.estimate_sigma_data:
         sigma_sum = inp_sigma_count * inp_sigma_data + np.sum(running_std)
         sigma_count = inp_sigma_count + len(running_std)
-        config["model_params"]["diffusion"]["dist"]["sigma_data"] = sigma_sum / sigma_count
+        config["model_params"]["diffusion"]["dist"]["sigma_data"] = float(sigma_sum / sigma_count)
 
         cfg_path = osp.join(log_dir, f"{cfg_name}.processed{cfg_ext}")
         with open(cfg_path, "w", encoding="utf-8") as outfile:
