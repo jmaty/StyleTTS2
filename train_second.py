@@ -1128,14 +1128,14 @@ def main():
             print(f"Final second-stage model saved to {final_filepath}")
 
             # Reduce the final model size by removing the optimizer state
-            del model["net"]["mpd"]
-            del model["net"]["msd"]
-            del model["net"]["wd"]
-            del model["net"]["text_aligner"]
-            del model["net"]["pitch_extractor"]
+            del model["mpd"]
+            del model["msd"]
+            del model["wd"]
+            del model["text_aligner"]
+            del model["pitch_extractor"]
             if not multispeaker:
-                del model["net"]["style_encoder"]
-                del model["net"]["predictor_encoder"]
+                del model["style_encoder"]
+                del model["predictor_encoder"]
             # Save the reduced model
             state_dict = {key: model[key].state_dict() for key in model}
             filepath = osp.join(log_dir, "model4tts.pth")
