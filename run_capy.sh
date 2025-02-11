@@ -31,12 +31,21 @@ fi
 if [[ "$#" -gt 3 ]]; then
      HOURS2b=$4
 fi
+if [[ "$#" -gt 4 ]]; then
+     NGPUS1=$5
+fi
+if [[ "$#" -gt 5 ]]; then
+     NGPUS2a=$6
+fi
+if [[ "$#" -gt 6 ]]; then
+     NGPUS2b=$7
+fi
 
 # Run stage 1
-jobid1=$(./run_stage1.sh $EXPDIR $QUEUE $HOURS1 2>/dev/null)
+jobid1=$(./run_stage1.sh $EXPDIR $QUEUE $HOURS1 $NGPUS1 2>/dev/null)
 # Run stage 2a
-jobid2a=$(./run_stage2a.sh $EXPDIR $QUEUE $HOURS2a $jobid1 2>/dev/null)
+jobid2a=$(./run_stage2a.sh $EXPDIR $QUEUE $HOURS2a $NGPUS2a $jobid1 2>/dev/null)
 # Run stage 2b
-jobid2b=$(./run_stage2b.sh $EXPDIR $QUEUE $HOURS2b $jobid2a 2>/dev/null)
+jobid2b=$(./run_stage2b.sh $EXPDIR/stage2/pre-joint.pth $QUEUE $HOURS2b $NGPUS2b $jobid2a 2>/dev/null)
 
 printf "$jobid1 -> $jobid2a -> $jobid2b\n"
