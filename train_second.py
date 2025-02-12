@@ -607,8 +607,8 @@ def main():
                 optimizer.step("style_encoder")
                 optimizer.step("decoder")
 
-                if slmadv is not None:  # None means no SLM
-                    # Do SLM training
+                if slmadv is not None:  # None means no SLM discriminator training
+                    # Do SLM discriminator training
 
                     # randomly pick whether to use in-distribution text
                     use_ind = np.random.rand() < 0.5
@@ -631,11 +631,13 @@ def main():
                     )
 
                     if slm_out is None:
-                        # === Změna ===
-                        # Uvolnění paměti před pokračováním
+                        logger.warning(
+                            "SLM discriminator training not performed => skipping batch %d",
+                            batch_idx,
+                        )
+                        # Clean up memory
                         del slm_out, y_rec_gt, y_rec_gt_pred, s_trg
                         torch.cuda.empty_cache()
-                        # === Konec změny ===
                         continue
 
                     d_loss_slm, loss_gen_lm, _ = slm_out
@@ -699,7 +701,7 @@ def main():
                             nn.utils.clip_grad_norm_(model.wd.parameters(), grad_clip)
                         optimizer.step("wd")
                 else:
-                    # SLM training is not used
+                    # SLM discriminator training is not used
                     d_loss_slm, loss_gen_lm = 0, 0  # zero loss if not using SLM
 
             else:  # epoch < joint_epoch
@@ -762,24 +764,6 @@ def main():
                         f"Device {device_idx} VRAM usage: {info.used>>30}/{info.total>>30} GB ({info.used/info.total:.2%})"
                     )
                 print("Time elapsed:", time.time() - start_time)
-
-            # # === Změna ===
-            # # Uvolnění paměti po iteraci
-            # del waves, batch, texts, input_lengths, ref_texts, ref_lengths, mels, mel_input_length, ref_mels
-            # del mask, text_mask, s2s_attn, s2s_attn_mono, mask_st
-            # del t_en, asr, d_gt
-            # if multispeaker and epoch >= diff_epoch:
-            #     del ref_ss, ref_sp, ref
-            # del ss, gs, s_dur, s_trg, bert_dur, d_en
-            # del s_preds, loss_diff, loss_sty
-            # del d, p
-            # del en, gt, st, p_en, wav
-            # del f0_real, n_real, y_rec_gt, y_rec_gt_pred, f0_fake, n_fake, y_rec
-            # del loss_f0_rec, loss_norm_rec, loss_mel, loss_gen_all, loss_lm
-            # del loss_ce, loss_dur, g_loss
-            # del slm_out, d_loss_slm, loss_gen_lm
-            # torch.cuda.empty_cache()
-            # # === Konec změny ===
 
         # Validation
         loss_test, loss_align, loss_f = 0, 0, 0
