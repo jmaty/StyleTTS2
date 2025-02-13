@@ -26,16 +26,36 @@ def get_audio_duration(file_path):
 
 
 # Function for filtering rows by audio file duration and computing total durations
-def compute_stats(input_csv, audio_directory, default_spk_id=0):
+def compute_stats(input_csv, audio_directory, spk_id_separator=None, default_spk_id=0):
     stats = defaultdict(lambda: defaultdict(dict))
+    spk_names = {}
+    spk_id = 0
+
     # Open CSV file
     with open(input_csv, encoding="utf-8") as infile:
         reader = csv.reader(infile, delimiter="|")
 
         for row in tqdm(reader, desc="Computing stats", unit=" rows"):
-            print(row)
-            # Extract speaker ID from the row's 3rd column or use default_spk_id
-            spk_id = default_spk_id if len(row) < 3 else int(row[2])
+            # If the row has less than 3 columns,
+            # use default speaker ID or extract it from the file name
+            if len(row) < 3:
+                if spk_id_separator is not None:
+                    # Extract speaker name from the file name
+                    spk_name = row[0].split(spk_id_separator)[0]
+                    if spk_name in spk_names:
+                        id_ = spk_names[spk_name]  # Get speaker ID from the dictionary
+                    else:
+                        # Add new speaker to the dictionary
+                        spk_names[spk_name] = spk_id
+                        id_ = spk_id
+                        spk_id += 1
+                else:
+                    id_ = default_spk_id  # Use default speaker ID
+            else:
+                id_ = int(row[2])  # Extract speaker ID from the row's 3rd column
+
+            # # Extract speaker ID from the row's 3rd column or use default_spk_id
+            # spk_id = default_spk_id if len(row) < 3 else int(row[2])
             file_name = row[0]  # the first column is the file name
             text = row[1]  # the second column is the text
 
@@ -45,6 +65,8 @@ def compute_stats(input_csv, audio_directory, default_spk_id=0):
 
             audio_file_path = os.path.join(audio_directory, file_name)
 
+            print(audio_file_path)
+
             # If the audio file exists, get its duration
             if os.path.isfile(audio_file_path):
                 dur = get_audio_duration(audio_file_path)
@@ -52,8 +74,9 @@ def compute_stats(input_csv, audio_directory, default_spk_id=0):
                 dur = None
 
             # Store the duration in the stats dictionary
-            stats[spk_id][file_name]["text"] = text
-            stats[spk_id][file_name]["duration"] = dur
+            stats[id_][file_name]["text"] = text
+            stats[id_][file_name]["duration"] = dur
+
     return stats
 
 
@@ -81,10 +104,17 @@ def main():
         default=0,
         help="defaut speaker ID. Default is 0",
     )
+    parser.add_argument(
+        "-S",
+        "--spk_id_separator",
+        type=str,
+        default=None,
+        help="separator for speaker ID in the file name. Default is None",
+    )
     args = parser.parse_args()
 
-    # Compute wabeform statistics
-    stats = compute_stats(args.inp_csv, args.audio_dir)
+    # Compute waveform statistics
+    stats = compute_stats(args.inp_csv, args.audio_dir, args.spk_id_separator, args.spk_id)
     # Convert defaultdict to dict
     stats = defaultdict_to_dict(stats)
 
