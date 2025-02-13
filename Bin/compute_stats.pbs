@@ -9,7 +9,7 @@ PBS_JOB=$MYHOME/singularity/pbs_job_23.12-latest.sh
 
 qsub -q default \
      -l walltime=24:00:00 \
-     -l select=1:ncpus=2:mem=32gb:scratch_local=20gb \
+     -l select=1:ncpus=2:mem=128gb:scratch_local=20gb \
      -- \
      $PBS_JOB \
-     python $MYHOME/experimenty/StyleTTS2_cs-modif/Bin/csv2yml.py -a $AUDIO_DIR $INP_CSV $STATS_FILE
+     python $MYHOME/experimenty/StyleTTS2_cs/Bin/csv2yml.py -a $AUDIO_DIR $INP_CSV $STATS_FILE
