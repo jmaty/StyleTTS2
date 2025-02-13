@@ -9,6 +9,7 @@ from collections import defaultdict
 import librosa
 import yaml
 from tqdm import tqdm
+import sys
 
 
 # Convert defaultdict to dict recursively
@@ -65,12 +66,11 @@ def compute_stats(input_csv, audio_directory, spk_id_separator=None, default_spk
 
             audio_file_path = os.path.join(audio_directory, file_name)
 
-            print(audio_file_path)
-
             # If the audio file exists, get its duration
             if os.path.isfile(audio_file_path):
                 dur = get_audio_duration(audio_file_path)
             else:
+                print(f"File {audio_file_path} not found.", file=sys.stderr)
                 dur = None
 
             # Store the duration in the stats dictionary
