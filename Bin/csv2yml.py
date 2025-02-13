@@ -4,12 +4,12 @@
 import argparse
 import csv
 import os
+import sys
 from collections import defaultdict
 
 import librosa
 import yaml
 from tqdm import tqdm
-import sys
 
 
 # Convert defaultdict to dict recursively
