@@ -89,7 +89,7 @@ def main():
 
     # Set up training parameters
     batch_size = config.get("batch_size", 10)
-    epochs = config.get("epochs_2nd", 200)
+    epochs = config.get("epochs", 200)
     log_interval = config.get("log_interval", 10)
     saving_epoch = config.get("save_freq", 2)
     max_saved_models = config.get("max_saved_models", 2)
@@ -261,7 +261,7 @@ def main():
         lr=optimizer_params.lr,
     )
 
-    # adjust BERT learning rate
+    # Adjust BERT learning rate
     for g in optimizer.optimizers["bert"].param_groups:
         g["betas"] = (0.9, 0.99)
         g["lr"] = optimizer_params.bert_lr
@@ -269,7 +269,7 @@ def main():
         g["min_lr"] = 0
         g["weight_decay"] = 0.01
 
-    # adjust acoustic module learning rate
+    # Adjust acoustic module learning rate
     for module in ["decoder", "style_encoder"]:
         for g in optimizer.optimizers[module].param_groups:
             g["betas"] = (0.0, 0.99)
@@ -334,11 +334,11 @@ def main():
     # Total number of steps given the batch size
     tot_num_steps = len(train_list) // batch_size
 
-    print(" > Start training cycles:")
-    print(f" | > Starting epoch: {start_epoch}")
-    print(f" | > Total epochs: {epochs}")
-    print(f" | > Iterations: {iters}")
-    print(f" | > Sigma data: {inp_sigma_data}")
+    # print(" > Start training cycles:")
+    # print(f" | > Starting epoch: {start_epoch}")
+    # print(f" | > Total epochs: {epochs}")
+    # print(f" | > Iterations: {iters}")
+    # print(f" | > Sigma data: {inp_sigma_data}")
 
     # === Start of training loop ==============================================
 
@@ -975,7 +975,8 @@ def main():
 
             # Synthesize test audios to evaluate the model's performance after diffusion training has started.
             # Does not work for multispeaker mode so far.
-            if not multispeaker and save_test_audio and epoch >= diff_epoch:
+            # if not multispeaker and save_test_audio and epoch >= diff_epoch:
+            if save_test_audio:
                 synth_test_files(
                     model,
                     test_sentences,
