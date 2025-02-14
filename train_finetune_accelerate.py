@@ -334,11 +334,10 @@ def main():
     # Total number of steps given the batch size
     tot_num_steps = len(train_list) // batch_size
 
-    # print(" > Start training cycles:")
-    # print(f" | > Starting epoch: {start_epoch}")
-    # print(f" | > Total epochs: {epochs}")
-    # print(f" | > Iterations: {iters}")
-    # print(f" | > Sigma data: {inp_sigma_data}")
+    print(" > Start training cycles:")
+    print(f" | > Starting epoch: {start_epoch}")
+    print(f" | > Total epochs: {epochs}")
+    print(f" | > Iterations: {iters}")
 
     # === Start of training loop ==============================================
 
@@ -973,9 +972,10 @@ def main():
                 with open(cfg_path, "w", encoding="utf-8") as outfile:
                     yaml.dump(config, outfile, default_flow_style=False)
 
-            # Synthesize test audios to evaluate the model's performance after diffusion training has started.
+            # Synthesize test audios to evaluate the model's performance.
+            # Since diffusion training was done during pre-training,
+            # test samples are generated from the very beginning.
             # Does not work for multispeaker mode so far.
-            # if not multispeaker and save_test_audio and epoch >= diff_epoch:
             if save_test_audio:
                 synth_test_files(
                     model,
