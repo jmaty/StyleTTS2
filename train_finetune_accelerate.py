@@ -286,10 +286,6 @@ def main():
             config["pretrained_model"],
             load_only_params=config.get("load_only_params", True),
         )
-        print(f'Loading pre-trained model: {config["pretrained_model"]}')
-        print(f"Starting epoch:            {start_epoch}")
-        print(f"Starting iteration:        {iters}")
-        print()
 
     n_down = model.text_aligner.n_down
 
@@ -942,7 +938,7 @@ def main():
 
         # --- Start of saving part --------------------------------------------
 
-        if (epoch + 1) % saving_epoch == 0:
+        if epoch % saving_epoch == 0:
             curr_loss = loss_test.item() / iters_test
             if curr_loss < best_loss:
                 best_loss = curr_loss
