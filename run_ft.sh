@@ -74,7 +74,7 @@ else
 fi
 
 # Change GPU queue to gpu_long when number of hours is >24
-[[ $HOURS -gt 24 ]] && [[ $SPEC == gpu? ]] && QUEUE="${QUEUE}_long"
+[[ $HOURS -gt 48 ]] && [[ $SPEC == gpu? ]] && QUEUE="${QUEUE}_long"
 
 # Select argument
 SELECT="-l select=1:ncpus=$NCPUS:mem=$MEM:scratch_local=$LSCRATCH:ngpus=$NGPUS$CLUSTER"
@@ -104,12 +104,6 @@ fi
 OLOG=$EXPDIR/ft.$TIMESTEP.log
 ONTB=$EXPDIR/$(basename "$INTB" .ipynb).processed.$TIMESTEP.ipynb
 
-echo $EXP
-echo $QUEUE
-echo $WALLTIME
-echo $SELECT
-echo $DEPS
-
 # Run PBS script
 JOBID=$(qsub -N "$EXP" \
      $QUEUE \
@@ -119,5 +113,5 @@ JOBID=$(qsub -N "$EXP" \
      $SELECT \
      $DEPS \
      -- $SINGULARITY "$INTB" "$CFG" "$ONTB")
-printf "$JOBID"
+printf "$JOBID\n"
 # echo "$EXP: $QUEUE $SELECT, HOURS: $HOURS <-- $JOBID"
