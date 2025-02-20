@@ -309,15 +309,19 @@ def main():
 
     # SLM Adversarial Loss
     slmadv_params = Munch(config["slmadv_params"])
-    slmadv = SLMAdversarialLoss(
-        model,
-        wl,
-        sampler,
-        slmadv_params.min_len,
-        slmadv_params.max_len,
-        batch_percentage=slmadv_params.batch_percentage,
-        skip_update=slmadv_params.iter,
-        sig=slmadv_params.sig,
+    slmadv = (
+        SLMAdversarialLoss(
+            model,
+            wl,
+            sampler,
+            slmadv_params.min_len,
+            slmadv_params.max_len,
+            batch_percentage=slmadv_params.batch_percentage,
+            skip_update=slmadv_params.iter,
+            sig=slmadv_params.sig,
+        )
+        if slmadv_params.batch_percentage is not None
+        else None
     )
 
     # Prepare model for training
@@ -586,85 +590,87 @@ def main():
             d_loss_slm, loss_gen_lm = 0, 0
             if epoch >= joint_epoch:
 
-                # Randomly pick whether to use in-distribution text
-                use_ind = np.random.rand() < 0.5
+                if slmadv is not None:  # None means no SLM discriminator training
 
-                if use_ind:
-                    ref_lengths = input_lengths
-                    ref_texts = texts
+                    # Randomly pick whether to use in-distribution text
+                    use_ind = np.random.rand() < 0.5
 
-                slm_out = slmadv(
-                    batch_idx,
-                    y_rec_gt,
-                    y_rec_gt_pred,
-                    waves,
-                    mel_input_length,
-                    ref_texts,
-                    ref_lengths,
-                    use_ind,
-                    s_trg.detach(),
-                    ref if multispeaker else None,
-                )
+                    if use_ind:
+                        ref_lengths = input_lengths
+                        ref_texts = texts
 
-                if slm_out is not None:
-                    d_loss_slm, loss_gen_lm, _ = slm_out
+                    slm_out = slmadv(
+                        batch_idx,
+                        y_rec_gt,
+                        y_rec_gt_pred,
+                        waves,
+                        mel_input_length,
+                        ref_texts,
+                        ref_lengths,
+                        use_ind,
+                        s_trg.detach(),
+                        ref if multispeaker else None,
+                    )
 
-                    # SLM generator loss
-                    optimizer.zero_grad()
-                    accelerator.backward(loss_gen_lm)
-                    # JMa: gradient clipping
-                    if grad_clip:
-                        accelerator.clip_grad_norm_(model.bert_encoder.parameters(), grad_clip)
-                        accelerator.clip_grad_norm_(model.bert.parameters(), grad_clip)
-                        accelerator.clip_grad_norm_(model.predictor.parameters(), grad_clip)
-                        accelerator.clip_grad_norm_(model.diffusion.parameters(), grad_clip)
+                    if slm_out is not None:
+                        d_loss_slm, loss_gen_lm, _ = slm_out
 
-                    # compute the gradient norm
-                    total_norm = {}
-                    for key in model.keys():
-                        total_norm[key] = 0
-                        parameters = [
-                            p
-                            for p in model[key].parameters()
-                            if p.grad is not None and p.requires_grad
-                        ]
-                        for p in parameters:
-                            param_norm = p.grad.detach().data.norm(2)
-                            total_norm[key] += param_norm.item() ** 2
-                        total_norm[key] = total_norm[key] ** 0.5
-
-                    # gradient scaling
-                    if total_norm["predictor"] > slmadv_params.thresh:
-                        for key in model.keys():
-                            for p in model[key].parameters():
-                                if p.grad is not None:
-                                    p.grad *= 1 / total_norm["predictor"]
-
-                    for p in model.predictor.duration_proj.parameters():
-                        if p.grad is not None:
-                            p.grad *= slmadv_params.scale
-
-                    for p in model.predictor.lstm.parameters():
-                        if p.grad is not None:
-                            p.grad *= slmadv_params.scale
-
-                    for p in model.diffusion.parameters():
-                        if p.grad is not None:
-                            p.grad *= slmadv_params.scale
-
-                    optimizer.step("bert_encoder")
-                    optimizer.step("bert")
-                    optimizer.step("predictor")
-                    optimizer.step("diffusion")
-
-                    # SLM discriminator loss
-                    if d_loss_slm != 0:
+                        # SLM generator loss
                         optimizer.zero_grad()
-                        accelerator.backward(d_loss_slm)
+                        accelerator.backward(loss_gen_lm)
                         # JMa: gradient clipping
                         if grad_clip:
-                            accelerator.clip_grad_norm_(model.wd.parameters(), grad_clip)
-                        optimizer.step("wd")
+                            accelerator.clip_grad_norm_(model.bert_encoder.parameters(), grad_clip)
+                            accelerator.clip_grad_norm_(model.bert.parameters(), grad_clip)
+                            accelerator.clip_grad_norm_(model.predictor.parameters(), grad_clip)
+                            accelerator.clip_grad_norm_(model.diffusion.parameters(), grad_clip)
+
+                        # compute the gradient norm
+                        total_norm = {}
+                        for key in model.keys():
+                            total_norm[key] = 0
+                            parameters = [
+                                p
+                                for p in model[key].parameters()
+                                if p.grad is not None and p.requires_grad
+                            ]
+                            for p in parameters:
+                                param_norm = p.grad.detach().data.norm(2)
+                                total_norm[key] += param_norm.item() ** 2
+                            total_norm[key] = total_norm[key] ** 0.5
+
+                        # gradient scaling
+                        if total_norm["predictor"] > slmadv_params.thresh:
+                            for key in model.keys():
+                                for p in model[key].parameters():
+                                    if p.grad is not None:
+                                        p.grad *= 1 / total_norm["predictor"]
+
+                        for p in model.predictor.duration_proj.parameters():
+                            if p.grad is not None:
+                                p.grad *= slmadv_params.scale
+
+                        for p in model.predictor.lstm.parameters():
+                            if p.grad is not None:
+                                p.grad *= slmadv_params.scale
+
+                        for p in model.diffusion.parameters():
+                            if p.grad is not None:
+                                p.grad *= slmadv_params.scale
+
+                        optimizer.step("bert_encoder")
+                        optimizer.step("bert")
+                        optimizer.step("predictor")
+                        optimizer.step("diffusion")
+
+                        # SLM discriminator loss
+                        if d_loss_slm != 0:
+                            optimizer.zero_grad()
+                            accelerator.backward(d_loss_slm)
+                            # JMa: gradient clipping
+                            if grad_clip:
+                                accelerator.clip_grad_norm_(model.wd.parameters(), grad_clip)
+                            optimizer.step("wd")
 
             iters += 1
 
