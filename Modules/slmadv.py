@@ -4,16 +4,46 @@ import torch.nn.functional as F
 
 
 class SLMAdversarialLoss(torch.nn.Module):
+    """SLMAdversarialLoss implements adversarial training for Style Language Models.
 
-    def __init__(self,
-                 model,
-                 wl,
-                 sampler,
-                 min_len,
-                 max_len,
-                 batch_percentage=0.5,
-                 skip_update=10,
-                 sig=1.5):
+    This class implements a custom loss module that combines generator and discriminator losses
+    for adversarial training of speech synthesis models using Style Language Models.
+
+    Args:
+        model: The main model that contains bert, predictor and decoder components
+        wl: WaveformLoss instance for computing waveform-based losses
+        sampler: The sampler used for generating style embeddings
+        min_len: Minimum length of mel-spectrogram segments
+        max_len: Maximum length of mel-spectrogram segments
+        batch_percentage (float, optional): Maximum percentage of batch to process. Defaults to 0.5.
+        skip_update (int, optional): Number of iterations to skip discriminator updates. Defaults to 10.
+        sig (float, optional): Sigma parameter for Gaussian smoothing. Defaults to 1.5.
+
+    Methods:
+        forward(iters, y_rec_gt, y_rec_gt_pred, waves, mel_input_length, ref_text,
+               ref_lengths, use_ind, s_trg, ref_s=None):
+            Computes the adversarial losses for a training step.
+
+            Args:
+                iters: Current training iteration
+                y_rec_gt: Ground truth reconstructed waveform
+                y_rec_gt_pred: Predicted reconstructed waveform
+                waves: Input waveforms
+                mel_input_length: Length of input mel-spectrograms
+                ref_text: Reference text embeddings
+                ref_lengths: Lengths of reference sequences
+                use_ind: Whether to use provided style embeddings
+                s_trg: Target style embeddings
+                ref_s: Reference style embeddings (optional)
+
+            Returns:
+                tuple: (discriminator_loss, generator_loss, predicted_waveform)
+                Returns None if batch size is insufficient
+    """
+
+    def __init__(
+        self, model, wl, sampler, min_len, max_len, batch_percentage=0.5, skip_update=10, sig=1.5
+    ):
         super().__init__()
         self.model = model
         self.wl = wl
@@ -26,18 +56,45 @@ class SLMAdversarialLoss(torch.nn.Module):
         self.sig = sig
         self.skip_update = skip_update
 
+    def forward(
+        self,
+        iters,
+        y_rec_gt,
+        y_rec_gt_pred,
+        waves,
+        mel_input_length,
+        ref_text,
+        ref_lengths,
+        use_ind,
+        s_trg,
+        ref_s=None,
+    ):
+        """Forward pass of the SLMAdv model.
 
-    def forward(self,
-                iters,
-                y_rec_gt,
-                y_rec_gt_pred,
-                waves,
-                mel_input_length,
-                ref_text,
-                ref_lengths,
-                use_ind,
-                s_trg,
-                ref_s=None):
+        This method performs the forward pass through the SLMAdv (Style-based Latent Model Adversarial) training pipeline.
+        It handles generation of style predictions, duration modeling, and adversarial training of generator/discriminator.
+
+        Args:
+            iters (int): Current training iteration number
+            y_rec_gt (torch.Tensor): Ground truth reconstructed audio
+            y_rec_gt_pred (torch.Tensor): Predicted reconstructed audio
+            waves (torch.Tensor): Input waveform audio samples
+            mel_input_length (torch.Tensor): Length of input mel-spectrograms
+            ref_text (torch.Tensor): Reference text embeddings
+            ref_lengths (torch.Tensor): Lengths of reference sequences
+            use_ind (bool): Whether to use individual style transfer
+            s_trg (torch.Tensor): Target style embeddings
+            ref_s (torch.Tensor, optional): Reference style embeddings. Defaults to None.
+
+        Returns:
+            tuple or None: Returns either:
+                - None if batch size is too small
+                - Tuple of (discriminator_loss, generator_loss, predicted_audio)
+                  where:
+                  - discriminator_loss (torch.Tensor): Loss for discriminator
+                  - generator_loss (torch.Tensor): Loss for generator
+                  - predicted_audio (numpy.ndarray): Generated audio waveform
+        """
         text_mask = length_to_mask(ref_lengths).to(ref_text.device)
         bert_dur = self.model.bert(ref_text, attention_mask=(~text_mask).int())
         d_en = self.model.bert_encoder(bert_dur).transpose(-1, -2)
@@ -51,9 +108,9 @@ class SLMAdversarialLoss(torch.nn.Module):
                     noise=torch.randn_like(s_trg).unsqueeze(1).to(ref_text.device),
                     embedding=bert_dur,
                     embedding_scale=1,
-                    features=ref_s, # reference from the same speaker as the embedding
+                    features=ref_s,  # reference from the same speaker as the embedding
                     embedding_mask_proba=0.1,
-                    num_steps=num_steps
+                    num_steps=num_steps,
                 ).squeeze(1)
             else:
                 s_preds = self.sampler(
@@ -61,7 +118,7 @@ class SLMAdversarialLoss(torch.nn.Module):
                     embedding=bert_dur,
                     embedding_scale=1,
                     embedding_mask_proba=0.1,
-                    num_steps=num_steps
+                    num_steps=num_steps,
                 ).squeeze(1)
 
         s_dur = s_preds[:, 128:]
@@ -71,11 +128,8 @@ class SLMAdversarialLoss(torch.nn.Module):
             d_en,
             s_dur,
             ref_lengths,
-            torch.randn(
-                ref_lengths.shape[0],
-                ref_lengths.max(), 2
-            ).to(ref_text.device),
-            text_mask
+            torch.randn(ref_lengths.shape[0], ref_lengths.max(), 2).to(ref_text.device),
+            text_mask,
         )
 
         bib = 0
@@ -97,13 +151,14 @@ class SLMAdversarialLoss(torch.nn.Module):
             t = torch.arange(0, l).unsqueeze(0).expand((len(_s2s_pred), l)).to(ref_text.device)
             loc = torch.cumsum(_dur_pred, dim=0) - _dur_pred / 2
 
-            h = torch.exp(-0.5 * torch.square(t - (l - loc.unsqueeze(-1))) / (self.sig)**2)
+            h = torch.exp(-0.5 * torch.square(t - (l - loc.unsqueeze(-1))) / (self.sig) ** 2)
 
             out = torch.nn.functional.conv1d(
                 _s2s_pred_org.unsqueeze(0),
                 h.unsqueeze(1),
-                padding=h.shape[-1] - 1, groups=int(_text_length)
-                )[..., :l]
+                padding=h.shape[-1] - 1,
+                groups=int(_text_length),
+            )[..., :l]
             attn_preds.append(F.softmax(out.squeeze(), dim=0))
 
             output_lengths.append(l)
@@ -113,22 +168,15 @@ class SLMAdversarialLoss(torch.nn.Module):
         with torch.no_grad():
             t_en = self.model.text_encoder(ref_text, ref_lengths, text_mask)
 
-        s2s_attn = torch.zeros(
-            len(ref_lengths),
-            int(ref_lengths.max()),
-            max_len
-        ).to(ref_text.device)
+        s2s_attn = torch.zeros(len(ref_lengths), int(ref_lengths.max()), max_len).to(
+            ref_text.device
+        )
         for bib, (r, o, a) in enumerate(zip(ref_lengths, output_lengths, attn_preds)):
             s2s_attn[bib, :r, :o] = a
 
         asr_pred = t_en @ s2s_attn
 
-        _, p_pred = self.model.predictor(
-            d_en, s_dur,
-            ref_lengths,
-            s2s_attn,
-            text_mask
-        )
+        _, p_pred = self.model.predictor(d_en, s_dur, ref_lengths, s2s_attn, text_mask)
 
         mel_len = max(int(min(output_lengths) / 2 - 1), self.min_len // 2)
         mel_len = min(mel_len, self.max_len // 2)
@@ -140,25 +188,26 @@ class SLMAdversarialLoss(torch.nn.Module):
         for bib, (o, m, s, w) in enumerate(zip(output_lengths, mel_input_length, s_preds, waves)):
             mel_length_pred = o
             mel_length_gt = int(m.item() / 2)
+            # Skip too short mel-spectrogram segments
             if mel_length_gt <= mel_len or mel_length_pred <= mel_len:
                 continue
 
             sp.append(s)
 
             random_start = np.random.randint(0, mel_length_pred - mel_len)
-            en.append(asr_pred[bib, :, random_start:random_start+mel_len])
-            p_en.append(p_pred[bib, :, random_start:random_start+mel_len])
+            en.append(asr_pred[bib, :, random_start : random_start + mel_len])
+            p_en.append(p_pred[bib, :, random_start : random_start + mel_len])
 
             # get ground truth clips
             random_start = np.random.randint(0, mel_length_gt - mel_len)
-            y = w[(random_start * 2) * 300:((random_start+mel_len) * 2) * 300]
+            y = w[(random_start * 2) * 300 : ((random_start + mel_len) * 2) * 300]
             wav.append(torch.from_numpy(y).to(ref_text.device))
 
-            if len(wav) >= self.batch_percentage * len(waves): # prevent OOM due to longer lengths
+            if len(wav) >= self.batch_percentage * len(waves):  # prevent OOM due to longer lengths
                 break
 
         # if len(sp) <= 1: # Originally, batch size >=2 supported
-        if len(sp) < 1: # JMa: Can we use only 1 sample for SLM adversarial loss training?
+        if len(sp) < 1:  # JMa: Can we use only 1 sample for SLM adversarial loss training?
             return None
 
         sp = torch.stack(sp)
@@ -178,38 +227,34 @@ class SLMAdversarialLoss(torch.nn.Module):
                 use_rec = False
 
             crop_size = min(wav.size(-1), y_pred.size(-1))
-            if use_rec: # use reconstructed (shorter lengths), do length invariant regularization
+            if use_rec:  # use reconstructed (shorter lengths), do length invariant regularization
                 if wav.size(-1) > y_pred.size(-1):
-                    real_gp = wav[:, : , :crop_size]
+                    real_gp = wav[:, :, :crop_size]
                     out_crop = self.wl.discriminator_forward(real_gp.detach().squeeze(1))
                     out_org = self.wl.discriminator_forward(wav.detach().squeeze(1))
-                    loss_reg = F.l1_loss(out_crop, out_org[..., :out_crop.size(-1)])
+                    loss_reg = F.l1_loss(out_crop, out_org[..., : out_crop.size(-1)])
 
                     if np.random.randint(0, 2) == 0:
                         d_loss = self.wl.discriminator(
-                            real_gp.detach().squeeze(1),
-                            y_pred.detach().squeeze(1)
+                            real_gp.detach().squeeze(1), y_pred.detach().squeeze(1)
                         ).mean()
                     else:
                         d_loss = self.wl.discriminator(
-                            wav.detach().squeeze(1),
-                            y_pred.detach().squeeze(1)
+                            wav.detach().squeeze(1), y_pred.detach().squeeze(1)
                         ).mean()
                 else:
-                    real_gp = y_pred[:, : , :crop_size]
+                    real_gp = y_pred[:, :, :crop_size]
                     out_crop = self.wl.discriminator_forward(real_gp.detach().squeeze(1))
                     out_org = self.wl.discriminator_forward(y_pred.detach().squeeze(1))
-                    loss_reg = F.l1_loss(out_crop, out_org[..., :out_crop.size(-1)])
+                    loss_reg = F.l1_loss(out_crop, out_org[..., : out_crop.size(-1)])
 
                     if np.random.randint(0, 2) == 0:
                         d_loss = self.wl.discriminator(
-                            wav.detach().squeeze(1),
-                            real_gp.detach().squeeze(1)
+                            wav.detach().squeeze(1), real_gp.detach().squeeze(1)
                         ).mean()
                     else:
                         d_loss = self.wl.discriminator(
-                            wav.detach().squeeze(1),
-                            y_pred.detach().squeeze(1)
+                            wav.detach().squeeze(1), y_pred.detach().squeeze(1)
                         ).mean()
 
                 # regularization (ignore length variation)
@@ -223,8 +268,7 @@ class SLMAdversarialLoss(torch.nn.Module):
 
             else:
                 d_loss = self.wl.discriminator(
-                    wav.detach().squeeze(1),
-                    y_pred.detach().squeeze(1)
+                    wav.detach().squeeze(1), y_pred.detach().squeeze(1)
                 ).mean()
         else:
             d_loss = 0
@@ -237,6 +281,27 @@ class SLMAdversarialLoss(torch.nn.Module):
 
 
 def length_to_mask(lengths):
+    """
+    Creates a boolean mask tensor based on sequence lengths.
+
+    This function generates a mask where True values indicate positions beyond the sequence length
+    for each item in the batch.
+
+    Args:
+        lengths (torch.Tensor): A 1D tensor containing sequence lengths for each item in the batch.
+
+    Returns:
+        torch.Tensor: A boolean mask tensor of shape (batch_size, max_length) where True values
+                     indicate positions beyond each sequence's length.
+
+    Example:
+        >>> lengths = torch.tensor([2, 3, 1])
+        >>> mask = length_to_mask(lengths)
+        >>> print(mask)
+        tensor([[False, False,  True],
+                [False, False, False],
+                [False,  True,  True]])
+    """
     mask = torch.arange(lengths.max()).unsqueeze(0).expand(lengths.shape[0], -1).type_as(lengths)
-    mask = torch.gt(mask+1, lengths.unsqueeze(1))
+    mask = torch.gt(mask + 1, lengths.unsqueeze(1))
     return mask

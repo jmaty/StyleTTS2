@@ -314,15 +314,19 @@ def main():
     inp_sigma_count = start_epoch - diff_epoch if start_epoch > diff_epoch else 0
 
     slmadv_params = Munch(config["slmadv_params"])
-    slmadv = SLMAdversarialLoss(
-        model,
-        wl,
-        sampler,
-        slmadv_params.min_len,
-        slmadv_params.max_len,
-        batch_percentage=slmadv_params.batch_percentage,
-        skip_update=slmadv_params.iter,
-        sig=slmadv_params.sig,
+    slmadv = (
+        SLMAdversarialLoss(
+            model,
+            wl,
+            sampler,
+            slmadv_params.min_len,
+            slmadv_params.max_len,
+            batch_percentage=slmadv_params.batch_percentage,
+            skip_update=slmadv_params.iter,
+            sig=slmadv_params.sig,
+        )
+        if slmadv_params.batch_percentage is not None
+        else None
     )
 
     # Create test audio dir under log/eval dir
@@ -603,96 +607,105 @@ def main():
                 optimizer.step("style_encoder")
                 optimizer.step("decoder")
 
-                # randomly pick whether to use in-distribution text
-                use_ind = np.random.rand() < 0.5
+                if slmadv is not None:  # None means no SLM discriminator training
+                    # Do SLM discriminator training
 
-                if use_ind:
-                    ref_lengths = input_lengths
-                    ref_texts = texts
+                    # randomly pick whether to use in-distribution text
+                    use_ind = np.random.rand() < 0.5
 
-                slm_out = slmadv(
-                    batch_idx,
-                    y_rec_gt,
-                    y_rec_gt_pred,
-                    waves,
-                    mel_input_length,
-                    ref_texts,
-                    ref_lengths,
-                    use_ind,
-                    s_trg.detach(),
-                    ref if multispeaker else None,
-                )
+                    if use_ind:
+                        ref_lengths = input_lengths
+                        ref_texts = texts
 
-                if slm_out is None:
-                    # === Změna ===
-                    # Uvolnění paměti před pokračováním
-                    del slm_out, y_rec_gt, y_rec_gt_pred, s_trg
-                    torch.cuda.empty_cache()
-                    # === Konec změny ===
-                    continue
+                    slm_out = slmadv(
+                        batch_idx,
+                        y_rec_gt,
+                        y_rec_gt_pred,
+                        waves,
+                        mel_input_length,
+                        ref_texts,
+                        ref_lengths,
+                        use_ind,
+                        s_trg.detach(),
+                        ref if multispeaker else None,
+                    )
 
-                d_loss_slm, loss_gen_lm, _ = slm_out
+                    if slm_out is None:
+                        logger.warning(
+                            "SLM discriminator training not performed => skipping batch %d",
+                            batch_idx,
+                        )
+                        # Clean up memory
+                        del slm_out, y_rec_gt, y_rec_gt_pred, s_trg
+                        torch.cuda.empty_cache()
+                        continue
 
-                # SLM generator loss
-                optimizer.zero_grad()
-                loss_gen_lm.backward()
-                # JMa: gradient clipping
-                if grad_clip:
-                    # _ = [nn.utils.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
-                    nn.utils.clip_grad_norm_(model.bert_encoder.parameters(), grad_clip)
-                    nn.utils.clip_grad_norm_(model.bert.parameters(), grad_clip)
-                    nn.utils.clip_grad_norm_(model.predictor.parameters(), grad_clip)
-                    nn.utils.clip_grad_norm_(model.diffusion.parameters(), grad_clip)
+                    d_loss_slm, loss_gen_lm, _ = slm_out
 
-                # compute the gradient norm
-                total_norm = {}
-                for key in model.keys():
-                    total_norm[key] = 0
-                    parameters = [
-                        p for p in model[key].parameters() if p.grad is not None and p.requires_grad
-                    ]
-                    for p in parameters:
-                        param_norm = p.grad.detach().data.norm(2)
-                        total_norm[key] += param_norm.item() ** 2
-                    total_norm[key] = total_norm[key] ** 0.5
-
-                # gradient scaling
-                if total_norm["predictor"] > slmadv_params.thresh:
-                    for key in model.keys():
-                        for p in model[key].parameters():
-                            if p.grad is not None:
-                                p.grad *= 1 / total_norm["predictor"]
-
-                for p in model.predictor.duration_proj.parameters():
-                    if p.grad is not None:
-                        p.grad *= slmadv_params.scale
-
-                for p in model.predictor.lstm.parameters():
-                    if p.grad is not None:
-                        p.grad *= slmadv_params.scale
-
-                for p in model.diffusion.parameters():
-                    if p.grad is not None:
-                        p.grad *= slmadv_params.scale
-
-                optimizer.step("bert_encoder")
-                optimizer.step("bert")
-                optimizer.step("predictor")
-                optimizer.step("diffusion")
-
-                # SLM discriminator loss
-                if d_loss_slm != 0:
+                    # SLM generator loss
                     optimizer.zero_grad()
-                    # d_loss_slm.backward(retain_graph=True)
-                    d_loss_slm.backward()
+                    loss_gen_lm.backward()
                     # JMa: gradient clipping
                     if grad_clip:
-                        nn.utils.clip_grad_norm_(model.wd.parameters(), grad_clip)
-                    optimizer.step("wd")
+                        # _ = [nn.utils.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
+                        nn.utils.clip_grad_norm_(model.bert_encoder.parameters(), grad_clip)
+                        nn.utils.clip_grad_norm_(model.bert.parameters(), grad_clip)
+                        nn.utils.clip_grad_norm_(model.predictor.parameters(), grad_clip)
+                        nn.utils.clip_grad_norm_(model.diffusion.parameters(), grad_clip)
 
-            else:
-                # d_loss_slm, loss_gen_lm = torch.tensor([0]), torch.tensor([0])
-                d_loss_slm, loss_gen_lm = 0, 0
+                    # compute the gradient norm
+                    total_norm = {}
+                    for key in model.keys():
+                        total_norm[key] = 0
+                        parameters = [
+                            p
+                            for p in model[key].parameters()
+                            if p.grad is not None and p.requires_grad
+                        ]
+                        for p in parameters:
+                            param_norm = p.grad.detach().data.norm(2)
+                            total_norm[key] += param_norm.item() ** 2
+                        total_norm[key] = total_norm[key] ** 0.5
+
+                    # gradient scaling
+                    if total_norm["predictor"] > slmadv_params.thresh:
+                        for key in model.keys():
+                            for p in model[key].parameters():
+                                if p.grad is not None:
+                                    p.grad *= 1 / total_norm["predictor"]
+
+                    for p in model.predictor.duration_proj.parameters():
+                        if p.grad is not None:
+                            p.grad *= slmadv_params.scale
+
+                    for p in model.predictor.lstm.parameters():
+                        if p.grad is not None:
+                            p.grad *= slmadv_params.scale
+
+                    for p in model.diffusion.parameters():
+                        if p.grad is not None:
+                            p.grad *= slmadv_params.scale
+
+                    optimizer.step("bert_encoder")
+                    optimizer.step("bert")
+                    optimizer.step("predictor")
+                    optimizer.step("diffusion")
+
+                    # SLM discriminator loss
+                    if d_loss_slm != 0:
+                        optimizer.zero_grad()
+                        # d_loss_slm.backward(retain_graph=True)
+                        d_loss_slm.backward()
+                        # JMa: gradient clipping
+                        if grad_clip:
+                            nn.utils.clip_grad_norm_(model.wd.parameters(), grad_clip)
+                        optimizer.step("wd")
+                else:
+                    # SLM discriminator training is not used
+                    d_loss_slm, loss_gen_lm = 0, 0  # zero loss if not using SLM
+
+            else:  # epoch < joint_epoch
+                d_loss_slm, loss_gen_lm = 0, 0  # zero loss if not using SLM
 
             iters += 1
 
@@ -752,24 +765,6 @@ def main():
                     )
                 print("Time elapsed:", time.time() - start_time)
 
-            # # === Změna ===
-            # # Uvolnění paměti po iteraci
-            # del waves, batch, texts, input_lengths, ref_texts, ref_lengths, mels, mel_input_length, ref_mels
-            # del mask, text_mask, s2s_attn, s2s_attn_mono, mask_st
-            # del t_en, asr, d_gt
-            # if multispeaker and epoch >= diff_epoch:
-            #     del ref_ss, ref_sp, ref
-            # del ss, gs, s_dur, s_trg, bert_dur, d_en
-            # del s_preds, loss_diff, loss_sty
-            # del d, p
-            # del en, gt, st, p_en, wav
-            # del f0_real, n_real, y_rec_gt, y_rec_gt_pred, f0_fake, n_fake, y_rec
-            # del loss_f0_rec, loss_norm_rec, loss_mel, loss_gen_all, loss_lm
-            # del loss_ce, loss_dur, g_loss
-            # del slm_out, d_loss_slm, loss_gen_lm
-            # torch.cuda.empty_cache()
-            # # === Konec změny ===
-
         # Validation
         loss_test, loss_align, loss_f = 0, 0, 0
         # Set all models to eval mode
@@ -822,10 +817,11 @@ def main():
                     # JMa: Fix: remove explicitly 2nd dimension
                     # otherwise all dimensions of size 1 are removed
                     # (resulting in error when current batch size is 1)
-                    s = torch.stack(ss).squeeze()
-                    # s = torch.stack(ss).squeeze(dim=-1)
-                    # gs = torch.stack(gs).squeeze()              # !!! JMa: not used anymore?
-                    # # gs = torch.stack(gs).squeeze(dim=-1)        # !!! JMa: not used anymore?
+                    # s = torch.stack(ss).squeeze()
+                    # s = torch.stack(ss).squeeze(dim=-1) # - not working
+                    s = torch.stack(ss).squeeze(dim=1)
+                    # # gs = torch.stack(gs).squeeze()              # !!! JMa: not used anymore?
+                    # gs = torch.stack(gs).squeeze(dim=1)        # !!! JMa: not used anymore?
                     # s_trg = torch.cat([s, gs], dim=-1).detach() # !!! JMa: not used anymore?
 
                     bert_dur = model.bert(texts, attention_mask=(~text_mask).int())  # [B, T, 768]
