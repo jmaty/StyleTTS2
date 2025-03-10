@@ -11,7 +11,7 @@ SPEC="gpu3"
 RUNS=1
 HOURS=24
 MODELS=""
-INTB=Train_first_ga.ipynb
+INTB=Train_first.ipynb
 # QSUB ARGUMENTS
 MEM=128gb
 LSCRATCH=20gb
