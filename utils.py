@@ -135,8 +135,10 @@ def inference(
 
         d = model.predictor.text_encoder(d_en, s, input_lengths, text_mask)
 
-        x, _ = model.predictor.lstm(d)
-        duration = model.predictor.duration_proj(x)
+        x = model.predictor.lstm(d)
+        x_mod = model.predictor.prepare_projection(x)  # 640 -> 512
+        duration = model.predictor.duration_proj(x_mod)
+
         duration = torch.sigmoid(duration).sum(axis=-1)
         pred_dur = torch.round(duration.squeeze()).clamp(min=1)
 

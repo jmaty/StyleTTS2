@@ -26,6 +26,45 @@ from Utils.PLBERT.util import load_plbert
 
 
 class Synthesizer:
+    """Synthesizer class for text-to-speech synthesis using StyleTTS2.
+
+    This class handles the loading and initialization of various models required for TTS synthesis,
+    including text alignment, F0 extraction, and BERT-based models. It provides functionality to
+    synthesize speech from phonetic strings with controllable style and noise parameters.
+
+    Args:
+        model_path (str): Path to the pretrained StyleTTS2 model checkpoint
+        config_path (str): Path to the configuration YAML file
+        use_glob_noise (bool, optional): Whether to use global noise across all synthesis. Defaults to False
+        fix_noise_in_ph_string (bool, optional): Whether to fix noise within phonetic strings. Defaults to False
+        device (str, optional): Device to run the model on ('cuda' or 'cpu'). Defaults to "cuda"
+        log_level (int, optional): Logging level. Defaults to logging.INFO
+
+    Attributes:
+        text_cleaner (TextCleaner): Handles text tokenization and cleaning
+        sampler (DiffusionSampler): Diffusion model sampler for style generation
+        model (dict): Dictionary containing all the component models
+        glob_noise (tensor): Global noise tensor if use_glob_noise is True
+        plbert (model): PL-BERT model for phoneme encoding
+        text_aligner (model): ASR model for text alignment
+        f0_extractor (model): Model for F0 feature extraction
+
+    Methods:
+        synthesize: Main method for speech synthesis from phonetic strings
+        generate_noise: Generates random noise for the diffusion process
+        save_wav: Saves generated waveforms to a WAV file
+        _inference: Internal method for single-sentence inference
+        length_to_mask: Static method to convert lengths to attention masks
+
+    Example:
+        synthesizer = Synthesizer(
+            model_path="path/to/model.pth",
+            config_path="path/to/config.yaml",
+            device="cuda"
+        wavs = synthesizer.synthesize(["ph o n e m e s"])
+        synthesizer.save_wav(wavs, "output.wav")
+    """
+
     def __init__(
         self,
         model_path,
@@ -245,8 +284,10 @@ class Synthesizer:
 
             d = self.model.predictor.text_encoder(d_en, s, input_lengths, text_mask)
 
-            x, _ = self.model.predictor.lstm(d)
-            duration = self.model.predictor.duration_proj(x)
+            x = self.model.predictor.lstm(d)
+            x_mod = self.model.predictor.prepare_projection(x)  # 640 -> 512
+            duration = self.model.predictor.duration_proj(x_mod)
+
             duration = torch.sigmoid(duration).sum(axis=-1)
             pred_dur = torch.round(duration.squeeze()).clamp(min=1)
 
