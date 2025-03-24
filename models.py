@@ -9,7 +9,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 import yaml
 from munch import Munch
-from torch.nn.utils import spectral_norm, weight_norm  # , remove_weight_norm
+from torch.nn.utils import spectral_norm, weight_norm
+from xlstm import (
+    mLSTMBlockConfig,
+    mLSTMLayerConfig,
+    xLSTMBlockStack,
+    xLSTMBlockStackConfig,
+)
 
 from Modules.diffusion.diffusion import AudioDiffusionConditional
 from Modules.diffusion.modules import StyleTransformer1d, Transformer1d
@@ -19,6 +25,8 @@ from Modules.discriminators import (
     MultiResSpecDiscriminator,
     WavLMDiscriminator,
 )
+from Modules.hifigan import Decoder as HifiDecoder
+from Modules.istftnet import Decoder as ISTFTDecoder
 from Utils.ASR.models import ASRCNN
 from Utils.JDC.model import JDCNet
 
@@ -334,12 +342,32 @@ class LayerNorm(nn.Module):
 class TextEncoder(nn.Module):
     def __init__(self, channels, kernel_size, depth, n_symbols, actv=nn.LeakyReLU(0.2)):
         super().__init__()
-        self.embedding = nn.Embedding(n_symbols, channels)
+        self.embedding = nn.Embedding(n_symbols, channels)  # [n_symbols, channels]
+
+        self.prepare_projection = LinearNorm(channels, channels // 2)
+        self.post_projection = LinearNorm(channels // 2, channels)
+        self.cfg = xLSTMBlockStackConfig(
+            mlstm_block=mLSTMBlockConfig(
+                mlstm=mLSTMLayerConfig(conv1d_kernel_size=4, qkv_proj_blocksize=4, num_heads=4)
+            ),
+            # slstm_block=sLSTMBlockConfig(
+            #     slstm=sLSTMLayerConfig(
+            #         backend="cuda",
+            #         num_heads=4,
+            #         conv1d_kernel_size=4,
+            #         bias_init="powerlaw_blockdependent",
+            #     ),
+            #     feedforward=FeedForwardConfig(proj_factor=1.3, act_fn="gelu"),
+            # ),
+            context_length=channels,
+            num_blocks=8,
+            embedding_dim=channels // 2,
+            # slstm_at=[1],
+        )
 
         padding = (kernel_size - 1) // 2
-        self.cnn = nn.ModuleList()
-        for _ in range(depth):
-            self.cnn.append(
+        self.cnn = nn.ModuleList(
+            [
                 nn.Sequential(
                     weight_norm(
                         nn.Conv1d(channels, channels, kernel_size=kernel_size, padding=padding)
@@ -348,10 +376,11 @@ class TextEncoder(nn.Module):
                     actv,
                     nn.Dropout(0.2),
                 )
-            )
-        # self.cnn = nn.Sequential(*self.cnn)
+                for _ in range(depth)
+            ]
+        )
 
-        self.lstm = nn.LSTM(channels, channels // 2, 1, batch_first=True, bidirectional=True)
+        self.lstm = xLSTMBlockStack(self.cfg)
 
     def forward(self, x, input_lengths, m):
         x = self.embedding(x)  # [B, T, emb]
@@ -366,19 +395,12 @@ class TextEncoder(nn.Module):
         x = x.transpose(1, 2)  # [B, T, chn]
 
         input_lengths = input_lengths.cpu().numpy()
-        x = nn.utils.rnn.pack_padded_sequence(
-            x, input_lengths, batch_first=True, enforce_sorted=False
-        )
 
-        self.lstm.flatten_parameters()
-        x, _ = self.lstm(x)
-        x, _ = nn.utils.rnn.pad_packed_sequence(x, batch_first=True)
+        x = self.prepare_projection(x)
+        x = self.lstm(x)
+        x = self.post_projection(x)
 
         x = x.transpose(-1, -2)
-        x_pad = torch.zeros([x.shape[0], x.shape[1], m.shape[-1]])
-
-        x_pad[:, :, : x.shape[-1]] = x
-        x = x_pad.to(x.device)
 
         x.masked_fill_(m, 0.0)
 
@@ -389,8 +411,7 @@ class TextEncoder(nn.Module):
         x = x.transpose(1, 2)
         x = self.cnn(x)
         x = x.transpose(1, 2)
-        self.lstm.flatten_parameters()
-        x, _ = self.lstm(x)
+        x = self.lstm(x)
         return x
 
     def length_to_mask(self, lengths):
@@ -510,73 +531,127 @@ class ProsodyPredictor(nn.Module):
     def __init__(self, style_dim, d_hid, nlayers, max_dur=50, dropout=0.1):
         super().__init__()
 
+        self.cfg = xLSTMBlockStackConfig(
+            mlstm_block=mLSTMBlockConfig(
+                mlstm=mLSTMLayerConfig(conv1d_kernel_size=4, qkv_proj_blocksize=4, num_heads=4)
+            ),
+            context_length=d_hid,
+            num_blocks=8,
+            embedding_dim=d_hid + style_dim,
+        )
+
+        self.cfg_pred = xLSTMBlockStackConfig(
+            mlstm_block=mLSTMBlockConfig(
+                mlstm=mLSTMLayerConfig(conv1d_kernel_size=4, qkv_proj_blocksize=4, num_heads=4)
+            ),
+            context_length=4096,
+            num_blocks=8,
+            embedding_dim=d_hid + style_dim,
+        )
+
+        # self.shared = Hopfield(input_size=d_hid + style_dim,
+        #                             hidden_size=d_hid // 2,
+        #                             num_heads=32,
+        #                             # scaling=.75,
+        #                             add_zero_association=True,
+        #                             batch_first=True)
+
+        # if you want to use hopfield, just comment out the block above, then hash the "self.shared below"
+
         self.text_encoder = DurationEncoder(
             sty_dim=style_dim, d_model=d_hid, nlayers=nlayers, dropout=dropout
         )
 
-        self.lstm = nn.LSTM(d_hid + style_dim, d_hid // 2, 1, batch_first=True, bidirectional=True)
+        self.lstm = xLSTMBlockStack(self.cfg)
+        self.prepare_projection = nn.Linear(d_hid + style_dim, d_hid)
         self.duration_proj = LinearNorm(d_hid, max_dur)
 
-        self.shared = nn.LSTM(
-            d_hid + style_dim, d_hid // 2, 1, batch_first=True, bidirectional=True
-        )
-        self.F0 = nn.ModuleList()
-        self.F0.append(AdainResBlk1d(d_hid, d_hid, style_dim, dropout_p=dropout))
-        self.F0.append(
+        self.shared = xLSTMBlockStack(self.cfg_pred)
+
+        self.f0 = nn.ModuleList()
+        self.f0.append(AdainResBlk1d(d_hid, d_hid, style_dim, dropout_p=dropout))
+        self.f0.append(
             AdainResBlk1d(d_hid, d_hid // 2, style_dim, upsample=True, dropout_p=dropout)
         )
-        self.F0.append(AdainResBlk1d(d_hid // 2, d_hid // 2, style_dim, dropout_p=dropout))
+        self.f0.append(AdainResBlk1d(d_hid // 2, d_hid // 2, style_dim, dropout_p=dropout))
 
-        self.N = nn.ModuleList()
-        self.N.append(AdainResBlk1d(d_hid, d_hid, style_dim, dropout_p=dropout))
-        self.N.append(AdainResBlk1d(d_hid, d_hid // 2, style_dim, upsample=True, dropout_p=dropout))
-        self.N.append(AdainResBlk1d(d_hid // 2, d_hid // 2, style_dim, dropout_p=dropout))
+        self.n = nn.ModuleList()
+        self.n.append(AdainResBlk1d(d_hid, d_hid, style_dim, dropout_p=dropout))
+        self.n.append(AdainResBlk1d(d_hid, d_hid // 2, style_dim, upsample=True, dropout_p=dropout))
+        self.n.append(AdainResBlk1d(d_hid // 2, d_hid // 2, style_dim, dropout_p=dropout))
 
-        self.F0_proj = nn.Conv1d(d_hid // 2, 1, 1, 1, 0)
-        self.N_proj = nn.Conv1d(d_hid // 2, 1, 1, 1, 0)
+        self.f0_proj = nn.Conv1d(d_hid // 2, 1, 1, 1, 0)
+        self.n_proj = nn.Conv1d(d_hid // 2, 1, 1, 1, 0)
 
-    def forward(self, texts, style, text_lengths, alignment, m):
-        d = self.text_encoder(texts, style, text_lengths, m)
+    def forward(self, texts, style, text_lengths=None, alignment=None, m=None, f0=None):
+        if f0:
+            x, s = texts, style
+            # x  = self.prepare_projection(x.transpose(-1, -2))
+            # x = self.shared(x)
 
-        batch_size = d.shape[0]
-        text_size = d.shape[1]
+            x = self.shared(x.transpose(-1, -2))
+            x = self.prepare_projection(x)
 
-        # predict duration
-        input_lengths = text_lengths.cpu().numpy()
-        x = nn.utils.rnn.pack_padded_sequence(
-            d, input_lengths, batch_first=True, enforce_sorted=False
-        )
+            f0o = x.transpose(-1, -2)
+            for block in self.F0:
+                f0o = block(f0o, s)
+            f0o = self.f0_proj(f0o)
 
-        m = m.to(text_lengths.device).unsqueeze(1)
+            n = x.transpose(-1, -2)
+            for block in self.n:
+                n = block(n, s)
+            n = self.N_proj(n)
 
-        self.lstm.flatten_parameters()
-        x, _ = self.lstm(x)
-        x, _ = nn.utils.rnn.pad_packed_sequence(x, batch_first=True)
+            return f0o.squeeze(1), n.squeeze(1)
+        else:
+            # Problem is here
+            d = self.text_encoder(texts, style, text_lengths, m)
 
-        x_pad = torch.zeros([x.shape[0], m.shape[-1], x.shape[-1]])
+            # batch_size = d.shape[0]
+            # text_size = d.shape[1]
 
-        x_pad[:, : x.shape[1], :] = x
-        x = x_pad.to(x.device)
+            # # predict duration
+            # input_lengths = text_lengths.cpu().numpy()
 
-        duration = self.duration_proj(nn.functional.dropout(x, 0.5, training=self.training))
-        en = d.transpose(-1, -2) @ alignment
+            # x = nn.utils.rnn.pack_padded_sequence(
+            #     d, input_lengths, batch_first=True, enforce_sorted=False)
+            x = d  # this dude can handle variable seq len so no need for padding
+            m = m.to(text_lengths.device).unsqueeze(1)
 
-        return duration.squeeze(-1), en
+            x = self.lstm(x)  # no longer using lstm
+            x = self.prepare_projection(x)
+
+            # x, _ = nn.utils.rnn.pad_packed_sequence(
+            #     x, batch_first=True)
+
+            # x_pad = torch.zeros([x.shape[0], m.shape[-1], x.shape[-1]])
+
+            # x_pad[:, :x.shape[1], :] = x
+            # x = x_pad.to(x.device)
+
+            x = x.transpose(-1, -2)
+            x = x.permute(0, 2, 1)
+            duration = self.duration_proj(nn.functional.dropout(x, 0.5, training=self.training))
+
+            en = d.transpose(-1, -2) @ alignment
+
+            return duration.squeeze(-1), en
 
     def F0Ntrain(self, x, s):
-        x, _ = self.shared(x.transpose(-1, -2))
+        x = self.shared(x.transpose(-1, -2))
+        x = self.prepare_projection(x)
 
-        F0 = x.transpose(-1, -2)
-        for block in self.F0:
-            F0 = block(F0, s)
-        F0 = self.F0_proj(F0)
+        f0 = x.transpose(-1, -2)
+        for block in self.f0:
+            f0 = block(f0, s)
+        f0 = self.f0_proj(f0)
 
-        N = x.transpose(-1, -2)
-        for block in self.N:
-            N = block(N, s)
-        N = self.N_proj(N)
+        n = x.transpose(-1, -2)
+        for block in self.n:
+            n = block(n, s)
+        n = self.n_proj(n)
 
-        return F0.squeeze(1), N.squeeze(1)
+        return f0.squeeze(1), n.squeeze(1)
 
     def length_to_mask(self, lengths):
         mask = (
@@ -661,13 +736,12 @@ class DurationEncoder(nn.Module):
 
 def load_F0_models(path):
     # load F0 model
-
-    F0_model = JDCNet(num_class=1, seq_len=192)
+    f0_model = JDCNet(num_class=1, seq_len=192)
     params = torch.load(path, map_location="cpu")["net"]
-    F0_model.load_state_dict(params)
-    _ = F0_model.train()
+    f0_model.load_state_dict(params)
+    _ = f0_model.train()
 
-    return F0_model
+    return f0_model
 
 
 def load_ASR_models(ASR_MODEL_PATH, ASR_MODEL_CONFIG):
@@ -695,9 +769,7 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     assert args.decoder.type in ["istftnet", "hifigan"], "Decoder type unknown"
 
     if args.decoder.type == "istftnet":
-        from Modules.istftnet import Decoder
-
-        decoder = Decoder(
+        decoder = ISTFTDecoder(
             dim_in=args.hidden_dim,
             style_dim=args.style_dim,
             dim_out=args.n_mels,
@@ -710,9 +782,7 @@ def build_model(args, text_aligner, pitch_extractor, bert):
             gen_istft_hop_size=args.decoder.gen_istft_hop_size,
         )
     else:
-        from Modules.hifigan import Decoder
-
-        decoder = Decoder(
+        decoder = HifiDecoder(
             dim_in=args.hidden_dim,
             style_dim=args.style_dim,
             dim_out=args.n_mels,
@@ -797,44 +867,44 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     return nets
 
 
-def load_checkpoint2(model, optimizer, path, load_only_params=True, ignore_modules=None, n_gpus=1):
-    # Modified to deal with inconsistent key names between first and second training stages
-    # => see https://github.com/yl4579/StyleTTS2/issues/121
-    if ignore_modules is None:
-        ignore_modules = []
-    state = torch.load(path, map_location="cpu")
-    params = state["net"]
-    for key in model:
-        if key in params and key not in ignore_modules:
-            print(f"== {key} loaded")
-            try:
-                model[key].load_state_dict(params[key], strict=True)
-            except RuntimeError:  # DataParallel module. mismatch
-                print(model[key].state_dict().keys())
-                state_dict = params[key]
-                new_state_dict = OrderedDict()
-                for k, v in state_dict.items():
-                    name = k
-                    if n_gpus == 1 and k.startswith("module."):
-                        name = k[7:]  # remove `module.`
-                    elif not k.startswith("module."):
-                        name = "module." + k
-                    print(f"{k} => {name}")
-                    new_state_dict[name] = v
-                # load params
-                model[key].load_state_dict(new_state_dict, strict=False)
-    _ = [model[key].eval() for key in model]
+# def load_checkpoint2(model, optimizer, path, load_only_params=True, ignore_modules=None, n_gpus=1):
+#     # Modified to deal with inconsistent key names between first and second training stages
+#     # => see https://github.com/yl4579/StyleTTS2/issues/121
+#     if ignore_modules is None:
+#         ignore_modules = []
+#     state = torch.load(path, map_location="cpu")
+#     params = state["net"]
+#     for key in model:
+#         if key in params and key not in ignore_modules:
+#             print(f"== {key} loaded")
+#             try:
+#                 model[key].load_state_dict(params[key], strict=True)
+#             except RuntimeError:  # DataParallel module. mismatch
+#                 print(model[key].state_dict().keys())
+#                 state_dict = params[key]
+#                 new_state_dict = OrderedDict()
+#                 for k, v in state_dict.items():
+#                     name = k
+#                     if n_gpus == 1 and k.startswith("module."):
+#                         name = k[7:]  # remove `module.`
+#                     elif not k.startswith("module."):
+#                         name = "module." + k
+#                     print(f"{k} => {name}")
+#                     new_state_dict[name] = v
+#                 # load params
+#                 model[key].load_state_dict(new_state_dict, strict=False)
+#     _ = [model[key].eval() for key in model]
 
-    if not load_only_params:
-        # advance start epoch or we'd re-train and rewrite the last epoch file
-        epoch = state["epoch"] + 1
-        iters = state["iters"]
-        optimizer.load_state_dict(state["optimizer"])
-    else:
-        epoch = 0
-        iters = 0
+#     if not load_only_params:
+#         # advance start epoch or we'd re-train and rewrite the last epoch file
+#         epoch = state["epoch"] + 1
+#         iters = state["iters"]
+#         optimizer.load_state_dict(state["optimizer"])
+#     else:
+#         epoch = 0
+#         iters = 0
 
-    return model, optimizer, epoch, iters
+#     return model, optimizer, epoch, iters
 
 
 def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_modules=None):

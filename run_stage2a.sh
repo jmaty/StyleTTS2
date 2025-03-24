@@ -73,8 +73,8 @@ else
      exit 1
 fi
 
-# Change GPU queue to gpu_long when number of hours is >24
-[[ $HOURS -gt 24 ]] && [[ $SPEC == gpu? ]] && QUEUE="${QUEUE}_long"
+# Change GPU queue to gpu_long when number of hours is >48
+[[ $HOURS -gt 48 ]] && [[ $SPEC == gpu? ]] && QUEUE="${QUEUE}_long"
 
 # Select argument
 SELECT="-l select=1:ncpus=$NCPUS:mem=$MEM:scratch_local=$LSCRATCH:ngpus=$NGPUS$CLUSTER"
@@ -87,7 +87,7 @@ EXP="$(basename $EXPDIR)_stage2a"
 # Timestep to differentiate among runs with the same run name
 TIMESTEP=$(date +"%y%m%d-%H%M%S")
 
-SINGULARITY=/storage/plzen4-ntis/home/jmatouse/singularity/papermill_23.12-latest.sh
+SINGULARITY=/storage/plzen4-ntis/projects/singularity/papermill_24.12-latest.sh
 
 # Check that config file exists
 if [[ ! -e $CFG ]]; then
