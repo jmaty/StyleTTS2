@@ -91,6 +91,7 @@ def inference(
     beta=0.7,
     diffusion_steps=5,
     embedding_scale=1,
+    speech_rate=1.0,
     device="cuda",
 ):
     # Phoneme string expected at the input
@@ -139,7 +140,7 @@ def inference(
         x_mod = model.predictor.prepare_projection(x)  # 640 -> 512
         duration = model.predictor.duration_proj(x_mod)
 
-        duration = torch.sigmoid(duration).sum(axis=-1)
+        duration = torch.sigmoid(duration).sum(axis=-1) / speech_rate
         pred_dur = torch.round(duration.squeeze()).clamp(min=1)
 
         pred_dur[-1] += 5
@@ -185,6 +186,7 @@ def synth_test_files(
     sampler=None,
     diffusion_steps=5,
     embedding_scale=1,
+    speech_rate=1.0,
     device="cuda",
 ):
     # Generate noise
@@ -207,6 +209,7 @@ def synth_test_files(
             noise,
             diffusion_steps=diffusion_steps,
             embedding_scale=embedding_scale,
+            speech_rate=speech_rate,
             device=device,
         )
         outfile = f"{outfile_template}-{idx}.wav"

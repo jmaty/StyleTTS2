@@ -243,7 +243,14 @@ class Synthesizer:
         return wavs
 
     def _inference(
-        self, ph_ids, noise=None, diffusion_steps=5, embedding_scale=1, s_prev=None, alpha=0.7
+        self,
+        ph_ids,
+        noise=None,
+        diffusion_steps=5,
+        embedding_scale=1,
+        s_prev=None,
+        alpha=0.7,
+        speech_rate=1.0,
     ):
         """Inference for a single phonetic sentence.
 
@@ -254,6 +261,7 @@ class Synthesizer:
             embedding_scale (int, optional): Embedding scale. Defaults to 1.0.
             s_prev (tensor, optional): Previous sentence style embedding. Defaults to None.
             alpha (float, optional): Weight for convex combination of current and previous styles. Defaults to 0.7.
+            speech_rate (float, optional): Speech rate. Defaults to 1.0.
 
         Returns:
             tuple(numpy array, tensor): Current sentence waveform and style embedding.
@@ -288,7 +296,7 @@ class Synthesizer:
             x_mod = self.model.predictor.prepare_projection(x)  # 640 -> 512
             duration = self.model.predictor.duration_proj(x_mod)
 
-            duration = torch.sigmoid(duration).sum(axis=-1)
+            duration = torch.sigmoid(duration).sum(axis=-1) / speech_rate
             pred_dur = torch.round(duration.squeeze()).clamp(min=1)
 
             pred_aln_trg = torch.zeros(input_lengths, int(pred_dur.sum().data))
