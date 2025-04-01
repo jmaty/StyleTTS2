@@ -23,7 +23,7 @@ class STFTLoss(torch.nn.Module):
 
     def __init__(self, fft_size=1024, shift_size=120, win_length=600, window=torch.hann_window):
         """Initialize STFT loss module."""
-        super(STFTLoss, self).__init__()
+        super().__init__()
         self.fft_size = fft_size
         self.shift_size = shift_size
         self.win_length = win_length
@@ -63,9 +63,9 @@ class MultiResolutionSTFTLoss(torch.nn.Module):
 
     def __init__(
         self,
-        fft_sizes=[1024, 2048, 512],
-        hop_sizes=[120, 240, 50],
-        win_lengths=[600, 1200, 240],
+        fft_sizes=None,
+        hop_sizes=None,
+        win_lengths=None,
         window=torch.hann_window,
     ):
         """Initialize Multi resolution STFT loss module.
@@ -75,7 +75,13 @@ class MultiResolutionSTFTLoss(torch.nn.Module):
             win_lengths (list): List of window lengths.
             window (str): Window function type.
         """
-        super(MultiResolutionSTFTLoss, self).__init__()
+        super().__init__()
+        if fft_sizes is None:
+            fft_sizes = [1024, 2048, 512]
+        if hop_sizes is None:
+            hop_sizes = [120, 240, 50]
+        if win_lengths is None:
+            win_lengths = [600, 1200, 240]
         assert len(fft_sizes) == len(hop_sizes) == len(win_lengths)
         self.stft_losses = torch.nn.ModuleList()
         for fs, ss, wl in zip(fft_sizes, hop_sizes, win_lengths):
@@ -157,13 +163,49 @@ def generator_TPRLS_loss(disc_real_outputs, disc_generated_outputs):
 
 
 class GeneratorLoss(torch.nn.Module):
+    """Computes the total generator loss using MPD (Multi-Period Discriminator) and MSD (Multi-Scale Discriminator).
+
+    This class implements the generator loss calculation for adversarial training of audio generation models.
+    It combines feature matching loss, generator adversarial loss, and relative loss components.
+
+    Args:
+        mpd (torch.nn.Module): Multi-Period Discriminator module
+        msd (torch.nn.Module): Multi-Scale Discriminator module
+
+    Methods:
+        forward(y, y_hat): Computes the total generator loss
+            Args:
+                y (torch.Tensor): Ground truth audio waveform
+                y_hat (torch.Tensor): Generated audio waveform
+            Returns:
+                torch.Tensor: Mean of combined generator losses including feature matching,
+                             adversarial, and relative losses
+    """
 
     def __init__(self, mpd, msd):
-        super(GeneratorLoss, self).__init__()
+        super().__init__()
         self.mpd = mpd
         self.msd = msd
 
     def forward(self, y, y_hat):
+        """
+        Computes the combined generator loss for the HiFi-GAN model.
+
+        This method calculates multiple loss components:
+        - Feature matching loss from Multi-Period Discriminator (MPD)
+        - Feature matching loss from Multi-Scale Discriminator (MSD)
+        - Generator adversarial loss from MPD
+        - Generator adversarial loss from MSD
+        - Relative logistic loss between real and generated samples
+
+        Args:
+            y (Tensor): Ground truth audio waveform
+            y_hat (Tensor): Generated audio waveform
+
+        Returns:
+            Tensor: Mean of the combined generator loss including feature matching,
+                   adversarial, and relative logistic components
+        """
         y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = self.mpd(y, y_hat)
         y_ds_hat_r, y_ds_hat_g, fmap_s_r, fmap_s_g = self.msd(y, y_hat)
         loss_fm_f = feature_loss(fmap_f_r, fmap_f_g)
@@ -181,13 +223,44 @@ class GeneratorLoss(torch.nn.Module):
 
 
 class DiscriminatorLoss(torch.nn.Module):
+    """It combines the following components:
+    - MPD (Multi-Period Discriminator) loss
+    - MSD (Multi-Scale Discriminator) loss
+    - Relative loss using TPRLS (Two-Path Relative Loss Strategy)
+
+    Methods:
+        forward(y, y_hat): Calculates the total discriminator loss
+                y (torch.Tensor): Real audio samples
+                y_hat (torch.Tensor): Generated audio samples
+            Returns:
+                torch.Tensor: Mean of combined discriminator losses
+    """
 
     def __init__(self, mpd, msd):
-        super(DiscriminatorLoss, self).__init__()
+        """Initialize MultiScale and MultiPeriod discriminators.
+        Args:
+            mpd (nn.Module): Multi-period discriminator module
+            msd (nn.Module): Multi-scale discriminator module
+        """
+        super().__init__()
         self.mpd = mpd
         self.msd = msd
 
     def forward(self, y, y_hat):
+        """
+        Forward pass for the discriminator loss calculation.
+        Args:
+            y (torch.Tensor): Ground truth waveform.
+            y_hat (torch.Tensor): Generated/predicted waveform.
+        Returns:
+            torch.Tensor: Mean discriminator loss combining MPD (Multi-Period Discriminator),
+                         MSD (Multi-Scale Discriminator), and relative losses.
+        Details:
+            - Computes MPD (Multi-Period Discriminator) loss using real and generated samples
+            - Computes MSD (Multi-Scale Discriminator) loss using real and generated samples
+            - Calculates relative loss using TPRLS (Two-Path Regularization Loss Strategy)
+            - Combines all losses into final discriminator loss
+        """
         # MPD
         y_df_hat_r, y_df_hat_g, _, _ = self.mpd(y, y_hat)
         loss_disc_f, _, _ = discriminator_loss(y_df_hat_r, y_df_hat_g)
@@ -205,14 +278,53 @@ class DiscriminatorLoss(torch.nn.Module):
 
 
 class WavLMLoss(torch.nn.Module):
+    """WavLMLoss module for comparing and discriminating audio embeddings using WavLM model.
+    This class implements a loss module that uses the WavLM model to extract embeddings from audio
+    and compute various losses for training speech synthesis models.
+    Args:
+        model (str): Path or identifier for the pretrained WavLM model
+        wd (nn.Module): Discriminator module for WavLM embeddings
+        model_sr (int): Sample rate of the input audio
+        slm_sr (int, optional): Target sample rate for WavLM model. Defaults to 16000.
+    Methods:
+        forward(wav, y_rec): Computes feature matching loss between original and reconstructed audio
+        generator(y_rec): Computes generator loss using discriminator predictions
+        discriminator(wav, y_rec): Computes discriminator loss for real and generated samples
+        discriminator_forward(wav): Forward pass through discriminator for real samples only
+    The class provides functionality for:
+    - Feature matching between original and reconstructed audio using WavLM embeddings
+    - Adversarial training with a discriminator operating on WavLM embeddings
+    - Resampling audio to match WavLM's expected sample rate
+    """
 
     def __init__(self, model, wd, model_sr, slm_sr=16000):
-        super(WavLMLoss, self).__init__()
+        """Initialize the model with specified parameters.
+        Args:
+            model (str): Path or identifier for the pre-trained WavLM model.
+            wd (float): Weight decay parameter for optimization.
+            model_sr (int): Sample rate of the input audio for the model.
+            slm_sr (int, optional): Target sample rate for speech language model. Defaults to 16000.
+        """
+        super().__init__()
         self.wavlm = AutoModel.from_pretrained(model)
         self.wd = wd
         self.resample = torchaudio.transforms.Resample(model_sr, slm_sr)
 
     def forward(self, wav, y_rec):
+        """Forward pass for feature loss calculation.
+        This method computes the feature loss between original and reconstructed audio
+        using WavLM embeddings. It resamples both signals to 16kHz and extracts
+        embeddings using the WavLM model.
+        Args:
+            wav (Tensor): Original input waveform
+            y_rec (Tensor): Reconstructed waveform
+        Returns:
+            Tensor: Mean feature loss calculated as L1 distance between original
+                    and reconstructed WavLM embeddings across all layers
+        Note:
+            Both input tensors should be audio waveforms with same sampling rate.
+            The method handles resampling to 16kHz internally.
+        """
         with torch.no_grad():
             wav_16 = self.resample(wav)
             wav_embeddings = self.wavlm(
@@ -230,6 +342,17 @@ class WavLMLoss(torch.nn.Module):
         return floss.mean()
 
     def generator(self, y_rec):
+        """
+        Compute the generator loss for adversarial training.
+        This method calculates the generator component of GAN loss using discriminator outputs.
+        It first resamples the reconstructed audio, extracts WavLM embeddings, and passes
+        them through the discriminator to compute how well the generator fools the discriminator.
+        Args:
+            y_rec (torch.Tensor): Reconstructed audio waveform from the generator.
+        Returns:
+            torch.Tensor: The generator loss value as a scalar tensor, calculated as mean((1 - D(G(x)))²).
+            Lower values indicate the generator is better at fooling the discriminator.
+        """
         y_rec_16 = self.resample(y_rec)
         y_rec_embeddings = self.wavlm(
             input_values=y_rec_16, output_hidden_states=True
@@ -243,6 +366,18 @@ class WavLMLoss(torch.nn.Module):
         return loss_gen
 
     def discriminator(self, wav, y_rec):
+        """
+        Calculates the discriminator loss between original and reconstructed audio waveforms.
+        This method extracts embeddings from both the original and reconstructed waveforms
+        using a WavLM model, processes them through the waveform discriminator, and computes
+        the adversarial loss that helps distinguish between real and generated samples.
+        Args:
+            wav (Tensor): The original audio waveform (ground truth).
+            y_rec (Tensor): The reconstructed/generated audio waveform.
+        Returns:
+            Tensor: The mean discriminator loss, combining the real sample loss (r_loss)
+                    and generated sample loss (g_loss).
+        """
         with torch.no_grad():
             wav_16 = self.resample(wav)
             wav_embeddings = self.wavlm(
@@ -275,6 +410,16 @@ class WavLMLoss(torch.nn.Module):
         return loss_disc_f.mean()
 
     def discriminator_forward(self, wav):
+        """
+        Forward pass through the discriminator using WavLM embeddings.
+        This method processes an input waveform through the WavLM model to extract
+        embeddings, which are then passed through the discriminator. The gradient
+        calculation is disabled during this process.
+        Args:
+            wav (torch.Tensor): The input waveform tensor.
+        Returns:
+            torch.Tensor: The discriminator's output predictions based on WavLM embeddings.
+        """
         with torch.no_grad():
             wav_16 = self.resample(wav)
             wav_embeddings = self.wavlm(
