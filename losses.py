@@ -1,7 +1,9 @@
 import torch
 import torch.nn.functional as F
 import torchaudio
-from transformers import AutoModel
+import whisper
+from transformers import AutoModel, WhisperConfig, WhisperPreTrainedModel
+from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
 
 class SpectralConvergengeLoss(torch.nn.Module):
@@ -163,10 +165,12 @@ def generator_TPRLS_loss(disc_real_outputs, disc_generated_outputs):
 
 
 class GeneratorLoss(torch.nn.Module):
-    """Computes the total generator loss using MPD (Multi-Period Discriminator) and MSD (Multi-Scale Discriminator).
+    """Computes the total generator loss using MPD (Multi-Period Discriminator)
+    and MSD (Multi-Scale Discriminator).
 
-    This class implements the generator loss calculation for adversarial training of audio generation models.
-    It combines feature matching loss, generator adversarial loss, and relative loss components.
+    This class implements the generator loss calculation for adversarial training
+    of audio generation models. It combines feature matching loss, generator adversarial loss,
+    and relative loss components.
 
     Args:
         mpd (torch.nn.Module): Multi-Period Discriminator module
@@ -277,115 +281,416 @@ class DiscriminatorLoss(torch.nn.Module):
         return d_loss.mean()
 
 
+# #####################
+# MIXED PRECISION
+# #####################
+
+
+class WhisperEncoderOnly(WhisperPreTrainedModel):
+    def __init__(self, config: WhisperConfig):
+        super().__init__(config)
+        self.encoder = WhisperEncoder(config)
+
+    def forward(self, input_features, attention_mask=None):
+        return self.encoder(input_features, attention_mask)
+
+
 class WavLMLoss(torch.nn.Module):
-    """WavLMLoss module for comparing and discriminating audio embeddings using WavLM model.
-    This class implements a loss module that uses the WavLM model to extract embeddings from audio
-    and compute various losses for training speech synthesis models.
-    Args:
-        model (str): Path or identifier for the pretrained WavLM model
-        wd (nn.Module): Discriminator module for WavLM embeddings
-        model_sr (int): Sample rate of the input audio
-        slm_sr (int, optional): Target sample rate for WavLM model. Defaults to 16000.
+    """
+    WavLM Loss module that utilizes the Whisper encoder for audio feature extraction and loss computation.
+    This class provides a loss function for speech synthesis tasks based on the Whisper large-v2 model's
+    encoder representations. It supports various modes of operation including feature matching loss,
+    adversarial training with generator/discriminator losses, and forward passes for evaluation.
+    The module works by extracting speech embeddings from both original and reconstructed audio samples,
+    then computing the differences between these embeddings or using them for adversarial training.
+    Attributes:
+        wavlm (WhisperEncoderOnly): The Whisper encoder model used for feature extraction
+        wd (nn.Module): Waveform discriminator model
+        resample (torchaudio.transforms.Resample): Resampling transform to match required sample rates
     Methods:
-        forward(wav, y_rec): Computes feature matching loss between original and reconstructed audio
-        generator(y_rec): Computes generator loss using discriminator predictions
-        discriminator(wav, y_rec): Computes discriminator loss for real and generated samples
-        discriminator_forward(wav): Forward pass through discriminator for real samples only
-    The class provides functionality for:
-    - Feature matching between original and reconstructed audio using WavLM embeddings
-    - Adversarial training with a discriminator operating on WavLM embeddings
-    - Resampling audio to match WavLM's expected sample rate
+        forward: Computes various losses based on specified mode (feature matching, generator, discriminator)
+        generator: Computes generator loss for adversarial training
+        discriminator: Computes discriminator loss for adversarial training
+        discriminator_forward: Forward pass through discriminator for evaluation
     """
 
     def __init__(self, model, wd, model_sr, slm_sr=16000):
-        """Initialize the model with specified parameters.
-        Args:
-            model (str): Path or identifier for the pre-trained WavLM model.
-            wd (float): Weight decay parameter for optimization.
-            model_sr (int): Sample rate of the input audio for the model.
-            slm_sr (int, optional): Target sample rate for speech language model. Defaults to 16000.
+        """
+        Initialize a speech encoder using the Whisper large-v2 model.
+        This constructor loads a Whisper encoder model which can be used for speech embeddings
+        or representation learning. The audio will be automatically resampled from the model's
+        sample rate to the speech language model's sample rate.
+        Parameters
+        ----------
+        model : str
+            The name of the model to load (not used, as we explicitly load whisper-large-v2).
+        wd : float
+            Weight decay or other configuration parameter.
+        model_sr : int
+            The sample rate of the input audio in Hz.
+        slm_sr : int, optional
+            The sample rate expected by the speech language model, defaults to 16000 Hz.
         """
         super().__init__()
-        self.wavlm = AutoModel.from_pretrained(model)
+
+        # Load the Whisper large-v2 model encoder-only configuration and
+        # set it to be non-decoder
+        config = WhisperConfig.from_pretrained("Respair/Whisper_Large_v2_Encoder_Block")
+        config.is_encoder_decoder = False
+        config.use_cache = False
+
+        # Load the full model and keep only the encoder
+        full_model = WhisperEncoderOnly.from_pretrained(
+            "openai/whisper-large-v2",
+            config=config,
+            torch_dtype=torch.bfloat16,
+            # "openai/whisper-large-v2", config=config, device_map="cuda", torch_dtype=torch.bfloat16
+        )
+        # Initialize the encoder-only model with the same configuration
+        model = WhisperEncoderOnly(config)
+        # Load encoder weights from the full model
+        model.encoder.load_state_dict(full_model.encoder.state_dict())
+        del full_model  # Free up memory
+
+        # # from transformers import WhisperForConditionalGeneration
+        # # Load the full Whisper model
+        # # full_model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-large-v2")
+        # full_model = WhisperEncoderOnly.from_pretrained(
+        #     "openai/whisper-large-v2", torch_dtype=torch.bfloat16
+        # )
+
+        # config = full_model.config
+        # config.is_encoder_decoder = False
+        # config.use_cache = False
+        # # Initialize the encoder-only model with the same configuration
+        # # model = WhisperEncoderOnly(full_model.config)
+        # model = WhisperEncoderOnly(config)
+        # # Load encoder weights from the full model
+        # model.encoder.load_state_dict(full_model.encoder.state_dict())
+        # # Free up memory
+        # del full_model
+        # print(model.config)
+
+        # self.wavlm = AutoModel.from_pretrained(model) # orig WavLM
+        self.wavlm = model.to(torch.bfloat16)
         self.wd = wd
         self.resample = torchaudio.transforms.Resample(model_sr, slm_sr)
 
-    def forward(self, wav, y_rec):
-        """Forward pass for feature loss calculation.
-        This method computes the feature loss between original and reconstructed audio
-        using WavLM embeddings. It resamples both signals to 16kHz and extracts
-        embeddings using the WavLM model.
-        Args:
-            wav (Tensor): Original input waveform
-            y_rec (Tensor): Reconstructed waveform
-        Returns:
-            Tensor: Mean feature loss calculated as L1 distance between original
-                    and reconstructed WavLM embeddings across all layers
-        Note:
-            Both input tensors should be audio waveforms with same sampling rate.
-            The method handles resampling to 16kHz internally.
+    # def forward(self, wav, y_rec):
+    #     """Forward pass for feature loss calculation.
+    #     This method computes the feature loss between original and reconstructed audio
+    #     using WavLM embeddings. It resamples both signals to 16kHz and extracts
+    #     embeddings using the WavLM model.
+    #     Args:
+    #         wav (Tensor): Original input waveform
+    #         y_rec (Tensor): Reconstructed waveform
+    #     Returns:
+    #         Tensor: Mean feature loss calculated as L1 distance between original
+    #                 and reconstructed WavLM embeddings across all layers
+    #     Note:
+    #         Both input tensors should be audio waveforms with same sampling rate.
+    #         The method handles resampling to 16kHz internally.
+    #     """
+    #     with torch.no_grad():
+    #         wav_16 = self.resample(wav)
+    #         wav_embeddings = self.wavlm(
+    #             input_values=wav_16, output_hidden_states=True
+    #         ).hidden_states
+    #     y_rec_16 = self.resample(y_rec)
+    #     y_rec_embeddings = self.wavlm(
+    #         input_values=y_rec_16.squeeze(), output_hidden_states=True
+    #     ).hidden_states
+
+    #     floss = 0
+    #     for er, eg in zip(wav_embeddings, y_rec_embeddings):
+    #         floss += torch.mean(torch.abs(er - eg))
+
+    #     return floss.mean()
+
+    def forward(
+        self, wav, y_rec, generator=False, discriminator=False, discriminator_forward=False
+    ):
         """
+        Forward pass method that processes audio waveforms using WavLM and Whisper to calculate various losses.
+        This method supports multiple operating modes for training generative audio models:
+        - Generator loss calculation
+        - Discriminator loss calculation
+        - Feature matching loss calculation
+        - Discriminator forward pass (evaluation mode)
+        Parameters
+        ----------
+        wav : torch.Tensor
+            Original waveform input tensor, typically with shape [batch_size, 1, time]
+        y_rec : torch.Tensor
+            Reconstructed/generated waveform tensor, typically with shape [batch_size, 1, time]
+        generator : bool, default=False
+            If True, calculates generator adversarial loss
+        discriminator : bool, default=False
+            If True, calculates discriminator adversarial loss
+        discriminator_forward : bool, default=False
+            If True, performs forward pass through discriminator without loss calculation
+        Returns
+        -------
+        torch.Tensor
+            Depending on the mode:
+            - When generator=True: Returns generator adversarial loss
+            - When discriminator=True: Returns discriminator adversarial loss
+            - When discriminator_forward=True: Returns discriminator predictions for real samples
+            - Default: Returns feature matching loss between original and reconstructed audio
+        """
+        if generator:
+            y_rec = y_rec.squeeze(1)
+
+            y_rec = whisper.pad_or_trim(y_rec)
+            y_rec = whisper.log_mel_spectrogram(y_rec)
+
+            with torch.no_grad():
+                y_rec_embeddings = self.wavlm.encoder(
+                    y_rec.to(torch.bfloat16), output_hidden_states=True
+                ).hidden_states
+            y_rec_embeddings = (
+                torch.stack(y_rec_embeddings, dim=1)
+                .transpose(-1, -2)
+                .flatten(start_dim=1, end_dim=2)
+            )
+            y_df_hat_g = self.wd(y_rec_embeddings.to(torch.float32))
+            loss_gen = torch.mean((1 - y_df_hat_g) ** 2)
+
+            return loss_gen.to(torch.float32)
+
+        if discriminator:
+            wav = wav.squeeze(1)
+            y_rec = y_rec.squeeze(1)
+
+            wav = whisper.pad_or_trim(wav)
+            wav = whisper.log_mel_spectrogram(wav)
+
+            y_rec = whisper.pad_or_trim(y_rec)
+            y_rec = whisper.log_mel_spectrogram(y_rec)
+
+            with torch.no_grad():
+                wav_embeddings = self.wavlm.encoder(
+                    wav.to(torch.bfloat16), output_hidden_states=True
+                ).hidden_states
+                y_rec_embeddings = self.wavlm.encoder(
+                    y_rec.to(torch.bfloat16), output_hidden_states=True
+                ).hidden_states
+
+                y_embeddings = (
+                    torch.stack(wav_embeddings, dim=1)
+                    .transpose(-1, -2)
+                    .flatten(start_dim=1, end_dim=2)
+                )
+                y_rec_embeddings = (
+                    torch.stack(y_rec_embeddings, dim=1)
+                    .transpose(-1, -2)
+                    .flatten(start_dim=1, end_dim=2)
+                )
+
+            y_d_rs = self.wd(y_embeddings.to(torch.float32))
+            y_d_gs = self.wd(y_rec_embeddings.to(torch.float32))
+
+            y_df_hat_r, y_df_hat_g = y_d_rs, y_d_gs
+
+            r_loss = torch.mean((1 - y_df_hat_r) ** 2)
+            g_loss = torch.mean((y_df_hat_g) ** 2)
+
+            loss_disc_f = r_loss + g_loss
+
+            return loss_disc_f.mean().to(torch.float32)
+
+        if discriminator_forward:
+            # Squeeze the channel dimension if it's unnecessary
+            wav = wav.squeeze(1)  # Adjust this line if the channel dimension is not at dim=1
+
+            with torch.no_grad():
+
+                wav_16 = self.resample(wav)
+                wav_16 = whisper.pad_or_trim(wav_16)
+                wav_16 = whisper.log_mel_spectrogram(wav_16)
+
+                wav_embeddings = self.wavlm.encoder(
+                    wav_16.to(torch.bfloat16), output_hidden_states=True
+                ).hidden_states
+                y_embeddings = (
+                    torch.stack(wav_embeddings, dim=1)
+                    .transpose(-1, -2)
+                    .flatten(start_dim=1, end_dim=2)
+                )
+
+            y_d_rs = self.wd(y_embeddings.to(torch.float32))
+
+            return y_d_rs
+
+        wav = wav.squeeze(1)
+        y_rec = y_rec.squeeze(1)
+
+        wav = whisper.pad_or_trim(wav)
+        wav = whisper.log_mel_spectrogram(wav)
+
+        y_rec = whisper.pad_or_trim(y_rec)
+        y_rec = whisper.log_mel_spectrogram(y_rec)
+
         with torch.no_grad():
-            wav_16 = self.resample(wav)
-            wav_embeddings = self.wavlm(
-                input_values=wav_16, output_hidden_states=True
+            wav_embeddings = self.wavlm.encoder(
+                wav.to(torch.bfloat16), output_hidden_states=True
             ).hidden_states
-        y_rec_16 = self.resample(y_rec)
-        y_rec_embeddings = self.wavlm(
-            input_values=y_rec_16.squeeze(), output_hidden_states=True
-        ).hidden_states
+
+            y_rec_embeddings = self.wavlm.encoder(
+                y_rec.to(torch.bfloat16), output_hidden_states=True
+            ).hidden_states
 
         floss = 0
-        for er, eg in zip(wav_embeddings, y_rec_embeddings):
+        for er, eg in zip(
+            [e.to(torch.float32) for e in wav_embeddings],
+            [e.to(torch.float32) for e in y_rec_embeddings],
+        ):
             floss += torch.mean(torch.abs(er - eg))
 
         return floss.mean()
 
+    # def generator(self, y_rec):
+    #     """
+    #     Compute the generator loss for adversarial training.
+    #     This method calculates the generator component of GAN loss using discriminator outputs.
+    #     It first resamples the reconstructed audio, extracts WavLM embeddings, and passes
+    #     them through the discriminator to compute how well the generator fools the discriminator.
+    #     Args:
+    #         y_rec (torch.Tensor): Reconstructed audio waveform from the generator.
+    #     Returns:
+    #         torch.Tensor: The generator loss value as a scalar tensor, calculated as mean((1 - D(G(x)))²).
+    #         Lower values indicate the generator is better at fooling the discriminator.
+    #     """
+    #     y_rec_16 = self.resample(y_rec)
+    #     y_rec_embeddings = self.wavlm(
+    #         input_values=y_rec_16, output_hidden_states=True
+    #     ).hidden_states
+    #     y_rec_embeddings = (
+    #         torch.stack(y_rec_embeddings, dim=1).transpose(-1, -2).flatten(start_dim=1, end_dim=2)
+    #     )
+    #     y_df_hat_g = self.wd(y_rec_embeddings)
+    #     loss_gen = torch.mean((1 - y_df_hat_g) ** 2)
+
+    #     return loss_gen
+
     def generator(self, y_rec):
         """
-        Compute the generator loss for adversarial training.
-        This method calculates the generator component of GAN loss using discriminator outputs.
-        It first resamples the reconstructed audio, extracts WavLM embeddings, and passes
-        them through the discriminator to compute how well the generator fools the discriminator.
+        Computes the generator loss for audio reconstruction.
+        This method processes the reconstructed audio through feature extraction
+        with Whisper and WavLM models, and then computes the generator loss
+        using a discriminator model.
         Args:
-            y_rec (torch.Tensor): Reconstructed audio waveform from the generator.
+            y_rec (torch.Tensor): The reconstructed audio tensor, expected to have shape
+                                 with first dimension as batch.
         Returns:
-            torch.Tensor: The generator loss value as a scalar tensor, calculated as mean((1 - D(G(x)))²).
-            Lower values indicate the generator is better at fooling the discriminator.
+            torch.Tensor: The generator loss value as a float32 tensor.
+        Note:
+            This function uses pre-trained Whisper and WavLM models to extract features
+            from the audio before passing them to the discriminator.
         """
-        y_rec_16 = self.resample(y_rec)
-        y_rec_embeddings = self.wavlm(
-            input_values=y_rec_16, output_hidden_states=True
-        ).hidden_states
+        y_rec = y_rec.squeeze(1)
+
+        y_rec = whisper.pad_or_trim(y_rec)
+        y_rec = whisper.log_mel_spectrogram(y_rec)
+
+        with torch.no_grad():
+            y_rec_embeddings = self.wavlm.encoder(
+                y_rec.to(torch.bfloat16), output_hidden_states=True
+            ).hidden_states
         y_rec_embeddings = (
             torch.stack(y_rec_embeddings, dim=1).transpose(-1, -2).flatten(start_dim=1, end_dim=2)
         )
-        y_df_hat_g = self.wd(y_rec_embeddings)
+        y_df_hat_g = self.wd(y_rec_embeddings.to(torch.float32))
         loss_gen = torch.mean((1 - y_df_hat_g) ** 2)
 
-        return loss_gen
+        return loss_gen.to(torch.float32)
+
+    # def discriminator(self, wav, y_rec):
+    #     """
+    #     Calculates the discriminator loss between original and reconstructed audio waveforms.
+    #     This method extracts embeddings from both the original and reconstructed waveforms
+    #     using a WavLM model, processes them through the waveform discriminator, and computes
+    #     the adversarial loss that helps distinguish between real and generated samples.
+    #     Args:
+    #         wav (Tensor): The original audio waveform (ground truth).
+    #         y_rec (Tensor): The reconstructed/generated audio waveform.
+    #     Returns:
+    #         Tensor: The mean discriminator loss, combining the real sample loss (r_loss)
+    #                 and generated sample loss (g_loss).
+    #     """
+    #     with torch.no_grad():
+    #         wav_16 = self.resample(wav)
+    #         wav_embeddings = self.wavlm(
+    #             input_values=wav_16, output_hidden_states=True
+    #         ).hidden_states
+    #         y_rec_16 = self.resample(y_rec)
+    #         y_rec_embeddings = self.wavlm(
+    #             input_values=y_rec_16, output_hidden_states=True
+    #         ).hidden_states
+
+    #         y_embeddings = (
+    #             torch.stack(wav_embeddings, dim=1).transpose(-1, -2).flatten(start_dim=1, end_dim=2)
+    #         )
+    #         y_rec_embeddings = (
+    #             torch.stack(y_rec_embeddings, dim=1)
+    #             .transpose(-1, -2)
+    #             .flatten(start_dim=1, end_dim=2)
+    #         )
+
+    #     y_d_rs = self.wd(y_embeddings)
+    #     y_d_gs = self.wd(y_rec_embeddings)
+
+    #     y_df_hat_r, y_df_hat_g = y_d_rs, y_d_gs
+
+    #     r_loss = torch.mean((1 - y_df_hat_r) ** 2)
+    #     g_loss = torch.mean((y_df_hat_g) ** 2)
+
+    #     loss_disc_f = r_loss + g_loss
+
+    #     return loss_disc_f.mean()
 
     def discriminator(self, wav, y_rec):
         """
-        Calculates the discriminator loss between original and reconstructed audio waveforms.
-        This method extracts embeddings from both the original and reconstructed waveforms
-        using a WavLM model, processes them through the waveform discriminator, and computes
-        the adversarial loss that helps distinguish between real and generated samples.
-        Args:
-            wav (Tensor): The original audio waveform (ground truth).
-            y_rec (Tensor): The reconstructed/generated audio waveform.
-        Returns:
-            Tensor: The mean discriminator loss, combining the real sample loss (r_loss)
-                    and generated sample loss (g_loss).
+        Discriminator loss calculation based on WavLM embeddings.
+        This method computes the discriminator loss for an adversarial audio model by comparing
+        original and reconstructed audio using WavLM embeddings. The discriminator aims to
+        classify original audio as real (1) and reconstructed audio as fake (0).
+        Parameters
+        ----------
+        wav : torch.Tensor
+            Original audio waveform tensor of shape [batch_size, 1, time]
+        y_rec : torch.Tensor
+            Reconstructed/generated audio waveform tensor of shape [batch_size, 1, time]
+        Returns
+        -------
+        torch.Tensor
+            Scalar tensor containing the discriminator loss (mean of real and fake losses)
+            converted to float32 precision.
+        Notes
+        -----
+        The method processes both inputs through the following steps:
+        1. Squeezes input dimensions
+        2. Applies Whisper's pad_or_trim and log_mel_spectrogram processing
+        3. Extracts WavLM embeddings for both signals
+        4. Feeds embeddings through the discriminator model
+        5. Computes the adversarial loss, encouraging the discriminator to predict
+           real samples as 1 and generated samples as 0
         """
+        wav = wav.squeeze(1)
+        y_rec = y_rec.squeeze(1)
+
+        wav = whisper.pad_or_trim(wav)
+        wav = whisper.log_mel_spectrogram(wav)
+
+        y_rec = whisper.pad_or_trim(y_rec)
+        y_rec = whisper.log_mel_spectrogram(y_rec)
+
         with torch.no_grad():
-            wav_16 = self.resample(wav)
-            wav_embeddings = self.wavlm(
-                input_values=wav_16, output_hidden_states=True
+            wav_embeddings = self.wavlm.encoder(
+                wav.to(torch.bfloat16), output_hidden_states=True
             ).hidden_states
-            y_rec_16 = self.resample(y_rec)
-            y_rec_embeddings = self.wavlm(
-                input_values=y_rec_16, output_hidden_states=True
+            y_rec_embeddings = self.wavlm.encoder(
+                y_rec.to(torch.bfloat16), output_hidden_states=True
             ).hidden_states
 
             y_embeddings = (
@@ -397,8 +702,8 @@ class WavLMLoss(torch.nn.Module):
                 .flatten(start_dim=1, end_dim=2)
             )
 
-        y_d_rs = self.wd(y_embeddings)
-        y_d_gs = self.wd(y_rec_embeddings)
+        y_d_rs = self.wd(y_embeddings.to(torch.float32))
+        y_d_gs = self.wd(y_rec_embeddings.to(torch.float32))
 
         y_df_hat_r, y_df_hat_g = y_d_rs, y_d_gs
 
@@ -407,28 +712,48 @@ class WavLMLoss(torch.nn.Module):
 
         loss_disc_f = r_loss + g_loss
 
-        return loss_disc_f.mean()
+        return loss_disc_f.mean().to(torch.float32)
+
+    # def discriminator_forward(self, wav):
+    #     """
+    #     Forward pass through the discriminator using WavLM embeddings.
+    #     This method processes an input waveform through the WavLM model to extract
+    #     embeddings, which are then passed through the discriminator. The gradient
+    #     calculation is disabled during this process.
+    #     Args:
+    #         wav (torch.Tensor): The input waveform tensor.
+    #     Returns:
+    #         torch.Tensor: The discriminator's output predictions based on WavLM embeddings.
+    #     """
+    #     with torch.no_grad():
+    #         wav_16 = self.resample(wav)
+    #         wav_embeddings = self.wavlm(
+    #             input_values=wav_16, output_hidden_states=True
+    #         ).hidden_states
+    #         y_embeddings = (
+    #             torch.stack(wav_embeddings, dim=1).transpose(-1, -2).flatten(start_dim=1, end_dim=2)
+    #         )
+
+    #     y_d_rs = self.wd(y_embeddings)
+
+    #     return y_d_rs
 
     def discriminator_forward(self, wav):
-        """
-        Forward pass through the discriminator using WavLM embeddings.
-        This method processes an input waveform through the WavLM model to extract
-        embeddings, which are then passed through the discriminator. The gradient
-        calculation is disabled during this process.
-        Args:
-            wav (torch.Tensor): The input waveform tensor.
-        Returns:
-            torch.Tensor: The discriminator's output predictions based on WavLM embeddings.
-        """
+        # Squeeze the channel dimension if it's unnecessary
+        wav = wav.squeeze(1)  # Adjust this line if the channel dimension is not at dim=1
+
         with torch.no_grad():
             wav_16 = self.resample(wav)
-            wav_embeddings = self.wavlm(
-                input_values=wav_16, output_hidden_states=True
+            wav_16 = whisper.pad_or_trim(wav_16)
+            wav_16 = whisper.log_mel_spectrogram(wav_16)
+
+            wav_embeddings = self.wavlm.encoder(
+                wav_16.to(torch.bfloat16), output_hidden_states=True
             ).hidden_states
             y_embeddings = (
                 torch.stack(wav_embeddings, dim=1).transpose(-1, -2).flatten(start_dim=1, end_dim=2)
             )
 
-        y_d_rs = self.wd(y_embeddings)
+        y_d_rs = self.wd(y_embeddings.to(torch.float32))
 
         return y_d_rs
