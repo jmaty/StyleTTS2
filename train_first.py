@@ -224,7 +224,6 @@ def main():
     stft_loss = MultiResolutionSTFTLoss().to(device)
     gl = GeneratorLoss(model.mpd, model.msd).to(device)
     dl = DiscriminatorLoss(model.mpd, model.msd).to(device)
-    # wl = WavLMLoss(model_params.slm.model, model.wd, sr, model_params.slm.sr).to(device)
     wl = create_slm_loss(model_params.slm, model.wd, sr).to(device)
 
     # Create test audio dir under log/eval dir

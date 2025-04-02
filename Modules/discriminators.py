@@ -188,10 +188,10 @@ class MultiPeriodDiscriminator(torch.nn.Module):
         return y_d_rs, y_d_gs, fmap_rs, fmap_gs
 
 
-class WavLMDiscriminator(nn.Module):
+class WavDiscriminator(nn.Module):
     """
-    WavLM-based discriminator module for audio processing.
-    This discriminator takes WavLM embeddings as input and processes them through
+    Wav-based discriminator module for audio processing.
+    This discriminator takes SLM embeddings (WavLM, Whisper, ...) as input and processes them through
     a series of convolutional layers to determine if a given audio sample is real or generated.
     Args:
         slm_hidden (int, optional): Hidden dimension size of the WavLM model. Defaults to 768.

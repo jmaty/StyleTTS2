@@ -23,7 +23,7 @@ from Modules.diffusion.sampler import KDiffusion, LogNormalDistribution
 from Modules.discriminators import (
     MultiPeriodDiscriminator,
     MultiResSpecDiscriminator,
-    WavLMDiscriminator,
+    WavDiscriminator,
 )
 from Modules.hifigan import Decoder as HifiDecoder
 from Modules.istftnet import Decoder as ISTFTDecoder
@@ -861,7 +861,7 @@ def build_model(args, text_aligner, pitch_extractor, bert):
         mpd=MultiPeriodDiscriminator(),
         msd=MultiResSpecDiscriminator(),
         # slm discriminator head
-        wd=WavLMDiscriminator(args.slm.hidden, args.slm.nlayers, args.slm.initial_channel),
+        wd=WavDiscriminator(args.slm.hidden, args.slm.nlayers, args.slm.initial_channel),
     )
 
     return nets
