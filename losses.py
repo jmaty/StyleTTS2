@@ -341,7 +341,7 @@ class WavLMLoss(torch.nn.Module):
 
         # Load the full model and keep only the encoder
         full_model = WhisperEncoderOnly.from_pretrained(
-            "openai/whisper-large-v2",
+            "openai/whisper-large-v3",
             # config=config,
             torch_dtype=torch.bfloat16,
         )
@@ -424,7 +424,7 @@ class WavLMLoss(torch.nn.Module):
             y_rec = y_rec.squeeze(1)
 
             y_rec = whisper.pad_or_trim(y_rec)
-            y_rec = whisper.log_mel_spectrogram(y_rec)
+            y_rec = whisper.log_mel_spectrogram(y_rec, n_mels=128)
 
             with torch.no_grad():
                 y_rec_embeddings = self.wavlm.encoder(
@@ -445,10 +445,10 @@ class WavLMLoss(torch.nn.Module):
             y_rec = y_rec.squeeze(1)
 
             wav = whisper.pad_or_trim(wav)
-            wav = whisper.log_mel_spectrogram(wav)
+            wav = whisper.log_mel_spectrogram(wav, n_mels=128)
 
             y_rec = whisper.pad_or_trim(y_rec)
-            y_rec = whisper.log_mel_spectrogram(y_rec)
+            y_rec = whisper.log_mel_spectrogram(y_rec, n_mels=128)
 
             with torch.no_grad():
                 wav_embeddings = self.wavlm.encoder(
@@ -489,7 +489,7 @@ class WavLMLoss(torch.nn.Module):
 
                 wav_16 = self.resample(wav)
                 wav_16 = whisper.pad_or_trim(wav_16)
-                wav_16 = whisper.log_mel_spectrogram(wav_16)
+                wav_16 = whisper.log_mel_spectrogram(wav_16, n_mels=128)
 
                 wav_embeddings = self.wavlm.encoder(
                     wav_16.to(torch.bfloat16), output_hidden_states=True
@@ -508,10 +508,10 @@ class WavLMLoss(torch.nn.Module):
         y_rec = y_rec.squeeze(1)
 
         wav = whisper.pad_or_trim(wav)
-        wav = whisper.log_mel_spectrogram(wav)
+        wav = whisper.log_mel_spectrogram(wav, n_mels=128)
 
         y_rec = whisper.pad_or_trim(y_rec)
-        y_rec = whisper.log_mel_spectrogram(y_rec)
+        y_rec = whisper.log_mel_spectrogram(y_rec, n_mels=128)
 
         with torch.no_grad():
             wav_embeddings = self.wavlm.encoder(
@@ -573,7 +573,7 @@ class WavLMLoss(torch.nn.Module):
         y_rec = y_rec.squeeze(1)
 
         y_rec = whisper.pad_or_trim(y_rec)
-        y_rec = whisper.log_mel_spectrogram(y_rec)
+        y_rec = whisper.log_mel_spectrogram(y_rec, n_mels=128)
 
         with torch.no_grad():
             y_rec_embeddings = self.wavlm.encoder(
@@ -662,10 +662,10 @@ class WavLMLoss(torch.nn.Module):
         y_rec = y_rec.squeeze(1)
 
         wav = whisper.pad_or_trim(wav)
-        wav = whisper.log_mel_spectrogram(wav)
+        wav = whisper.log_mel_spectrogram(wav, n_mels=128)
 
         y_rec = whisper.pad_or_trim(y_rec)
-        y_rec = whisper.log_mel_spectrogram(y_rec)
+        y_rec = whisper.log_mel_spectrogram(y_rec, n_mels=128)
 
         with torch.no_grad():
             wav_embeddings = self.wavlm.encoder(
@@ -727,7 +727,7 @@ class WavLMLoss(torch.nn.Module):
         with torch.no_grad():
             wav_16 = self.resample(wav)
             wav_16 = whisper.pad_or_trim(wav_16)
-            wav_16 = whisper.log_mel_spectrogram(wav_16)
+            wav_16 = whisper.log_mel_spectrogram(wav_16, n_mels=128)
 
             wav_embeddings = self.wavlm.encoder(
                 wav_16.to(torch.bfloat16), output_hidden_states=True
