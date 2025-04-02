@@ -18,7 +18,7 @@ from monotonic_align import mask_from_lens
 from munch import Munch
 from torch.utils.tensorboard import SummaryWriter
 
-from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, WavLMLoss
+from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, create_slm_loss
 from meldataset import build_dataloader
 from models import build_model, load_ASR_models, load_checkpoint, load_F0_models, save_checkpoint
 from optimizers import build_optimizer
@@ -224,7 +224,8 @@ def main():
     stft_loss = MultiResolutionSTFTLoss().to(device)
     gl = GeneratorLoss(model.mpd, model.msd).to(device)
     dl = DiscriminatorLoss(model.mpd, model.msd).to(device)
-    wl = WavLMLoss(model_params.slm.model, model.wd, sr, model_params.slm.sr).to(device)
+    # wl = WavLMLoss(model_params.slm.model, model.wd, sr, model_params.slm.sr).to(device)
+    wl = create_slm_loss(model_params.slm, model.wd, sr).to(device)
 
     # Create test audio dir under log/eval dir
     if (save_val_audio or save_test_audio) and not os.path.exists(test_audio_dir):
