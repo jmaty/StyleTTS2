@@ -14,4 +14,7 @@ einops-exts
 tqdm
 typing
 typing-extensions
+xlstm
+nvidia-ml-py3
 git+https://github.com/resemble-ai/monotonic_align.git
+git+https://github.com/openai/whisper.git
