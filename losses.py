@@ -333,43 +333,25 @@ class WavLMLoss(torch.nn.Module):
         """
         super().__init__()
 
-        # Load the Whisper large-v2 model encoder-only configuration and
-        # set it to be non-decoder
-        config = WhisperConfig.from_pretrained("Respair/Whisper_Large_v2_Encoder_Block")
-        config.is_encoder_decoder = False
-        config.use_cache = False
+        # # Load the Whisper large-v2 model encoder-only configuration and
+        # # set it to be non-decoder
+        # config = WhisperConfig.from_pretrained("Respair/Whisper_Large_v2_Encoder_Block")
+        # config.is_encoder_decoder = False
+        # config.use_cache = False
 
         # Load the full model and keep only the encoder
         full_model = WhisperEncoderOnly.from_pretrained(
             "openai/whisper-large-v2",
-            config=config,
+            # config=config,
             torch_dtype=torch.bfloat16,
-            # "openai/whisper-large-v2", config=config, device_map="cuda", torch_dtype=torch.bfloat16
         )
+        full_model.config.is_encoder_decoder = False
+        full_model.config.use_cache = False
         # Initialize the encoder-only model with the same configuration
-        model = WhisperEncoderOnly(config)
+        model = WhisperEncoderOnly(full_model.config)
         # Load encoder weights from the full model
         model.encoder.load_state_dict(full_model.encoder.state_dict())
         del full_model  # Free up memory
-
-        # # from transformers import WhisperForConditionalGeneration
-        # # Load the full Whisper model
-        # # full_model = WhisperForConditionalGeneration.from_pretrained("openai/whisper-large-v2")
-        # full_model = WhisperEncoderOnly.from_pretrained(
-        #     "openai/whisper-large-v2", torch_dtype=torch.bfloat16
-        # )
-
-        # config = full_model.config
-        # config.is_encoder_decoder = False
-        # config.use_cache = False
-        # # Initialize the encoder-only model with the same configuration
-        # # model = WhisperEncoderOnly(full_model.config)
-        # model = WhisperEncoderOnly(config)
-        # # Load encoder weights from the full model
-        # model.encoder.load_state_dict(full_model.encoder.state_dict())
-        # # Free up memory
-        # del full_model
-        # print(model.config)
 
         # self.wavlm = AutoModel.from_pretrained(model) # orig WavLM
         self.wavlm = model.to(torch.bfloat16)
