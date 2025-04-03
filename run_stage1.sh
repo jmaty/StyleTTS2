@@ -15,6 +15,7 @@ INTB=Train_first.ipynb
 # QSUB ARGUMENTS
 MEM=128gb
 LSCRATCH=20gb
+SCRATCH_TYPE="scratch-local"
 NCPUS=8
 NGPUS=2
 
@@ -56,6 +57,7 @@ elif [[ $SPEC == "gpu4" ]]; then
      # Any cluster with GPU memory > 80gb (bee)
      QUEUE="-q gpu"
      CLUSTER=":gpu_mem=80000mb"
+     SCRATCH_TYPE="scratch_ssd"
 else
      printf "Unsupported cluster/queue\n" >2&
      exit 1
@@ -65,7 +67,7 @@ fi
 [[ $HOURS -gt 24 ]] && [[ $SPEC == gpu? ]] && QUEUE="${QUEUE}_long"
 
 # Select argument
-SELECT="-l select=1:ncpus=$NCPUS:mem=$MEM:scratch_local=$LSCRATCH:ngpus=$NGPUS$CLUSTER"
+SELECT="-l select=1:ncpus=$NCPUS:mem=$MEM:$SCRATCH_TYPE=$LSCRATCH:ngpus=$NGPUS$CLUSTER"
 # Walltime argument
 WALLTIME="-l walltime=$HOURS:00:00"
 
@@ -75,7 +77,7 @@ EXP="$(basename $EXPDIR)_stage1"
 # # Timestep to differentiate among runs with the same run name
 TIMESTEP=$(date +"%y%m%d-%H%M%S")
 
-SINGULARITY=/storage/plzen4-ntis/projects/singularity/papermill_24.12-latest.sh
+SINGULARITY=/storage/plzen4-ntis/projects/singularity/papermill_24.12-r6.sh
 
 # Check that config file exists
 CFG=$EXPDIR/config1.yml
