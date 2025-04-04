@@ -425,7 +425,7 @@ def main():
                 # Zero all gradients
                 optimizer.zero_grad()
 
-            iters = iters + 1
+            iters += 1
 
             if (i + 1) % log_interval == 0 and accelerator.is_main_process:
                 mel_loss = running_loss / log_interval

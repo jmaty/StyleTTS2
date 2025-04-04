@@ -63,8 +63,8 @@ else
      exit 1
 fi
 
-# Change GPU queue to gpu_long when number of hours is >24
-[[ $HOURS -gt 24 ]] && [[ $SPEC == gpu? ]] && QUEUE="${QUEUE}_long"
+# Change GPU queue to gpu_long when number of hours is >48
+[[ $HOURS -gt 48 ]] && [[ $SPEC == gpu? ]] && QUEUE="${QUEUE}_long"
 
 # Select argument
 SELECT="-l select=1:ncpus=$NCPUS:mem=$MEM:$SCRATCH_TYPE=$LSCRATCH:ngpus=$NGPUS$CLUSTER"
