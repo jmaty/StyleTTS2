@@ -22,7 +22,7 @@ from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 
 from text_utils import TextCleaner
-from losses import GeneratorLoss, WavLMLoss, DiscriminatorLoss, MultiResolutionSTFTLoss
+from losses import GeneratorLoss, create_slm_loss, DiscriminatorLoss, MultiResolutionSTFTLoss
 from meldataset import build_dataloader
 from models import load_ASR_models, load_F0_models, build_model, load_checkpoint, save_checkpoint
 from Modules.diffusion.sampler import ADPM2Sampler, DiffusionSampler, KarrasSchedule
@@ -204,7 +204,7 @@ def main():
         if config.get("first_stage_path", "") != "":
             first_stage_path = osp.join(log_dir, config.get("first_stage_path", "first_stage.pth"))
             print(f"Loading the first stage model at {first_stage_path} ...")
-            model, _, start_epoch, iters = load_checkpoint(
+            model, _, start_epoch, _ = load_checkpoint(
                 model,
                 None,
                 first_stage_path,
@@ -232,7 +232,7 @@ def main():
 
     gl = GeneratorLoss(model.mpd, model.msd).to(device)
     dl = DiscriminatorLoss(model.mpd, model.msd).to(device)
-    wl = WavLMLoss(model_params.slm.model, model.wd, sr, model_params.slm.sr).to(device)
+    wl = create_slm_loss(model_params.slm, model.wd, sr).to(device)
 
     gl = MyDataParallel(gl)
     dl = MyDataParallel(dl)
@@ -295,7 +295,7 @@ def main():
     n_down = model.text_aligner.n_down
 
     best_loss = float("inf")  # best test loss
-    iters = 0  # !!! Should it be resetting?
+    # iters = 0  # !!! Should it be resetting?
 
     # criterion = nn.L1Loss() # F0 loss (regression)
     torch.cuda.empty_cache()
