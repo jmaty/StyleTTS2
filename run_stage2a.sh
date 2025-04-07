@@ -14,6 +14,7 @@ INTB=Train_second.ipynb
 # QSUB ARGUMENTS
 MEM=128gb
 LSCRATCH=20gb
+SCRATCH_TYPE="scratch-local"
 NCPUS=8
 NGPUS=2
 
@@ -24,7 +25,6 @@ fi
 
 # Input experimental directory
 EXPDIR=$1
-CFG=$EXPDIR/config2a.yml
 
 if [[ "$#" -gt 1 ]]; then
      # specification to run on (iti, gdx, gpu<3-4>)
@@ -68,6 +68,7 @@ elif [[ $SPEC == "gpu4" ]]; then
      # Any cluster with GPU memory > 80gb (bee)
      QUEUE="-q gpu"
      CLUSTER=":gpu_mem=80000mb"
+     SCRATCH_TYPE="scratch_ssd"
 else
      printf "Unsupported cluster/queue" >&2
      exit 1
@@ -77,7 +78,7 @@ fi
 [[ $HOURS -gt 48 ]] && [[ $SPEC == gpu? ]] && QUEUE="${QUEUE}_long"
 
 # Select argument
-SELECT="-l select=1:ncpus=$NCPUS:mem=$MEM:scratch_local=$LSCRATCH:ngpus=$NGPUS$CLUSTER"
+SELECT="-l select=1:ncpus=$NCPUS:mem=$MEM:$SCRATCH_TYPE=$LSCRATCH:ngpus=$NGPUS$CLUSTER"
 # Walltime argument
 WALLTIME="-l walltime=$HOURS:00:00"
 
@@ -87,9 +88,10 @@ EXP="$(basename $EXPDIR)_stage2a"
 # Timestep to differentiate among runs with the same run name
 TIMESTEP=$(date +"%y%m%d-%H%M%S")
 
-SINGULARITY=/storage/plzen4-ntis/projects/singularity/papermill_24.12-latest.sh
+SINGULARITY=/storage/plzen4-ntis/projects/singularity/papermill_24.12-r6.sh
 
 # Check that config file exists
+CFG=$EXPDIR/config2a.yml
 if [[ ! -e $CFG ]]; then
      printf "Config file $CFG does not exists!" >&2
      exit 1
