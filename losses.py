@@ -312,9 +312,7 @@ class SLMLoss(torch.nn.Module, ABC):
         self.resample = torchaudio.transforms.Resample(model_sr, slm_sr)
 
     @abstractmethod
-    def forward(
-        self, wav, y_rec, generator=False, discriminator=False, discriminator_forward=False
-    ):
+    def forward(self, wav, y_rec):
         """Forward pass for processing audio through the speech language model."""
         pass
 
@@ -403,9 +401,7 @@ class WhisperLoss(SLMLoss):
         self.n_mels = model.config.num_mel_bins
         self.slm = model.to(torch.bfloat16)
 
-    def forward(
-        self, wav, y_rec, generator=False, discriminator=False, discriminator_forward=False
-    ):
+    def forward(self, wav, y_rec):
         """
         Computes various losses for training speech models using embeddings from whisper model.
         This method computes different losses depending on the mode specified:
@@ -434,90 +430,6 @@ class WhisperLoss(SLMLoss):
             - Discriminator outputs when discriminator_forward=True
             - Feature matching loss by default
         """
-        if generator:
-            y_rec = y_rec.squeeze(1)
-
-            y_rec = whisper.pad_or_trim(y_rec)
-            y_rec = whisper.log_mel_spectrogram(y_rec, n_mels=self.n_mels)
-
-            with torch.no_grad():
-                y_rec_embeddings = self.slm.encoder(
-                    y_rec.to(torch.bfloat16), output_hidden_states=True
-                ).hidden_states
-            y_rec_embeddings = (
-                torch.stack(y_rec_embeddings, dim=1)
-                .transpose(-1, -2)
-                .flatten(start_dim=1, end_dim=2)
-            )
-            y_df_hat_g = self.wd(y_rec_embeddings.to(torch.float32))
-            loss_gen = torch.mean((1 - y_df_hat_g) ** 2)
-
-            return loss_gen.to(torch.float32)
-
-        if discriminator:
-            wav = wav.squeeze(1)
-            y_rec = y_rec.squeeze(1)
-
-            wav = whisper.pad_or_trim(wav)
-            wav = whisper.log_mel_spectrogram(wav, n_mels=self.n_mels)
-
-            y_rec = whisper.pad_or_trim(y_rec)
-            y_rec = whisper.log_mel_spectrogram(y_rec, n_mels=self.n_mels)
-
-            with torch.no_grad():
-                wav_embeddings = self.slm.encoder(
-                    wav.to(torch.bfloat16), output_hidden_states=True
-                ).hidden_states
-                y_rec_embeddings = self.slm.encoder(
-                    y_rec.to(torch.bfloat16), output_hidden_states=True
-                ).hidden_states
-
-                y_embeddings = (
-                    torch.stack(wav_embeddings, dim=1)
-                    .transpose(-1, -2)
-                    .flatten(start_dim=1, end_dim=2)
-                )
-                y_rec_embeddings = (
-                    torch.stack(y_rec_embeddings, dim=1)
-                    .transpose(-1, -2)
-                    .flatten(start_dim=1, end_dim=2)
-                )
-
-            y_d_rs = self.wd(y_embeddings.to(torch.float32))
-            y_d_gs = self.wd(y_rec_embeddings.to(torch.float32))
-
-            y_df_hat_r, y_df_hat_g = y_d_rs, y_d_gs
-
-            r_loss = torch.mean((1 - y_df_hat_r) ** 2)
-            g_loss = torch.mean((y_df_hat_g) ** 2)
-
-            loss_disc_f = r_loss + g_loss
-
-            return loss_disc_f.mean().to(torch.float32)
-
-        if discriminator_forward:
-            # Squeeze the channel dimension if it's unnecessary
-            wav = wav.squeeze(1)  # Adjust this line if the channel dimension is not at dim=1
-
-            with torch.no_grad():
-
-                wav_16 = self.resample(wav)
-                wav_16 = whisper.pad_or_trim(wav_16)
-                wav_16 = whisper.log_mel_spectrogram(wav_16, n_mels=self.n_mels)
-
-                wav_embeddings = self.slm.encoder(
-                    wav_16.to(torch.bfloat16), output_hidden_states=True
-                ).hidden_states
-                y_embeddings = (
-                    torch.stack(wav_embeddings, dim=1)
-                    .transpose(-1, -2)
-                    .flatten(start_dim=1, end_dim=2)
-                )
-
-            y_d_rs = self.wd(y_embeddings.to(torch.float32))
-
-            return y_d_rs
-
         wav = wav.squeeze(1)
         y_rec = y_rec.squeeze(1)
 
@@ -702,9 +614,7 @@ class WavLMLoss(SLMLoss):
         print(f"Using WavLM for SLM loss: {model_name}")
         self.slm = AutoModel.from_pretrained(model_name)
 
-    def forward(
-        self, wav, y_rec, generator=False, discriminator=False, discriminator_forward=False
-    ):
+    def forward(self, wav, y_rec):
         """
         Calculates a feature matching loss between the original and reconstructed waveforms.
         The method resamples both waveforms to 16kHz and computes embeddings using a
