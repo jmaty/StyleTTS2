@@ -290,7 +290,10 @@ def main():
         )
         # # advance start epoch or we'd re-train and rewrite the last epoch file
         # start_epoch += 1
-        print(f"\nmodel data loaded, starting training epoch {start_epoch:05d}\n")
+        print(f'Loading pre-trained model: {config["pretrained_model"]}')
+        print(f"Starting epoch:      {start_epoch}")
+        print(f"Starting iterations: {iters}")
+        print()
 
     n_down = model.text_aligner.n_down
 
@@ -341,6 +344,8 @@ def main():
     print(f" | > Total epochs: {epochs}")
     print(f" | > Iterations: {iters}")
     print(f" | > Sigma data: {inp_sigma_data}")
+
+    # === Start of training loop ==============================================
 
     # Train model
     for epoch in range(start_epoch, epochs):
@@ -413,14 +418,12 @@ def main():
 
             d_en = model.bert_encoder(bert_dur).transpose(-1, -2)
 
-            # denoiser training
+            # Denoiser training
             if epoch >= diff_epoch:
                 num_steps = np.random.randint(3, 5)
 
                 if model_params.diffusion.dist.estimate_sigma_data:
                     # Batch-wise std estimation
-                    # model.diffusion.diffusion.sigma_data = s_trg.std(axis=-1).mean().item()
-                    # running_std.append(model.diffusion.sigma_data)
                     model.diffusion.module.diffusion.sigma_data = s_trg.std(axis=-1).mean().item()
                     running_std.append(model.diffusion.module.diffusion.sigma_data)
 
@@ -765,6 +768,8 @@ def main():
                     )
                 print("Time elapsed:", time.time() - start_time)
 
+        # === Start of validation part ==============================================
+
         # Validation
         loss_test, loss_align, loss_f = 0, 0, 0
         # Set all models to eval mode
@@ -953,7 +958,7 @@ def main():
                     if idx + 1 >= n_val_audios:
                         break
         else:
-            # generating sampled speech from text directly
+            # Generating sampled speech from text directly
             with torch.no_grad():
                 # compute reference styles
                 ref_s = None
@@ -1059,6 +1064,7 @@ def main():
                 #     config["model_params"]["diffusion"]["dist"]["sigma_data"] = float(np.mean(running_std))
                 #     config["model_params"]["diffusion"]["dist"]["sigma_data"] = sigma_data
 
+                # Save config file updated with estimated sigma
                 cfg_path = osp.join(log_dir, f"{cfg_name}.processed{cfg_ext}")
                 with open(cfg_path, "w", encoding="utf-8") as outfile:
                     yaml.dump(config, outfile, default_flow_style=False)
