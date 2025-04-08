@@ -22,7 +22,7 @@ from monotonic_align import mask_from_lens
 from munch import Munch
 from torch.utils.tensorboard import SummaryWriter
 
-from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, WavLMLoss
+from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, create_slm_loss
 from meldataset import build_dataloader
 from models import build_model, load_ASR_models, load_checkpoint, load_F0_models, save_checkpoint
 from Modules.diffusion.sampler import ADPM2Sampler, DiffusionSampler, KarrasSchedule
@@ -230,7 +230,7 @@ def main():
 
     gl = GeneratorLoss(model.mpd, model.msd).to(device)
     dl = DiscriminatorLoss(model.mpd, model.msd).to(device)
-    wl = WavLMLoss(model_params.slm.model, model.wd, sr, model_params.slm.sr).to(device)
+    wl = create_slm_loss(model_params.slm, model.wd, sr).to(device)
 
     gl = MyDataParallel(gl)
     dl = MyDataParallel(dl)
@@ -286,11 +286,15 @@ def main():
             config["pretrained_model"],
             load_only_params=config.get("load_only_params", True),
         )
+        print(f'Loading pre-trained model: {config["pretrained_model"]}')
+        print(f"Starting epoch:      {start_epoch}")
+        print(f"Starting iterations: {iters}")
+        print()
 
     n_down = model.text_aligner.n_down
 
     best_loss = float("inf")  # best test loss
-    iters = 0
+    # iters = 0  # !!! Should it be resetting?
 
     torch.cuda.empty_cache()  # clear cache
 
@@ -338,6 +342,7 @@ def main():
     print(f" | > Starting epoch: {start_epoch}")
     print(f" | > Total epochs: {epochs}")
     print(f" | > Iterations: {iters}")
+    print(f" | > Sigma data: {inp_sigma_data}")
 
     # === Start of training loop ==============================================
 
@@ -998,6 +1003,7 @@ def main():
 
         # --- Start of saving part --------------------------------------------
 
+        # Save progress
         if epoch % saving_epoch == 0:
             curr_loss = loss_test.item() / iters_test
             if curr_loss < best_loss:
@@ -1024,6 +1030,7 @@ def main():
                     f'Estimated sigma: {config["model_params"]["diffusion"]["dist"]["sigma_data"]}'
                 )
 
+                # Save config file updated with estimated sigma
                 cfg_path = osp.join(log_dir, f"{cfg_name}.processed{cfg_ext}")
                 with open(cfg_path, "w", encoding="utf-8") as outfile:
                     yaml.dump(config, outfile, default_flow_style=False)
