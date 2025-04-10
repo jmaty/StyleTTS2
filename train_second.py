@@ -921,7 +921,7 @@ def main():
                     # phoneme-audio alignment
                     wav = pts.reconstruct(mel_gt, en_gt)
 
-                    # Write and save val audio (removing artificial silence)
+                    # Write and save val audio
                     writer.add_audio(f"eval/y{idx}", wav, epoch, sample_rate=sr)
                     if save_val_audio and epoch % saving_epoch == 0:
                         outfile = f"epoch_2nd_{epoch:0>5}_val-rec-{idx}.wav"
@@ -933,7 +933,7 @@ def main():
                     # and extracted and predicted phoneme-audio alignment encoding
                     wav = pts.reconstruct(mel_gt, en_gt, p_en)
 
-                    # Write and save val audio (removing artificial silence)
+                    # Write and save val audio
                     writer.add_audio(f"pred/y{idx}", wav, epoch, sample_rate=sr)
                     if save_val_audio and epoch % saving_epoch == 0:
                         outfile = f"epoch_2nd_{epoch:0>5}_val-pred-{idx}.wav"
@@ -974,69 +974,6 @@ def main():
                     if save_val_audio and epoch % saving_epoch == 0:
                         outfile = f"epoch_2nd_{epoch:0>5}_val-pred-{idx}.wav"
                         pts.save_wav(wav, os.path.join(test_audio_dir, outfile))
-
-                    # if multispeaker:
-                    #     s_pred = sampler(
-                    #         noise=torch.randn((1, 256)).unsqueeze(1).to(texts.device),
-                    #         embedding=bert_dur[idx].unsqueeze(0),
-                    #         embedding_scale=1,
-                    #         # reference from the same speaker as the embedding
-                    #         features=ref_s[idx].unsqueeze(0),
-                    #         num_steps=5,
-                    #     ).squeeze(1)
-                    # else:
-                    #     s_pred = sampler(
-                    #         noise=torch.randn((1, 256)).unsqueeze(1).to(texts.device),
-                    #         embedding=bert_dur[idx].unsqueeze(0),
-                    #         embedding_scale=1,
-                    #         num_steps=5,
-                    #     ).squeeze(1)
-
-                    # s = s_pred[:, 128:]
-                    # ref = s_pred[:, :128]
-
-                    # d = model.predictor.text_encoder(
-                    #     d_en[idx, :, : input_lengths[idx]].unsqueeze(0),
-                    #     s,
-                    #     input_lengths[idx, ...].unsqueeze(0),
-                    #     text_mask[idx, : input_lengths[idx]].unsqueeze(0),
-                    # )
-
-                    # x = model.predictor.lstm(d)
-                    # x_mod = model.predictor.prepare_projection(x)  # 640 -> 512
-                    # duration = model.predictor.duration_proj(x_mod)
-
-                    # duration = torch.sigmoid(duration).sum(axis=-1)
-                    # pred_dur = torch.round(duration.squeeze()).clamp(min=1)
-
-                    # pred_dur[-1] += 5
-
-                    # pred_aln_trg = torch.zeros(input_lengths[idx], int(pred_dur.sum().data))
-                    # c_frame = 0
-                    # for i in range(pred_aln_trg.size(0)):
-                    #     pred_aln_trg[i, c_frame : c_frame + int(pred_dur[i].data)] = 1
-                    #     c_frame += int(pred_dur[i].data)
-
-                    # # encode prosody
-                    # en = d.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0).to(texts.device)
-                    # f0_pred, n_pred = model.predictor.F0Ntrain(en, s)
-                    # out = model.decoder(
-                    #     t_en[idx, :, : input_lengths[idx]].unsqueeze(0)
-                    #     @ pred_aln_trg.unsqueeze(0).to(texts.device),
-                    #     f0_pred,
-                    #     n_pred,
-                    #     ref.squeeze().unsqueeze(0),
-                    # )
-
-                    # # Write and save val audio (removing artificial silence)
-                    # wav = out.cpu().numpy().squeeze()[silence_beg:-silence_end]
-                    # writer.add_audio("pred/y" + str(idx), wav, epoch, sample_rate=sr)
-                    # if save_val_audio and epoch % saving_epoch == 0:
-                    #     outfile_template = f"epoch_2nd_{epoch:0>5}"
-                    #     out_file = f"{outfile_template}_val-{idx}.wav"
-                    #     scipy.io.wavfile.write(
-                    #         filename=os.path.join(test_audio_dir, out_file), rate=sr, data=wav
-                    #     )
 
         # Save progress
         if epoch % saving_epoch == 0:
