@@ -6,7 +6,6 @@ import random
 import time
 import warnings
 
-import scipy
 import numpy as np
 import nvidia_smi
 import torch
@@ -21,6 +20,7 @@ from torch.utils.tensorboard import SummaryWriter
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, create_slm_loss
 from meldataset import build_dataloader
 from models import build_model, load_ASR_models, load_checkpoint, load_F0_models, save_checkpoint
+from Modules.pts import PTS
 from optimizers import build_optimizer
 from text_utils import TextCleaner
 from utils import (
@@ -230,10 +230,23 @@ def main():
     if (save_val_audio or save_test_audio) and not os.path.exists(test_audio_dir):
         os.makedirs(test_audio_dir, exist_ok=True)
 
+    # Create phoneme-to-speech object for synthesizing test sentences
+    # - use global noise for speed
+    pts = PTS(config, model, use_glob_noise=True)
+
     # Total number of steps given the batch size
     tot_num_steps = len(train_list) // batch_size
 
     best_loss = float("inf")  # best test loss
+
+    print(" > Start training cycles:")
+    print(f" | > Starting epoch:   {start_epoch}")
+    print(f" | > Total epochs:     {epochs}")
+    print(f" | > Steps per epoch:  {tot_num_steps}")
+    print(f" | > Input iterations: {iters}")
+    print()
+
+    # === Start of training loop ==============================================
 
     # Train model
     for epoch in range(start_epoch, epochs):
@@ -448,6 +461,8 @@ def main():
                 print("Time elapsed:", time.time() - start_time)
                 running_loss = 0
 
+        # === Start of validation part ==============================================
+
         # Validation
         loss_test = 0
         # Set all models to eval mode
@@ -535,45 +550,30 @@ def main():
             writer.add_figure("eval/attn", attn_image, epoch)
 
             with torch.no_grad():
-                for idx, (mel_input_length_item, wave_item) in enumerate(
-                    zip(mel_input_length, waves)
-                ):
-                    mel_length = int(mel_input_length_item.item())
-                    gt = mels[idx, :, :mel_length].unsqueeze(0)
-                    en = asr[idx, :, : mel_length // 2].unsqueeze(0)
-
-                    f0_real, _, _ = model.pitch_extractor(gt.unsqueeze(1))
-                    f0_real = f0_real.unsqueeze(0)  # JMa
-                    s = model.style_encoder(gt.unsqueeze(1))
-                    real_norm = log_norm(gt.unsqueeze(1)).squeeze(1)
-
-                    y_rec = model.decoder(en, f0_real, real_norm, s)
+                # Iterate over the defined number of validation samples
+                for idx in range(min(n_val_audios, len(mel_input_length))):
+                    mel_length = int(mel_input_length[idx].item())
+                    # Ground-truth mel spectrogram
+                    mel_gt = mels[idx, :, :mel_length].unsqueeze(0)
+                    # Ground-truth phonemes-audio alignment
+                    en_gt = asr[idx, :, : mel_length // 2].unsqueeze(0)
+                    # Reconstruct audio from ground-truth mel spectrogram and
+                    # phoneme-audio alignment
+                    wav = pts.reconstruct(mel_gt, en_gt)
 
                     # Write and save val audio
-                    wav = y_rec.cpu().numpy().squeeze()
-                    writer.add_audio("eval/y" + str(idx), wav, epoch, sample_rate=sr)
+                    writer.add_audio(f"eval/y{idx}", wav, epoch, sample_rate=sr)
                     if save_val_audio and epoch % saving_epoch == 0:
-                        outfile_template = f"epoch_1st_{epoch:0>5}"
-                        out_file = f"{outfile_template}_val-{idx}.wav"
-                        scipy.io.wavfile.write(
-                            filename=os.path.join(test_audio_dir, out_file),
-                            rate=config["preprocess_params"]["sr"],
-                            data=wav,
-                        )
-                    # Write and save ground-truth audio
+                        outfile = f"epoch_1st_{epoch:0>5}_val-rec-{idx}.wav"
+                        pts.save_wav(wav, os.path.join(test_audio_dir, outfile))
+
+                    # Save ground truth
                     if epoch == 0:
-                        wav = wave_item.squeeze()
-                        writer.add_audio("gt/y" + str(idx), wav, epoch, sample_rate=sr)
+                        wav = waves[idx].squeeze()
                         if save_val_audio:
-                            out_file = f"{outfile_template}_gt-{idx}.wav"
-                            scipy.io.wavfile.write(
-                                filename=os.path.join(test_audio_dir, out_file),
-                                rate=config["preprocess_params"]["sr"],
-                                data=wav,
-                            )
-                    # Use up to the defined number of validation samples
-                    if idx + 1 >= n_val_audios:
-                        break
+                            outfile = f"epoch_1st_{epoch:0>5}_gt-{idx}.wav"
+                            pts.save_wav(wav, os.path.join(test_audio_dir, outfile))
+                        writer.add_audio(f"gt/y{idx}", wav, epoch, sample_rate=sr)
 
             if epoch % saving_epoch == 0:
                 curr_loss = loss_test / iters_test
