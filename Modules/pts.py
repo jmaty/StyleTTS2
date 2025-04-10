@@ -1,0 +1,867 @@
+import logging
+import random as python_random
+import re
+from collections import OrderedDict
+
+import numpy as np
+import torch
+import yaml
+from munch import munchify
+from scipy.io.wavfile import write
+import librosa
+
+from models import build_model, load_ASR_models, load_F0_models
+from Modules.diffusion.sampler import ADPM2Sampler, DiffusionSampler, KarrasSchedule
+from text_utils import TextCleaner
+from utils import length_to_mask, log_norm
+from Utils.PLBERT.util import load_plbert
+from meldataset import preprocess
+
+# Setup logger
+logger = logging.getLogger(__name__)
+
+
+class PTS:
+    def __init__(
+        self,
+        config,
+        model,
+        t=0.7,
+        alpha=0.3,
+        beta=0.7,
+        diffusion_steps=10,
+        embedding_scale=1.0,
+        speech_rate=1.0,
+        use_glob_noise=False,
+        fix_noise_in_ph_string=False,
+        log_level=logging.INFO,
+    ):
+        """
+        Initialize the PTS (Phonetic Text to Speech) synthesizer.
+        This class handles the setup and configuration for text-to-speech synthesis
+        using a pre-trained StyleTTS2 model.
+        Parameters:
+            config: The configuration object or path to the configuration file
+            model: The pre-trained model or path to the model checkpoint
+            t (float, optional): The temperature parameter for synthesis. Default: 0.7
+                                 Weight for convex combination of two styles (of neighboring sentences).
+                                 t=1.0 means only the style of current sentences is used.
+                                 t=0.0 means only the style of previous sentences is used.
+                                 t=(0,1) means the style is a convex combination of both.
+            alpha (float, optional): Controls the influence of the style embedding. Default: 0.3
+                                     Parameter for timbre similarity with reference speaker.
+                                     Higher values set the style more suitable to text
+                                     but less similar to the reference speaker.
+            beta (float, optional): Controls the influence of the content embedding. Default: 0.7
+                                    Parameter for prosody (emotions).
+                                    Higher values set the style more suitable to text
+                                    but less similar to the reference speaker.
+            diffusion_steps (int, optional): Number of diffusion steps. Default: 10
+            embedding_scale (float, optional): Scaling factor for the embeddings. Default: 1.0
+            speech_rate (float, optional): Controls the rate of synthesized speech. Default: 1.0
+            use_glob_noise (bool, optional): Whether to use global noise for all synthesis operations. Default: False
+            fix_noise_in_ph_string (bool, optional): Whether to use the same noise for phonetic strings. Default: False
+            log_level (int, optional): Logging level (from logging module). Default: logging.INFO
+        Note:
+            If `use_glob_noise` is True, `fix_noise_in_ph_string` is automatically set to True.
+        """
+        self._model = None
+        self._config = None
+        self._sampler = None
+
+        self.t = t
+        self.alpha = alpha
+        self.beta = beta
+        self.diffusion_steps = diffusion_steps
+        self.embedding_scale = embedding_scale
+        self.speech_rate = speech_rate
+
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.debug("Using device: %s", self.device)
+
+        # Configure logging
+        self._setup_logging(log_level)
+        # Set up configuration
+        self.setup_config(config)
+        # Set up model
+        self.setup_model(model)
+
+        self.text_cleaner = TextCleaner(
+            self._config.data_params.symbol_dict_path, pad=self._config.data_params.pad
+        )
+
+        symbol_count = len(self.text_cleaner)
+        logger.debug("Number of symbols: %s", symbol_count)
+        assert symbol_count == 81, f"Number of symbols must be 81 but it is {symbol_count}"
+
+        # Generate global noise if specified
+        self.glob_noise = self.generate_noise() if use_glob_noise else None
+        # In case of global noise, noise within phonetic string is always fixed;
+        # otherwise, it is optional according to `fix_noise_in_ph_string`
+        self.fix_noise_in_ph_string = fix_noise_in_ph_string if not use_glob_noise else True
+        logger.debug("Using global noise: %s", use_glob_noise)
+        logger.debug("Fix noise in phonetic string: %s", fix_noise_in_ph_string)
+
+    def _setup_logging(self, log_level):
+        """Configure logging for this class"""
+        # Only add handler if not already added to avoid duplicate logs
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter(
+                "%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+            )
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+
+        logger.setLevel(log_level)
+
+    def setup_config(self, config):
+        # Determine if config is a path or a pre-loaded configuration
+        if isinstance(config, str):
+            # It's a path
+            logger.debug("Initializing PTS with config from: %s", config)
+            self.config_path = config
+            with open(config, encoding="utf-8") as file:
+                self._config = munchify(yaml.safe_load(file))
+        else:
+            # It's a pre-loaded configuration
+            logger.debug("Initializing PTS with provided configuration object")
+            self.config_path = None  # No path since config was passed directly
+            # Ensure it's a Munch object (if it's a dict, convert it)
+            self._config = (
+                config if isinstance(config, munchify({}).__class__) else munchify(config)
+            )
+
+    def setup_model(self, model):
+        # Determine if model is a path or a pre-loaded model
+        if isinstance(model, str):
+            # It's a path
+            logger.debug("Loading model from path: %s", model)
+            self._build_model()
+            self._load_model_params(model)
+        else:  # It's a pre-loaded model
+            self.model = model
+            logger.debug("Model loaded from pre-loaded object")
+        # Set up the diffusion sampler
+        self._setup_sampler()
+
+    def to_eval(self):
+        """Set all model components to evaluation mode"""
+        if self._model is None:
+            logger.warning("Cannot set to evaluation mode: Model is not initialized")
+            return
+        logger.debug("Setting model to evaluation mode")
+        _ = [self._model[key].eval() for key in self._model]
+
+    def to_device(self):
+        """Move all model components to the appropriate device"""
+        if self._model is None:
+            logger.warning("Cannot move to device: Model is not initialized")
+            return
+        logger.debug("Moving model to device: %s", self.device)
+        _ = [self._model[key].to(self.device) for key in self._model]
+
+    def _build_model(self):
+        """
+        Builds and initializes the StyleTTS2 model with its required components.
+        This method loads the necessary pre-trained models:
+        - Text aligner (ASR model) for aligning text with audio
+        - Pitch extractor (F0 model) for extracting pitch information
+        - PLBERT for linguistic feature extraction
+        Then constructs the StyleTTS2 model using these components and the configuration
+        parameters from self.config.model_params. After building the model, it sets
+        the model to evaluation mode and moves it to the appropriate device.
+        Returns:
+            None: The model is stored as self.model
+        """
+        logger.debug("Building StyleTTS2 model...")
+
+        # Load models
+        logger.debug("Loading ASR model from %s", self._config.ASR_path)
+        text_aligner = load_ASR_models(self._config.ASR_path, self._config.ASR_config)
+
+        logger.debug("Loading F0 model from %s", self._config.F0_path)
+        pitch_extractor = load_F0_models(self._config.F0_path)
+
+        logger.debug("Loading PLBERT from %s", self._config.PLBERT_dir)
+        plbert = load_plbert(self._config.PLBERT_dir)
+
+        # Build StyleTTS2 model
+        logger.debug("Constructing StyleTTS2 model with components")
+        self._model = build_model(self._config.model_params, text_aligner, pitch_extractor, plbert)
+
+        self.to_eval()
+        self.to_device()
+        logger.debug("Model building complete")
+
+    def _load_model_params(self, model_path):
+        """
+        Load model parameters from a specified path.
+        This method loads model parameters from a saved checkpoint file,
+        mapping them to the CPU, and applies a module prefix hack to ensure
+        compatibility with the current model structure.
+        Args:
+            model_path (str): Path to the model checkpoint file.
+        Returns:
+            None: The method loads parameters into the model but doesn't return anything.
+        Note:
+            This method assumes the checkpoint contains parameters under the 'net' key
+            and uses an internal method _hack_module_prefix to modify parameter names if needed.
+        """
+        logger.debug("Loading model parameters from %s", model_path)
+        params = torch.load(model_path, map_location="cpu")
+        logger.debug("Model parameters loaded: %s", params.keys())
+
+        # Reduced model does not have 'net' key but the original full model has 'net' key
+        # => handle both cases
+        if "net" in params:
+            # Original full model
+            logger.debug("Found 'net' key in model parameters")
+            params = params["net"]
+
+        self._hack_module_prefix(params)
+        logger.debug("Model parameters loaded successfully")
+        self.to_eval()
+
+    def _hack_module_prefix(self, params):
+        """
+        Handles loading state dictionaries into model components, with a fallback mechanism
+        for models saved with torch.nn.DataParallel.
+        This method attempts to load parameters from the provided state dictionary into
+        corresponding model components. If the direct loading fails (typically due to key mismatches),
+        it attempts to remove the 'module.' prefix from keys, which is added when models are
+        saved after training with torch.nn.DataParallel.
+        Parameters
+        ----------
+        params : dict
+            A dictionary containing state dictionaries for model components,
+            where keys correspond to model component names.
+        Returns
+        -------
+        None
+            The method updates the model components in-place.
+        Notes
+        -----
+        - The method prints confirmation messages for each successfully loaded component.
+        - Uses OrderedDict for maintaining the order of parameters during the prefix removal process.
+        - Performs strict=False loading in the fallback case to allow for partial state dict loading.
+        """
+        for key in self.model:
+            if key in params:
+                try:
+                    logger.debug("Loading parameters for component: %s", key)
+                    self.model[key].load_state_dict(params[key])
+                    logger.debug("Successfully loaded parameters for: %s", key)
+                except Exception:
+                    logger.warning(
+                        "Direct loading failed for %s, trying to remove 'module.' prefix.",
+                        key,
+                    )
+                    state_dict = params[key]
+                    new_state_dict = OrderedDict()
+                    for k, v in state_dict.items():
+                        name = k[7:]  # remove `module.`
+                        new_state_dict[name] = v
+                    # load params
+                    try:
+                        self.model[key].load_state_dict(new_state_dict, strict=False)
+                        logger.debug(
+                            "Successfully loaded parameters for %s after prefix removal", key
+                        )
+                    except Exception as exc:
+                        logger.error("Failed to load parameters for %s: %s}", key, str(exc))
+            else:
+                logger.warning(
+                    "No parameters found for component: %s => not used in inference", key
+                )
+
+    def generate_noise(self):
+        """Generate noise
+
+        Returns:
+            tensor: Noise for diffusion.
+        """
+        return torch.randn(1, 1, 256, device=self.device)
+
+    def _setup_sampler(self):
+        """Setup diffusion sampler."""
+        self._sampler = DiffusionSampler(
+            self.model.diffusion.diffusion,
+            sampler=ADPM2Sampler(),
+            sigma_schedule=KarrasSchedule(
+                sigma_min=0.0001, sigma_max=3.0, rho=9.0
+            ),  # empirical parameters
+            clamp=False,
+        )
+
+    @property
+    def sampler(self):
+        """Get the diffusion sampler."""
+        return self._sampler
+
+    def __call__(
+        self,
+        ph_strings,
+        ref_s=None,
+    ):
+        """
+        Generate wavs from phonetic strings.
+
+        Args:
+            ph_strings (list): List of phoneme strings to be converted to speech.
+            ref_s (torch.Tensor): Reference speaker style embedding or path to a wav file.
+                If a path is provided, the style embedding will be computed from the wav file.
+                If None, the model will not use speaker style embedding (the case of a single speaker model).
+                If a tensor is provided, it should be of shape (1, 256) or (1, 256, 1).
+                The first 128 dimensions are for timbre and the last 128 dimensions are for prosody.
+                If ref_s is None, the model will not use speaker style embedding (the case of a single speaker model).
+
+        Note:
+            - This method assumes that the phonetic strings are well-formed
+              and that the model is properly initialized.
+            - The method will process each phonetic string, split them to phonetic sentences and
+              generate the corresponding audio waveform.
+            - The method uses the `text_cleaner` to process the phonetic sentences
+              (making them compatible with pre-trained PL-BERT and converting them to IDs)
+              before passing them to the model.
+            - The `text_cleaner` should be initialized with the correct symbol dictionary
+              and padding options.
+            - The method uses the `infer` method to generate audio waveform for an input
+              phonetic sentence.
+            - It handles the generation of noise for diffusion sampling and manages the previous
+              style embedding for each phonetic sentence.
+            - The method also trims the generated audio to remove silence at the beginning and end
+              (using the `offset_beg` and `offset_end` properties of the class).
+
+        Returns:
+            list: List of generated audio waveforms in numpy format.
+        """
+        # Initialize previous style and wavs
+        wavs = []
+        s_prev = None
+
+        if isinstance(ref_s, str):
+            # If ref_s is a path, compute style embedding
+            ref_s = self.compute_style(ref_s, top_db=30)
+        # Otherwise, ref_s is assumed to be a reference speaker style embedding tensor or None
+
+        logger.debug("Phoneme strings: %s", ph_strings)
+
+        # Iterate over phoneme strings
+        for ph_string in ph_strings:
+            logger.debug("Processing phoneme string: %s", ph_string)
+
+            if self.glob_noise is not None:
+                # Use the same noise for the entire document (across phonetic strings)
+                noise = self.glob_noise
+            elif self.fix_noise_in_ph_string:
+                # Use the same noise within a phonetic string (one phonetic line)
+                noise = self.generate_noise()
+            else:
+                # New noise will be generated for each sentence
+                noise = None
+
+            # Iterate over sentences in the phonetic string
+            for ph_sent in re.findall(r"[^.!?]*[.!?]", ph_string):
+                if not ph_sent.strip():  # skip empty phonetic string
+                    continue
+                logger.debug("Processing phonetic sentence: %s", ph_sent)
+
+                # Add padding and tokenize phonetic sentence
+                ph_ids = self.text_cleaner(ph_sent, pad=True)
+                logger.debug("Phone IDs: %s", ph_ids)
+
+                # Perform inference => generate wav
+                wav, s_prev = self.infer(
+                    torch.tensor(ph_ids, dtype=torch.long, device=self.device).unsqueeze(0),
+                    noise=noise,
+                    s_prev=s_prev,
+                    ref_s=ref_s,
+                )
+
+                # Collect wavs (without silence forced in training)
+                wavs.append(wav[self.offset_beg : -self.offset_end])
+
+        return wavs
+
+    # def infer_orig(
+    #     self,
+    #     ph_ids,
+    #     noise=None,
+    #     s_prev=None,
+    #     ref_s=None,
+    # ):
+    #     """
+    #     Perform inference with the StyleTTS2 model.
+
+    #     Args:
+    #         ph_ids (torch.Tensor): Tensor of phoneme IDs.
+    #         noise (torch.Tensor): Noise tensor for diffusion.
+    #         s_prev (torch.Tensor): Previous style embedding.
+    #         ref_s (torch.Tensor): Reference speaker embedding.
+
+    #     Returns:
+    #         torch.Tensor: Generated audio waveform.
+    #         torch.Tensor: Style embedding.
+    #     """
+    #     with torch.no_grad():
+    #         # Prepare input lengths and masks
+    #         input_lengths = torch.tensor([ph_ids.shape[-1]], dtype=torch.long, device=self.device)
+    #         text_mask = length_to_mask(input_lengths)
+
+    #         # Phonetic features encoded from phonetic IDs (tokens) only
+    #         t_en = self.model.text_encoder(ph_ids, input_lengths, text_mask)
+    #         # Contextual phonetic features encoded by PL-BERT catching
+    #         # linguistic context of the whole sentence
+    #         bert_dur = self.model.bert(ph_ids, attention_mask=(~text_mask).int())
+    #         # Transformed (and compressed) BERT-encoded linguistic features
+    #         d_en = self.model.bert_encoder(bert_dur).transpose(-1, -2)
+
+    #         ref_features = ref_s if ref_s is not None else None
+    #         # Sampling from the diffusion model
+    #         # - generate style embedding from contextual PL-BERT based features
+    #         # - represent timbre and prosody
+    #         s_pred = self._sampler(
+    #             self.generate_noise() if noise is None else noise,  # noise for diffusion
+    #             embedding=bert_dur[0].unsqueeze(0),
+    #             embedding_scale=self.embedding_scale,
+    #             features=ref_features,  # reference from the same speaker as the embedding
+    #             num_steps=self.diffusion_steps,
+    #         ).squeeze(0)
+
+    #         # Combine styles
+    #         if s_prev is not None:
+    #             # convex combination of previous and current styles
+    #             s_pred = self.t * s_pred + (1 - self.t) * s_prev
+
+    #         s = s_pred[:, 128:]  # prosodic features
+    #         ref = s_pred[:, :128]  # timbre features
+
+    #         # If reference speaker style embedding  `ref_s` is provided,
+    #         # combine it with the generated style
+    #         # - `alpha` controls the influence of the reference timbre
+    #         #   (higher = more similar to the generated style,
+    #         #   lower = more similar to the reference style)
+    #         # - `beta` controls the influence of the reference prosody
+    #         #   (higher = more similar to the generated style,
+    #         #   lower = more similar to the reference style)
+    #         if ref_s is not None:
+    #             ref = self.alpha * ref + (1 - self.alpha) * ref_s[:, :128]
+    #             s = self.beta * s + (1 - self.beta) * ref_s[:, 128:]
+    #             s_pred = torch.cat([ref, s], dim=-1)
+
+    #         # Style-conditioned phonetic features
+    #         # - enriches linguistic features with style information
+    #         d = self.model.predictor.text_encoder(d_en, s, input_lengths, text_mask)
+
+    #         # xLSTM processed phonetic features
+    #         x = self.model.predictor.lstm(d)
+    #         x_mod = self.model.predictor.prepare_projection(x)  # 640 -> 512
+
+    #         # Duration prediction: number of frames for each phoneme
+    #         duration = self.model.predictor.duration_proj(x_mod)
+    #         duration = torch.sigmoid(duration).sum(axis=-1) / self.speech_rate
+    #         pred_dur = torch.round(duration.squeeze()).clamp(min=1)
+
+    #         # pred_dur[-1] += 5  # add silence at the end
+
+    #         # Create phoneme-audio alignment target matrix: [number of phones, number of frames]
+    #         # - each phoneme contains sequence of 1 at the positions of its frames
+    #         # - `pred_aln_trg[i,j] = 1` means phoneme i shall be pronunced at frame j
+    #         # - sum of each row is the number of frames for each phoneme
+    #         # - sum of each column is constant 1 => each frame is assigned to one phoneme
+    #         pred_aln_trg = torch.zeros(input_lengths, int(pred_dur.sum().data))
+    #         c_frame = 0
+    #         for i in range(pred_aln_trg.size(0)):
+    #             # For each phoneme, set the number of its frames to 1
+    #             pred_aln_trg[i, c_frame : c_frame + int(pred_dur[i].data)] = 1
+    #             c_frame += int(pred_dur[i].data)
+
+    #         # Encode prosody: encoded prosodic audio-aligned features
+    #         en = d.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0).to(self.device)
+    #         if self.model.decoder.type == "hifigan":
+    #             en_new = torch.zeros_like(en)
+    #             en_new[:, :, 0] = en[:, :, 0]
+    #             en_new[:, :, 1:] = en[:, :, 0:-1]
+    #             en = en_new
+
+    #         # Predict F0 and normalization (loudness)
+    #         f0_pred, n_pred = self.model.predictor.F0Ntrain(en, s)
+    #         asr = t_en @ pred_aln_trg.unsqueeze(0).to(self.device)
+    #         if self.model.decoder.type == "hifigan":
+    #             asr_new = torch.zeros_like(asr)
+    #             asr_new[:, :, 0] = asr[:, :, 0]
+    #             asr_new[:, :, 1:] = asr[:, :, 0:-1]
+    #             asr = asr_new
+
+    #         # Decode the waveform
+    #         # - `asr` is the phonetic features aligned with the audio frames (content)
+    #         # - `f0_pred` is the predicted F0 (pitch) features aligned with the audio frames
+    #         # - `n_pred` is the predicted normalization (loudness) features aligned with the audio frames
+    #         # - `ref` is the style embedding (timbre) aligned with the audio frames
+    #         out = self.model.decoder(asr, f0_pred, n_pred, ref.squeeze().unsqueeze(0))
+
+    #     # return out.squeeze().cpu().numpy(), s_pred
+    #     # weird pulse at the end of the model, need to be fixed later
+    #     return out.squeeze().cpu().numpy()[..., :-50], s_pred
+
+    def infer(
+        self,
+        ph_ids,
+        noise=None,
+        s_prev=None,
+        ref_s=None,
+    ):
+        """
+        Perform inference with the StyleTTS2 model.
+
+        Args:
+            ph_ids (torch.Tensor): Tensor of phoneme IDs.
+            noise (torch.Tensor): Noise tensor for diffusion.
+            s_prev (torch.Tensor): Previous style embedding.
+            ref_s (torch.Tensor): Reference speaker embedding.
+
+        Returns:
+            torch.Tensor: Generated audio waveform.
+            torch.Tensor: Style embedding.
+        """
+        with torch.no_grad():
+            # Prepare input lengths and masks
+            input_lengths = torch.tensor([ph_ids.shape[-1]], dtype=torch.long, device=self.device)
+            text_mask = length_to_mask(input_lengths)
+
+            # Phonetic features encoded from phonetic IDs (tokens) only
+            t_en = self.model.text_encoder(ph_ids, input_lengths, text_mask)
+            # Contextual phonetic features encoded by PL-BERT catching
+            # linguistic context of the whole sentence
+            bert_dur = self.model.bert(ph_ids, attention_mask=(~text_mask).int())
+            # Transformed (and compressed) BERT-encoded linguistic features
+            d_en = self.model.bert_encoder(bert_dur).transpose(-1, -2)
+
+            # Generate the waveform from phonetic features
+            return self.infer_from_ph_features(
+                input_lengths,
+                text_mask,
+                t_en,
+                bert_dur,
+                d_en,
+                noise,
+                s_prev,
+                ref_s,
+            )
+        # returns the generated waveform and predicted style embedding
+
+    def infer_from_ph_features(
+        self,
+        input_lengths,
+        text_mask,
+        t_en,
+        bert_en,
+        d_en,
+        noise=None,
+        s_prev=None,
+        ref_s=None,
+    ):
+        """Perform inference with the StyleTTS2 model using pre-computed text features.
+        Args:
+            t_en (torch.Tensor): Phonetic encoded features from phonetic IDs (tokens) only.
+            bert_en (torch.Tensor): PL-BERT encoded phonetic features.
+            d_en (torch.Tensor): # Transformed (and compressed) BERT-encoded linguistic features.
+            noise (torch.Tensor): Noise tensor for diffusion sampling.
+            s_prev (torch.Tensor): Previous style embedding.
+            ref_s (torch.Tensor): Reference speaker embedding.
+        """
+        with torch.no_grad():
+            # Sampling from the diffusion model
+            # - generate style embedding from contextual PL-BERT based features
+            # - represent timbre and prosody
+            # - `ref_s` is 256-dimensional tensor
+            if ref_s is None:
+                # No reference speaker style embedding, typically for a single speaker model
+                s_pred = self._sampler(
+                    self.generate_noise() if noise is None else noise,  # noise for diffusion
+                    embedding=bert_en[0].unsqueeze(0),
+                    embedding_scale=self.embedding_scale,
+                    num_steps=self.diffusion_steps,
+                ).squeeze(0)
+            else:
+                s_pred = self._sampler(
+                    self.generate_noise() if noise is None else noise,  # noise for diffusion
+                    embedding=bert_en[0].unsqueeze(0),
+                    embedding_scale=self.embedding_scale,
+                    features=ref_s,  # reference from the same speaker as the embedding
+                    num_steps=self.diffusion_steps,
+                ).squeeze(0)
+
+            # Combine styles
+            if s_prev is not None:
+                # convex combination of previous and current styles
+                s_pred = self.t * s_pred + (1 - self.t) * s_prev
+
+            s = s_pred[:, 128:]  # prosodic features
+            ref = s_pred[:, :128]  # timbre features
+
+            # If reference speaker style embedding  `ref_s` is provided,
+            # combine it with the generated style
+            # - `alpha` controls the influence of the reference timbre
+            #   (higher = more similar to the generated style,
+            #   lower = more similar to the reference style)
+            # - `beta` controls the influence of the reference prosody
+            #   (higher = more similar to the generated style,
+            #   lower = more similar to the reference style)
+            if ref_s is not None:
+                ref = self.alpha * ref + (1 - self.alpha) * ref_s[:, :128]
+                s = self.beta * s + (1 - self.beta) * ref_s[:, 128:]
+                s_pred = torch.cat([ref, s], dim=-1)
+
+            # Style-conditioned phonetic features
+            # - enriches linguistic features with style information
+            d = self.model.predictor.text_encoder(d_en, s, input_lengths, text_mask)
+
+            # xLSTM processed phonetic features
+            x = self.model.predictor.lstm(d)
+            x_mod = self.model.predictor.prepare_projection(x)  # 640 -> 512
+
+            # Duration prediction: number of frames for each phoneme
+            duration = self.model.predictor.duration_proj(x_mod)
+            duration = torch.sigmoid(duration).sum(axis=-1) / self.speech_rate
+            pred_dur = torch.round(duration.squeeze()).clamp(min=1)
+
+            pred_dur[-1] += 5  # add silence at the end
+
+            # Create phoneme-audio alignment target matrix: [number of phones, number of frames]
+            # - each phoneme contains sequence of 1 at the positions of its frames
+            # - `pred_aln_trg[i,j] = 1` means phoneme i shall be pronunced at frame j
+            # - sum of each row is the number of frames for each phoneme
+            # - sum of each column is constant 1 => each frame is assigned to one phoneme
+            pred_aln_trg = torch.zeros(input_lengths, int(pred_dur.sum().data))
+            c_frame = 0
+            for i in range(pred_aln_trg.size(0)):
+                # For each phoneme, set the number of its frames to 1
+                pred_aln_trg[i, c_frame : c_frame + int(pred_dur[i].data)] = 1
+                c_frame += int(pred_dur[i].data)
+
+            # Encode prosody: encoded prosodic audio-aligned features
+            en = d.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0).to(self.device)
+            if self.model.decoder.type == "hifigan":
+                en_new = torch.zeros_like(en)
+                en_new[:, :, 0] = en[:, :, 0]
+                en_new[:, :, 1:] = en[:, :, 0:-1]
+                en = en_new
+
+            # Predict F0 and normalization (loudness)
+            f0_pred, n_pred = self.model.predictor.F0Ntrain(en, s)
+            asr = t_en @ pred_aln_trg.unsqueeze(0).to(self.device)
+            if self.model.decoder.type == "hifigan":
+                asr_new = torch.zeros_like(asr)
+                asr_new[:, :, 0] = asr[:, :, 0]
+                asr_new[:, :, 1:] = asr[:, :, 0:-1]
+                asr = asr_new
+
+            # Decode the waveform
+            # - `asr` is the phonetic features aligned with the audio frames (content)
+            # - `f0_pred` is the predicted F0 (pitch) features aligned with the audio frames
+            # - `n_pred` is the predicted normalization (loudness) features aligned with the audio frames
+            # - `ref` is the style embedding (timbre) aligned with the audio frames
+            out = self.model.decoder(asr, f0_pred, n_pred, ref.squeeze().unsqueeze(0))
+
+            # Weird pulse at the end of the model, need to be fixed later
+            # (without silence forced in training)
+            return out.squeeze().cpu().numpy()[self.offset_beg : -self.offset_end], s_pred
+            # return out.squeeze().cpu().numpy()[..., :-50], s_pred
+
+    def reconstruct(self, mel_gt, en, p_en=None):
+        """Reconstruct the waveform from the mel spectrogram.
+        This method uses the decoder of the model to generate the waveform
+        Args:
+            mel_gt (torch.Tensor): Mel spectrogram.
+            en (torch.Tensor): Encoded phonetic audio-aligned features.
+            p_en (torch.Tensor): Predicted phonetic audio-aligned features.
+
+        Returns:
+            torch.Tensor: Reconstructed waveform.
+        """
+        with torch.no_grad():
+            if p_en is not None:
+                # Predict duration-related features from ground truth mel spectrogram
+                s_dur = self.model.predictor_encoder(mel_gt.unsqueeze(1))
+                # Predict F0 and norm
+                f0, n = self.model.predictor.F0Ntrain(p_en, s_dur)
+            else:
+                # Extract real F0
+                f0, _, _ = self.model.pitch_extractor(mel_gt.unsqueeze(1))
+                f0 = f0.unsqueeze(0)
+                # Extract real norm
+                n = log_norm(mel_gt.unsqueeze(1)).squeeze(1)
+
+            # Encode style from ground truth mel spectrogram
+            s = self.model.style_encoder(mel_gt.unsqueeze(1))
+            # Decode
+            y_pred = self.model.decoder(en, f0, n, s)
+
+        # Return the waveform without silence at the beginning and end
+        return y_pred.cpu().numpy().squeeze()[self.offset_beg : -self.offset_end]
+
+    def compute_style(self, wavpath, top_db=30):
+        """Compute style embedding from a waveform.
+
+        Args:
+            wav (torch.Tensor): Waveform numpy array or path to waveform file.
+            top_db (int): Threshold for trimming silence. Default: 30.
+        Note:
+            If wav is a path, it will be loaded using librosa.
+            The waveform will be trimmed for silence and resampled to the sampling rate
+            specified in the configuration.
+        Raises:
+            ValueError: If wav is neither a numpy array nor a path to a wav file.
+        Returns:
+            torch.Tensor: Style embedding.
+        """
+        with torch.no_grad():
+            wav, sr = librosa.load(wavpath, sr=self._config.preprocess_params.sr)
+
+            if top_db is not None:
+                # Trim silence
+                wav, _ = librosa.effects.trim(wav, top_db=top_db)
+            if sr != self._config.preprocess_params.sr:
+                # Resample if necessary
+                wav = librosa.resample(wav, sr, self._config.preprocess_params.sr)
+
+            mel_tensor = preprocess(wav).to(self.device)
+
+            # Compute style embedding
+            ref_s = self.model.style_encoder(mel_tensor.unsqueeze(1))  # style = timbre
+            ref_p = self.model.predictor_encoder(mel_tensor.unsqueeze(1))  # style = prosody
+
+        return torch.cat([ref_s, ref_p], dim=1)
+
+    def save_wav(self, wav, path):
+        """Save wavs to a single wav file.
+
+        Args:
+            wav (list): Waveform numpy arrays
+            path (string): Output wav file path
+        """
+        if isinstance(wav, (list, tuple)):
+            wav = np.concatenate(wav)
+        write(path, self._config.preprocess_params.sr, wav)
+        # torchaudio.save(path, torch.tensor(wav).float(), 24000)
+
+    @property
+    def model(self):
+        """Get the model dictionary."""
+        return self._model
+
+    @model.setter
+    def model(self, model):
+        """
+        Set the model dictionary and automatically put it in evaluation mode.
+
+        Args:
+            model: Dictionary of model components
+        """
+        self._model = model
+        if self._model is not None:
+            logger.debug("Model set, automatically switching to evaluation mode")
+            self.to_eval()
+
+    @property
+    def offset_beg(self):
+        """Get the beginning offset for audio generation."""
+        return self._config.preprocess_params.silence_beg
+
+    @property
+    def offset_end(self):
+        """Get the end offset for audio generation."""
+        return self._config.preprocess_params.silence_end
+
+    @property
+    def t(self):
+        """Get the `t` parameter for convex combination of styles."""
+        return self._t
+
+    @t.setter
+    def t(self, value):
+        """Set the `t` parameter for convex combination of styles."""
+        if not 0 <= value <= 1:
+            raise ValueError("t must be between 0 and 1.")
+        self._t = value
+
+    @property
+    def alpha(self):
+        """Get the alpha parameter for timbre similarity."""
+        return self._alpha
+
+    @alpha.setter
+    def alpha(self, value):
+        """Set the alpha parameter for timbre similarity."""
+        if not 0 <= value <= 1:
+            raise ValueError("alpha must be between 0 and 1.")
+        self._alpha = value
+
+    @property
+    def beta(self):
+        """Get the beta parameter for prosody."""
+        return self._beta
+
+    @beta.setter
+    def beta(self, value):
+        """Set the beta parameter for prosody."""
+        if not 0 <= value <= 1:
+            raise ValueError("beta must be between 0 and 1.")
+        self._beta = value
+
+    @property
+    def diffusion_steps(self):
+        """Get the number of diffusion steps."""
+        return self._diffusion_steps
+
+    @diffusion_steps.setter
+    def diffusion_steps(self, value):
+        """Set the number of diffusion steps."""
+        if not isinstance(value, int) or value <= 0:
+            raise ValueError("diffusion_steps must be a positive integer.")
+        self._diffusion_steps = value
+
+    @property
+    def embedding_scale(self):
+        """Get the embedding scale."""
+        return self._embedding_scale
+
+    @embedding_scale.setter
+    def embedding_scale(self, value):
+        """Set the embedding scale."""
+        if not isinstance(value, (int, float)) or value <= 0:
+            raise ValueError("embedding_scale must be a positive number.")
+        self._embedding_scale = value
+
+    @property
+    def speech_rate(self):
+        """Get the speech rate."""
+        return self._speech_rate
+
+    @speech_rate.setter
+    def speech_rate(self, value):
+        """Set the speech rate."""
+        if not isinstance(value, (int, float)) or value <= 0:
+            raise ValueError("speech_rate must be a positive number.")
+        self._speech_rate = value
+
+
+def set_random_seed(seed, deterministic=False):
+    """Set random seed.
+
+    Args:
+        seed (int): Seed to be used.
+        deterministic (bool): Whether to set the deterministic option for
+            CUDNN backend, i.e., set `torch.backends.cudnn.deterministic`
+            to True and `torch.backends.cudnn.benchmark` to False.
+            Default: False.
+    """
+    python_random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
