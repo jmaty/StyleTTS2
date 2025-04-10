@@ -10,7 +10,6 @@ import warnings
 from logging import StreamHandler
 
 import numpy as np
-import scipy
 import nvidia_smi
 import torch
 import torch.nn.functional as F
@@ -21,21 +20,15 @@ from munch import Munch
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 
-from text_utils import TextCleaner
-from losses import GeneratorLoss, create_slm_loss, DiscriminatorLoss, MultiResolutionSTFTLoss
+from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, create_slm_loss
 from meldataset import build_dataloader
-from models import load_ASR_models, load_F0_models, build_model, load_checkpoint, save_checkpoint
+from models import build_model, load_ASR_models, load_checkpoint, load_F0_models, save_checkpoint
 from Modules.diffusion.sampler import ADPM2Sampler, DiffusionSampler, KarrasSchedule
+from Modules.pts import PTS
 from Modules.slmadv import SLMAdversarialLoss
 from optimizers import build_optimizer
-from utils import (
-    get_data_path_list,
-    length_to_mask,
-    log_norm,
-    maximum_path,
-    recursive_munch,
-    synth_test_files,
-)
+from text_utils import TextCleaner
+from utils import get_data_path_list, length_to_mask, log_norm, maximum_path, recursive_munch
 from Utils.PLBERT.util import load_plbert
 
 warnings.simplefilter("ignore")
@@ -63,7 +56,7 @@ logger.addHandler(handler)
 
 def main():
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description="StyleTTS2 finetuning")
+    parser = argparse.ArgumentParser(description="StyleTTS2 stage 2 training")
     parser.add_argument("config_path", type=str, help="path to config")
     parser.add_argument("-w", "--num_workers", type=int, default=0, help="number of workers")
     args = parser.parse_args()
@@ -336,14 +329,20 @@ def main():
     if (save_val_audio or save_test_audio) and not os.path.exists(test_audio_dir):
         os.makedirs(test_audio_dir, exist_ok=True)
 
+    # Create phoneme-to-speech object for synthesizing test sentences
+    # - use global noise for speed
+    pts = PTS(config, model, use_glob_noise=True)
+
     # Total number of steps given the batch size
     tot_num_steps = len(train_list) // batch_size
 
     print(" > Start training cycles:")
-    print(f" | > Starting epoch: {start_epoch}")
-    print(f" | > Total epochs: {epochs}")
-    print(f" | > Iterations: {iters}")
-    print(f" | > Sigma data: {inp_sigma_data}")
+    print(f" | > Starting epoch:   {start_epoch}")
+    print(f" | > Total epochs:     {epochs}")
+    print(f" | > Steps per epoch:  {tot_num_steps}")
+    print(f" | > Input iterations: {iters}")
+    print(f" | > Sigma data:       {inp_sigma_data}")
+    print()
 
     # === Start of training loop ==============================================
 
@@ -389,7 +388,8 @@ def main():
 
                 d_gt = s2s_attn_mono.sum(axis=-1).detach()
 
-                # compute reference styles
+                # Compute reference styles
+                ref = None
                 if multispeaker and epoch >= diff_epoch:
                     ref_ss = model.style_encoder(ref_mels.unsqueeze(1))
                     ref_sp = model.predictor_encoder(ref_mels.unsqueeze(1))
@@ -452,7 +452,7 @@ def main():
                     ).mean()
                     # style reconstruction loss
                     loss_sty = F.l1_loss(s_preds, s_trg.detach())
-                else:  # single-speaker
+                else:  # single speaker
                     s_preds = sampler(
                         noise=torch.randn_like(s_trg).unsqueeze(1).to(device),
                         embedding=bert_dur,
@@ -906,133 +906,137 @@ def main():
         writer.add_scalar("eval/dur_loss", avg_dur_loss, epoch + 1)
         writer.add_scalar("eval/F0_loss", avg_f_loss, epoch + 1)
 
+        # Generate validation samples
         if epoch < joint_epoch:
             # Generating reconstruction examples with GT duration
             with torch.no_grad():
-                for idx, m in enumerate(mel_input_length):
-                    mel_length = int(m.item())
-                    gt = mels[idx, :, :mel_length].unsqueeze(0)
-                    en = asr[idx, :, : mel_length // 2].unsqueeze(0)
-                    f0_real, _, _ = model.pitch_extractor(gt.unsqueeze(1))
-                    f0_real = f0_real.unsqueeze(0)
-                    s = model.style_encoder(gt.unsqueeze(1))
-                    real_norm = log_norm(gt.unsqueeze(1)).squeeze(1)
-
-                    y_rec = model.decoder(en, f0_real, real_norm, s)
+                # Iterate over the defined number of validation samples
+                for idx in range(min(n_val_audios, len(mel_input_length))):
+                    mel_length = int(mel_input_length[idx].item())
+                    # Ground-truth mel spectrogram
+                    mel_gt = mels[idx, :, :mel_length].unsqueeze(0)
+                    # Ground-truth phonemes-audio alignment
+                    en_gt = asr[idx, :, : mel_length // 2].unsqueeze(0)
+                    # Reconstruct audio from ground-truth mel spectrogram and
+                    # phoneme-audio alignment
+                    wav = pts.reconstruct(mel_gt, en_gt)
 
                     # Write and save val audio (removing artificial silence)
-                    wav = y_rec.cpu().numpy().squeeze()[silence_beg:-silence_end]
                     writer.add_audio(f"eval/y{idx}", wav, epoch, sample_rate=sr)
                     if save_val_audio and epoch % saving_epoch == 0:
-                        outfile_template = f"epoch_2nd_{epoch:0>5}"
-                        out_file = f"{outfile_template}_val-{idx}.wav"
-                        scipy.io.wavfile.write(
-                            filename=os.path.join(test_audio_dir, out_file), rate=sr, data=wav
-                        )
+                        outfile = f"epoch_2nd_{epoch:0>5}_val-rec-{idx}.wav"
+                        pts.save_wav(wav, os.path.join(test_audio_dir, outfile))
 
-                    s_dur = model.predictor_encoder(gt.unsqueeze(1))
+                    # Predicted phonemes-audio alignment encoding
                     p_en = p[idx, :, : mel_length // 2].unsqueeze(0)
+                    # Reconstruct audio from ground-truth mel spectrogram,
+                    # and extracted and predicted phoneme-audio alignment encoding
+                    wav = pts.reconstruct(mel_gt, en_gt, p_en)
 
-                    f0_fake, n_fake = model.predictor.F0Ntrain(p_en, s_dur)
-
-                    y_pred = model.decoder(en, f0_fake, n_fake, s)
-                    writer.add_audio(
-                        f"pred/y{idx}",
-                        y_pred.cpu().numpy().squeeze()[silence_beg:-silence_end],
-                        epoch,
-                        sample_rate=sr,
-                    )
+                    # Write and save val audio (removing artificial silence)
+                    writer.add_audio(f"pred/y{idx}", wav, epoch, sample_rate=sr)
+                    if save_val_audio and epoch % saving_epoch == 0:
+                        outfile = f"epoch_2nd_{epoch:0>5}_val-pred-{idx}.wav"
+                        pts.save_wav(wav, os.path.join(test_audio_dir, outfile))
 
                     # Save ground truth
                     if epoch == 0:
                         wav = waves[idx].squeeze()
                         if save_val_audio:
-                            outfile_template = f"epoch_2nd_{epoch:0>5}"
-                            out_file = f"{outfile_template}_gt-{idx}.wav"
-                            scipy.io.wavfile.write(
-                                filename=os.path.join(test_audio_dir, out_file), rate=sr, data=wav
-                            )
+                            outfile = f"epoch_2nd_{epoch:0>5}_gt-{idx}.wav"
+                            pts.save_wav(wav, os.path.join(test_audio_dir, outfile))
                         writer.add_audio(f"gt/y{idx}", wav, epoch, sample_rate=sr)
 
-                    # Use up to the given number of  validation samples
-                    if idx + 1 >= n_val_audios:
-                        break
         else:
             # Generating sampled speech from text directly
             with torch.no_grad():
-                # compute reference styles
                 ref_s = None
+                # Compute reference styles from ground truth mel spectrogram
                 if multispeaker and epoch >= diff_epoch:
-                    ref_ss = model.style_encoder(ref_mels.unsqueeze(1))
-                    ref_sp = model.predictor_encoder(ref_mels.unsqueeze(1))
-                    ref_s = torch.cat([ref_ss, ref_sp], dim=1)
+                    ref_ss = model.style_encoder(ref_mels.unsqueeze(1))  # Timbre style
+                    ref_sp = model.predictor_encoder(ref_mels.unsqueeze(1))  # Prosody style
+                    ref_s = torch.cat([ref_ss, ref_sp], dim=1)  # Combined style [B, 256, T]
 
-                for idx, _ in enumerate(d_en):
-                    if multispeaker:
-                        s_pred = sampler(
-                            noise=torch.randn((1, 256)).unsqueeze(1).to(texts.device),
-                            embedding=bert_dur[idx].unsqueeze(0),
-                            embedding_scale=1,
-                            # reference from the same speaker as the embedding
-                            features=ref_s[idx].unsqueeze(0),
-                            num_steps=5,
-                        ).squeeze(1)
-                    else:
-                        s_pred = sampler(
-                            noise=torch.randn((1, 256)).unsqueeze(1).to(texts.device),
-                            embedding=bert_dur[idx].unsqueeze(0),
-                            embedding_scale=1,
-                            num_steps=5,
-                        ).squeeze(1)
-
-                    s = s_pred[:, 128:]
-                    ref = s_pred[:, :128]
-
-                    d = model.predictor.text_encoder(
-                        d_en[idx, :, : input_lengths[idx]].unsqueeze(0),
-                        s,
+                # Iterate over the defined number of validation samples
+                for idx in range(min(n_val_audios, len(mel_input_length))):
+                    # Generate audio from phoneme features of the `idx`-th validation file
+                    wav, _ = pts.infer_from_ph_features(
                         input_lengths[idx, ...].unsqueeze(0),
                         text_mask[idx, : input_lengths[idx]].unsqueeze(0),
+                        t_en[idx, :, : input_lengths[idx]].unsqueeze(0),
+                        bert_dur[idx].unsqueeze(0),
+                        d_en[idx, :, : input_lengths[idx]].unsqueeze(0),
+                        ref_s=ref_s[idx].unsqueeze(0) if multispeaker else None,
                     )
 
-                    x = model.predictor.lstm(d)
-                    x_mod = model.predictor.prepare_projection(x)  # 640 -> 512
-                    duration = model.predictor.duration_proj(x_mod)
-
-                    duration = torch.sigmoid(duration).sum(axis=-1)
-                    pred_dur = torch.round(duration.squeeze()).clamp(min=1)
-
-                    pred_dur[-1] += 5
-
-                    pred_aln_trg = torch.zeros(input_lengths[idx], int(pred_dur.sum().data))
-                    c_frame = 0
-                    for i in range(pred_aln_trg.size(0)):
-                        pred_aln_trg[i, c_frame : c_frame + int(pred_dur[i].data)] = 1
-                        c_frame += int(pred_dur[i].data)
-
-                    # encode prosody
-                    en = d.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0).to(texts.device)
-                    f0_pred, n_pred = model.predictor.F0Ntrain(en, s)
-                    out = model.decoder(
-                        t_en[idx, :, : input_lengths[idx]].unsqueeze(0)
-                        @ pred_aln_trg.unsqueeze(0).to(texts.device),
-                        f0_pred,
-                        n_pred,
-                        ref.squeeze().unsqueeze(0),
-                    )
-
-                    # Write and save val audio (removing artificial silence)
-                    wav = out.cpu().numpy().squeeze()[silence_beg:-silence_end]
-                    writer.add_audio("pred/y" + str(idx), wav, epoch, sample_rate=sr)
+                    # Write and save val audio
+                    writer.add_audio(f"pred/y{idx}", wav, epoch, sample_rate=sr)
                     if save_val_audio and epoch % saving_epoch == 0:
-                        outfile_template = f"epoch_2nd_{epoch:0>5}"
-                        out_file = f"{outfile_template}_val-{idx}.wav"
-                        scipy.io.wavfile.write(
-                            filename=os.path.join(test_audio_dir, out_file), rate=sr, data=wav
-                        )
-                    # Use up to the defined number validation samples
-                    if idx + 1 >= n_val_audios:
-                        break
+                        outfile = f"epoch_2nd_{epoch:0>5}_val-pred-{idx}.wav"
+                        pts.save_wav(wav, os.path.join(test_audio_dir, outfile))
+
+                    # if multispeaker:
+                    #     s_pred = sampler(
+                    #         noise=torch.randn((1, 256)).unsqueeze(1).to(texts.device),
+                    #         embedding=bert_dur[idx].unsqueeze(0),
+                    #         embedding_scale=1,
+                    #         # reference from the same speaker as the embedding
+                    #         features=ref_s[idx].unsqueeze(0),
+                    #         num_steps=5,
+                    #     ).squeeze(1)
+                    # else:
+                    #     s_pred = sampler(
+                    #         noise=torch.randn((1, 256)).unsqueeze(1).to(texts.device),
+                    #         embedding=bert_dur[idx].unsqueeze(0),
+                    #         embedding_scale=1,
+                    #         num_steps=5,
+                    #     ).squeeze(1)
+
+                    # s = s_pred[:, 128:]
+                    # ref = s_pred[:, :128]
+
+                    # d = model.predictor.text_encoder(
+                    #     d_en[idx, :, : input_lengths[idx]].unsqueeze(0),
+                    #     s,
+                    #     input_lengths[idx, ...].unsqueeze(0),
+                    #     text_mask[idx, : input_lengths[idx]].unsqueeze(0),
+                    # )
+
+                    # x = model.predictor.lstm(d)
+                    # x_mod = model.predictor.prepare_projection(x)  # 640 -> 512
+                    # duration = model.predictor.duration_proj(x_mod)
+
+                    # duration = torch.sigmoid(duration).sum(axis=-1)
+                    # pred_dur = torch.round(duration.squeeze()).clamp(min=1)
+
+                    # pred_dur[-1] += 5
+
+                    # pred_aln_trg = torch.zeros(input_lengths[idx], int(pred_dur.sum().data))
+                    # c_frame = 0
+                    # for i in range(pred_aln_trg.size(0)):
+                    #     pred_aln_trg[i, c_frame : c_frame + int(pred_dur[i].data)] = 1
+                    #     c_frame += int(pred_dur[i].data)
+
+                    # # encode prosody
+                    # en = d.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0).to(texts.device)
+                    # f0_pred, n_pred = model.predictor.F0Ntrain(en, s)
+                    # out = model.decoder(
+                    #     t_en[idx, :, : input_lengths[idx]].unsqueeze(0)
+                    #     @ pred_aln_trg.unsqueeze(0).to(texts.device),
+                    #     f0_pred,
+                    #     n_pred,
+                    #     ref.squeeze().unsqueeze(0),
+                    # )
+
+                    # # Write and save val audio (removing artificial silence)
+                    # wav = out.cpu().numpy().squeeze()[silence_beg:-silence_end]
+                    # writer.add_audio("pred/y" + str(idx), wav, epoch, sample_rate=sr)
+                    # if save_val_audio and epoch % saving_epoch == 0:
+                    #     outfile_template = f"epoch_2nd_{epoch:0>5}"
+                    #     out_file = f"{outfile_template}_val-{idx}.wav"
+                    #     scipy.io.wavfile.write(
+                    #         filename=os.path.join(test_audio_dir, out_file), rate=sr, data=wav
+                    #     )
 
         # Save progress
         if epoch % saving_epoch == 0:
@@ -1072,20 +1076,9 @@ def main():
             # Synthesize test audios to evaluate the model's performance after diffusion training has started.
             # Does not work for multispeaker mode so far.
             if not multispeaker and save_test_audio and epoch >= diff_epoch:
-                synth_test_files(
-                    model,
-                    test_sentences,
-                    test_audio_dir,
-                    f"epoch_2nd_{epoch:0>5}_test",
-                    text_cleaner,
-                    sr,
-                    silence_beg=silence_beg,
-                    silence_end=silence_end,
-                    sampler=None,
-                    diffusion_steps=5,
-                    embedding_scale=1,
-                    device=device,
-                )
+                for idx, w in enumerate(pts(test_sentences)):
+                    outfile = f"epoch_2nd_{epoch:0>5}_test-{idx}.wav"
+                    pts.save_wav(w, os.path.join(test_audio_dir, outfile))
 
         # Save milestone models
         if save_milestones:
