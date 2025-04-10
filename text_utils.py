@@ -14,7 +14,7 @@ class TextCleaner:
             symbols (dict, string): Phoneme-token encoding dict
             pad (str, optional): Symbol for padding. Defaults to '_'.
         """
-        # Load symbol encodin dict
+        # Load symbol encoding dict
         self._symbols = symbols if isinstance(symbols, dict) else load_symbol_dict(symbols)
         self._pad = pad
         # assert len(self) == 81, f'Number of symbols must be 81 but it is {len(self)}'
