@@ -7,7 +7,6 @@ import os.path as osp
 import time
 import traceback
 import warnings
-from logging import StreamHandler
 
 import numpy as np
 import nvidia_smi
@@ -29,6 +28,7 @@ from Modules.slmadv import SLMAdversarialLoss
 from optimizers import build_optimizer
 from text_utils import TextCleaner
 from utils import get_data_path_list, length_to_mask, log_norm, maximum_path, recursive_munch
+from logger import setup_logging, get_logger
 from Utils.PLBERT.util import load_plbert
 
 warnings.simplefilter("ignore")
@@ -46,14 +46,6 @@ class MyDataParallel(torch.nn.DataParallel):
             return getattr(self.module, name)
 
 
-# Set up logging
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-handler = StreamHandler()
-handler.setLevel(logging.DEBUG)
-logger.addHandler(handler)
-
-
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="StyleTTS2 stage 2 training")
@@ -68,11 +60,14 @@ def main():
 
     # Set up logging
     log_dir = config["log_dir"]
+    setup_logging(
+        level=logging.WARNING,
+        file=osp.join(log_dir, "train.log"),
+        fmt_file="%(levelname)s:%(asctime)s: %(message)s",
+        datefmt_file="%y%m%d-%H:%M:%S",
+    )
+    logger = get_logger(__name__)  # Get a logger
     writer = SummaryWriter(log_dir + "/tensorboard")
-    file_handler = logging.FileHandler(osp.join(log_dir, "train.log"))
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter("%(levelname)s:%(asctime)s: %(message)s"))
-    logger.addHandler(file_handler)
 
     # Init NVLM
     nvidia_smi.nvmlInit()
