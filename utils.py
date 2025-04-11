@@ -1,15 +1,12 @@
-import os.path
+import sys
+import logging
 
 import matplotlib.pyplot as plt
 import numpy as np
-import scipy
 import torch
 import torch.nn.functional as F
 from monotonic_align.core import maximum_path_c
 from munch import Munch
-from nltk.tokenize import word_tokenize
-
-from Modules.diffusion.sampler import ADPM2Sampler, DiffusionSampler, KarrasSchedule
 
 
 def maximum_path(neg_cent, mask):
@@ -79,142 +76,84 @@ def log_print(message, logger):
     print(message)
 
 
-# JMa: Infere a single sentence written in phonemes
-def inference(
-    sentence,
-    model,
-    text_cleaner,
-    sampler,
-    noise,
-    ref_spk=None,
-    alpha=0.3,
-    beta=0.7,
-    diffusion_steps=5,
-    embedding_scale=1,
-    speech_rate=1.0,
-    device="cuda",
-):
-    # Phoneme string expected at the input
-    # ps = word_tokenize(sentence)
-    # ps = " ".join(ps)
-    # tokens = textcleaner(ps)
-    # tokens.insert(0, 0)
-    ph_ids = text_cleaner(sentence, pad=True)
-    ph_ids = torch.tensor(ph_ids, dtype=torch.long, device=device).unsqueeze(0)
+class ColoredFormatter(logging.Formatter):
+    """Formatter for colored logging output."""
 
-    with torch.no_grad():
-        input_lengths = torch.LongTensor([ph_ids.shape[-1]]).to(ph_ids.device)
-        text_mask = length_to_mask(input_lengths).to(ph_ids.device)
+    COLORS = {
+        "DEBUG": "\033[94m",  # modrá
+        "INFO": "\033[92m",  # zelená
+        "WARNING": "\033[93m",  # žlutá
+        "ERROR": "\033[91m",  # červená
+        "CRITICAL": "\033[41m\033[97m",  # bílá na červeném pozadí
+        "RESET": "\033[0m",  # reset formátování
+    }
 
-        t_en = model.text_encoder(ph_ids, input_lengths, text_mask)
-        bert_dur = model.bert(ph_ids, attention_mask=(~text_mask).int())
-        d_en = model.bert_encoder(bert_dur).transpose(-1, -2)
-
-        if ref_spk is not None:
-            s_pred = sampler(
-                noise,
-                embedding=bert_dur[0].unsqueeze(0),
-                embedding_scale=embedding_scale,
-                # reference from the same speaker as the embedding
-                features=ref_spk,
-                num_steps=diffusion_steps,
-            ).squeeze(0)
-        else:
-            s_pred = sampler(
-                noise,
-                embedding=bert_dur[0].unsqueeze(0),
-                embedding_scale=embedding_scale,
-                num_steps=diffusion_steps,
-            ).squeeze(0)
-
-        s = s_pred[:, 128:]
-        ref = s_pred[:, :128]
-
-        if ref_spk is not None:
-            ref = alpha * ref + (1 - alpha) * ref_spk[:, :128]
-            s = beta * s + (1 - beta) * ref_spk[:, 128:]
-
-        d = model.predictor.text_encoder(d_en, s, input_lengths, text_mask)
-
-        x = model.predictor.lstm(d)
-        x_mod = model.predictor.prepare_projection(x)  # 640 -> 512
-        duration = model.predictor.duration_proj(x_mod)
-
-        duration = torch.sigmoid(duration).sum(axis=-1) / speech_rate
-        pred_dur = torch.round(duration.squeeze()).clamp(min=1)
-
-        pred_dur[-1] += 5
-
-        pred_aln_trg = torch.zeros(input_lengths, int(pred_dur.sum().data))
-        c_frame = 0
-        for i in range(pred_aln_trg.size(0)):
-            pred_aln_trg[i, c_frame : c_frame + int(pred_dur[i].data)] = 1
-            c_frame += int(pred_dur[i].data)
-
-        # encode prosody
-        en = d.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0).to(device)
-        if model.decoder.type == "hifigan":
-            asr_new = torch.zeros_like(en)
-            asr_new[:, :, 0] = en[:, :, 0]
-            asr_new[:, :, 1:] = en[:, :, 0:-1]
-            en = asr_new
-
-        f0_pred, n_pred = model.predictor.F0Ntrain(en, s)
-        asr = t_en @ pred_aln_trg.unsqueeze(0).to(device)
-        if model.decoder.type == "hifigan":
-            asr_new = torch.zeros_like(asr)
-            asr_new[:, :, 0] = asr[:, :, 0]
-            asr_new[:, :, 1:] = asr[:, :, 0:-1]
-            asr = asr_new
-
-        out = model.decoder(asr, f0_pred, n_pred, ref.squeeze().unsqueeze(0))
-        return out.squeeze().cpu().numpy()
-        # weird pulse at the end of the model, need to be fixed later
-        # return out.squeeze().cpu().numpy()[..., :-50]
+    def format(self, record):
+        levelname = record.levelname
+        if levelname in self.COLORS:
+            record.levelname = f"{self.COLORS[levelname]}{levelname}{self.COLORS['RESET']}"
+        return super().format(record)
 
 
-# JMa: Synthesize test files written in phonemes
-def synth_test_files(
-    model,
-    test_sentences,
-    outdir,
-    outfile_template,
-    text_cleaner,
-    sr,
-    silence_beg=0,
-    silence_end=0,
-    sampler=None,
-    diffusion_steps=5,
-    embedding_scale=1,
-    speech_rate=1.0,
-    device="cuda",
-):
-    # Generate noise
-    noise = torch.randn(1, 1, 256).to(device)
-    # Set up sampler
-    if not sampler:
-        sampler = DiffusionSampler(
-            model.diffusion.diffusion,
-            sampler=ADPM2Sampler(),
-            # empirical parameters
-            sigma_schedule=KarrasSchedule(sigma_min=0.0001, sigma_max=3.0, rho=9.0),
-            clamp=False,
+def setup_logging(log_level=logging.INFO, log_file=None):
+    """
+    Configure root logger with consistent formatting and handling.
+
+    Args:
+        log_level: Overall logging level (e.g. logging.DEBUG, logging.INFO)
+        log_file: Optional path to log file. If provided, logs will be written to this file.
+
+    Returns:
+        The configured root logger
+    """
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+
+    # Remove existing handlers to avoid duplicates when function is called multiple times
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+
+    # Create formatter for stdout
+    console_formatter = ColoredFormatter(
+        fmt="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%y%m%d-%H:%M:%S",
+    )
+
+    # Create console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(console_formatter)
+    root_logger.addHandler(console_handler)
+
+    # Create file handler if log file is specified
+    if log_file:
+        # Create formatter for file handler
+        file_formatter = logging.Formatter(
+            fmt="%(levelname)s:%(asctime)s: %(message)s",
+            datefmt="%y%m%d-%H:%M:%S",
         )
-    for idx, snt in enumerate(test_sentences):
-        wav = inference(
-            snt,
-            model,
-            text_cleaner,
-            sampler,
-            noise,
-            diffusion_steps=diffusion_steps,
-            embedding_scale=embedding_scale,
-            speech_rate=speech_rate,
-            device=device,
-        )
-        outfile = f"{outfile_template}-{idx}.wav"
-        scipy.io.wavfile.write(
-            filename=os.path.join(outdir, outfile),
-            rate=sr,
-            data=wav[silence_beg:-silence_end],
-        )
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(file_formatter)
+        root_logger.addHandler(file_handler)
+
+    return root_logger
+
+
+def get_logger(name, level=None):
+    """
+    Get a logger for a specific module with optional level override.
+
+    Args:
+        name: Name of the logger, typically __name__ of the module
+        level: Optional specific level for this logger
+
+    Returns:
+        Logger instance
+    """
+    logger = logging.getLogger(name)
+
+    # Set specific level if provided, otherwise inherit from parent
+    if level is not None:
+        logger.setLevel(level)
+
+    return logger

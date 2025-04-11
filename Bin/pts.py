@@ -7,6 +7,7 @@ import sys
 from argparse import RawTextHelpFormatter
 
 from Modules.pts import PTS, set_random_seed
+from logger import setup_logging, get_logger
 
 
 def main():
@@ -126,17 +127,12 @@ def main():
     args = parser.parse_args()
 
     # Set up logging
-    log_level = getattr(logging, args.loglevel, logging.INFO)
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-        datefmt="%H:%M:%S",
-        stream=sys.stdout,
-        level=log_level,
+    setup_logging(
+        level=getattr(logging, args.loglevel, logging.INFO),
+        aligned=True,
+        name_width=15,
     )
-    # formatter = logging.Formatter(
-    #             "%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
-    #         )
-    logger = logging.getLogger(__name__)
+    logger = get_logger(__name__)  # Get a logger
 
     # Set random seed if specified
     if args.random_seed is not None:
@@ -153,7 +149,6 @@ def main():
         speech_rate=args.speech_rate,
         use_glob_noise=args.use_glob_noise,
         fix_noise_in_ph_string=args.fix_noise_in_ph_string,
-        log_level=log_level,
     )
 
     # Synthesize speech from phonetic text file

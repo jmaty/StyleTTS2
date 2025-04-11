@@ -1,24 +1,23 @@
-import logging
 import random as python_random
 import re
 from collections import OrderedDict
 
+import librosa
 import numpy as np
 import torch
 import yaml
 from munch import munchify
 from scipy.io.wavfile import write
-import librosa
 
+from meldataset import preprocess
 from models import build_model, load_ASR_models, load_F0_models
 from Modules.diffusion.sampler import ADPM2Sampler, DiffusionSampler, KarrasSchedule
 from text_utils import TextCleaner
-from utils import length_to_mask, log_norm
+from utils import get_logger, length_to_mask, log_norm
 from Utils.PLBERT.util import load_plbert
-from meldataset import preprocess
 
 # Setup logger
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class PTS:
@@ -34,7 +33,6 @@ class PTS:
         speech_rate=1.0,
         use_glob_noise=False,
         fix_noise_in_ph_string=False,
-        log_level=logging.INFO,
     ):
         """
         Initialize the PTS (Phonetic Text to Speech) synthesizer.
@@ -61,7 +59,7 @@ class PTS:
             speech_rate (float, optional): Controls the rate of synthesized speech. Default: 1.0
             use_glob_noise (bool, optional): Whether to use global noise for all synthesis operations. Default: False
             fix_noise_in_ph_string (bool, optional): Whether to use the same noise for phonetic strings. Default: False
-            log_level (int, optional): Logging level (from logging module). Default: logging.INFO
+
         Note:
             If `use_glob_noise` is True, `fix_noise_in_ph_string` is automatically set to True.
         """
@@ -79,11 +77,8 @@ class PTS:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info("Using device: %s", self.device)
 
-        # Configure logging
-        self._setup_logging(log_level)
-        # Set up configuration
-        self.setup_config(config)
         # Set up model
+        self.setup_config(config)
         self.setup_model(model)
 
         self.text_cleaner = TextCleaner(
@@ -103,31 +98,16 @@ class PTS:
         logger.debug("Using global noise: %s", use_glob_noise)
         logger.debug("Fix noise in phonetic string: %s", fix_noise_in_ph_string)
 
-    def _setup_logging(self, log_level):
-        """Configure logging for this class"""
-        # Only add handler if not already added to avoid duplicate logs
-        if not logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter(
-                "%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
-            )
-            handler.setFormatter(formatter)
-            logger.addHandler(handler)
-
-        logger.setLevel(log_level)
-
     def setup_config(self, config):
         # Determine if config is a path or a pre-loaded configuration
         if isinstance(config, str):
             # It's a path
             logger.info("Initializing PTS with config from: %s", config)
-            self.config_path = config
             with open(config, encoding="utf-8") as file:
                 self._config = munchify(yaml.safe_load(file))
         else:
             # It's a pre-loaded configuration
             logger.info("Initializing PTS with provided configuration object")
-            self.config_path = None  # No path since config was passed directly
             # Ensure it's a Munch object (if it's a dict, convert it)
             self._config = (
                 config if isinstance(config, munchify({}).__class__) else munchify(config)
@@ -211,14 +191,14 @@ class PTS:
         """
         logger.info("Loading model parameters from %s", model_path)
         params = torch.load(model_path, map_location="cpu")
-        logger.info("Model parameters loaded: %s", params.keys())
 
         # Reduced model does not have 'net' key but the original full model has 'net' key
         # => handle both cases
         if "net" in params:
             # Original full model
-            logger.debug("Found 'net' key in model parameters")
+            logger.debug("Full model with 'net' key in model parameters loaded")
             params = params["net"]
+        logger.debug("Reduced model with only-inference parameters loaded")
 
         self._hack_module_prefix(params)
         logger.info("Model parameters loaded successfully")
@@ -370,7 +350,6 @@ class PTS:
 
                 # Add padding and tokenize phonetic sentence
                 ph_ids = self.text_cleaner(ph_sent, pad=True)
-                logger.debug("Phoneme IDs: %s", ph_ids)
 
                 # Perform inference => generate wav
                 wav, s_prev = self.infer(
@@ -382,7 +361,7 @@ class PTS:
 
                 # Collect wavs (without silence forced in training)
                 wavs.append(wav[self.offset_beg : -self.offset_end])
-                logger.debug("Phonetic sentence generated")
+                logger.debug("Phonetic sentence waveform generated")
 
         return wavs
 
