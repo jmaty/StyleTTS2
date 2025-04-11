@@ -917,15 +917,15 @@ def main():
                     mel_gt = mels[idx, :, :mel_length].unsqueeze(0)
                     # Ground-truth phonemes-audio alignment
                     en_gt = asr[idx, :, : mel_length // 2].unsqueeze(0)
-                    # Reconstruct audio from ground-truth mel spectrogram and
-                    # phoneme-audio alignment
-                    wav = pts.reconstruct(mel_gt, en_gt)
+                    # # Reconstruct audio from ground-truth mel spectrogram and
+                    # # phoneme-audio alignment
+                    # wav = pts.reconstruct(mel_gt, en_gt)
 
-                    # Write and save val audio
-                    writer.add_audio(f"eval/y{idx}", wav, epoch, sample_rate=sr)
-                    if save_val_audio and epoch % saving_epoch == 0:
-                        outfile = f"epoch_2nd_{epoch:0>5}_val-rec-{idx}.wav"
-                        pts.save_wav(wav, os.path.join(test_audio_dir, outfile))
+                    # # Write and save val audio
+                    # writer.add_audio(f"eval/y{idx}", wav, epoch, sample_rate=sr)
+                    # if save_val_audio and epoch % saving_epoch == 0:
+                    #     outfile = f"epoch_2nd_{epoch:0>5}_val-rec-{idx}.wav"
+                    #     pts.save_wav(wav, os.path.join(test_audio_dir, outfile))
 
                     # Predicted phonemes-audio alignment encoding
                     p_en = p[idx, :, : mel_length // 2].unsqueeze(0)
@@ -1012,10 +1012,20 @@ def main():
 
             # Synthesize test audios to evaluate the model's performance after diffusion training has started.
             # Does not work for multispeaker mode so far.
-            if not multispeaker and save_test_audio and epoch >= diff_epoch:
-                for idx, w in enumerate(pts(test_sentences)):
-                    outfile = f"epoch_2nd_{epoch:0>5}_test-{idx}.wav"
-                    pts.save_wav(w, os.path.join(test_audio_dir, outfile))
+            if save_test_audio and epoch >= diff_epoch:
+                # Set up number of speakers to test if multispeaker is enabled
+                n_speakers = min(3, len(ref_s)) if multispeaker else 1
+                # Iterate over the defined number of validation test speakers
+                for sidx in range(n_speakers):
+                    # Generate test sentences for each speaker
+                    test_wavs = pts(
+                        test_sentences,
+                        ref_s=ref_s[sidx].unsqueeze(0) if multispeaker else None,
+                    )
+                    # Save test sentences
+                    for widx, w in enumerate(test_wavs):
+                        outfile = f"epoch_2nd_{epoch:0>5}_test-{sidx}{widx}.wav"
+                        pts.save_wav(w, os.path.join(test_audio_dir, outfile))
 
         # Save milestone models
         if save_milestones:
