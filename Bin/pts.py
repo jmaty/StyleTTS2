@@ -3,414 +3,34 @@
 
 import argparse
 import logging
-import random as python_random
-import re
 import sys
 from argparse import RawTextHelpFormatter
-from collections import OrderedDict
 
-import numpy as np
-import torch
-
-# import torchaudio
-import yaml
-
-# from utils import recursive_munch
-from munch import munchify
-from scipy.io.wavfile import write
-
-import models
-from Modules.diffusion.sampler import ADPM2Sampler, DiffusionSampler, KarrasSchedule
-from text_utils import TextCleaner
-from Utils.PLBERT.util import load_plbert
-
-
-class Synthesizer:
-    """Synthesizer class for text-to-speech synthesis using StyleTTS2.
-
-    This class handles the loading and initialization of various models required for TTS synthesis,
-    including text alignment, F0 extraction, and BERT-based models. It provides functionality to
-    synthesize speech from phonetic strings with controllable style and noise parameters.
-
-    Args:
-        model_path (str): Path to the pretrained StyleTTS2 model checkpoint
-        config_path (str): Path to the configuration YAML file
-        use_glob_noise (bool, optional): Whether to use global noise across all synthesis. Defaults to False
-        fix_noise_in_ph_string (bool, optional): Whether to fix noise within phonetic strings. Defaults to False
-        device (str, optional): Device to run the model on ('cuda' or 'cpu'). Defaults to "cuda"
-        log_level (int, optional): Logging level. Defaults to logging.INFO
-
-    Attributes:
-        text_cleaner (TextCleaner): Handles text tokenization and cleaning
-        sampler (DiffusionSampler): Diffusion model sampler for style generation
-        model (dict): Dictionary containing all the component models
-        glob_noise (tensor): Global noise tensor if use_glob_noise is True
-        plbert (model): PL-BERT model for phoneme encoding
-        text_aligner (model): ASR model for text alignment
-        f0_extractor (model): Model for F0 feature extraction
-
-    Methods:
-        synthesize: Main method for speech synthesis from phonetic strings
-        generate_noise: Generates random noise for the diffusion process
-        save_wav: Saves generated waveforms to a WAV file
-        _inference: Internal method for single-sentence inference
-        length_to_mask: Static method to convert lengths to attention masks
-
-    Example:
-        synthesizer = Synthesizer(
-            model_path="path/to/model.pth",
-            config_path="path/to/config.yaml",
-            device="cuda"
-        wavs = synthesizer.synthesize(["ph o n e m e s"])
-        synthesizer.save_wav(wavs, "output.wav")
-    """
-
-    def __init__(
-        self,
-        model_path,
-        config_path,
-        use_glob_noise=False,
-        fix_noise_in_ph_string=False,
-        device="cuda",
-        log_level=logging.INFO,
-    ):
-        # Setup logging
-        self.logger = logging.getLogger(self.__class__.__name__)
-        self.logger.setLevel(log_level)
-
-        # Load config
-        with open(config_path, encoding="utf-8") as f:
-            self.config = munchify(yaml.safe_load(f))
-
-        # Load models
-        self.text_aligner = models.load_ASR_models(
-            self.config.ASR_path, self.config.ASR_config
-        )  # text aligner
-        self.f0_extractor = models.load_F0_models(self.config.F0_path)  # F0 extractor
-        self.plbert = load_plbert(self.config.PLBERT_dir)  # PL-BERT
-
-        self.model_path = model_path
-        self.device = device
-        self.text_cleaner = None
-        self.sampler = None
-
-        # Generate global noise if specified
-        self.glob_noise = self.generate_noise() if use_glob_noise else None
-        # In case of global noise, noise within phonetic string is always fixed;
-        # otherwise, it is optional according to `fix_noise_in_ph_string`
-        self.fix_noise_in_ph_string = fix_noise_in_ph_string if not use_glob_noise else True
-        self.logger.debug("Using global noise: %s", use_glob_noise)
-        self.logger.debug("Fix noise in phonetic string: %s", fix_noise_in_ph_string)
-
-        self._load_symbols()
-        self.logger.debug("Number of symbols: %s", {len(self.text_cleaner)})
-        assert (
-            len(self.text_cleaner) == 81
-        ), f"Number of symbols must be 81 but it is {len(self.text_cleaner)}"
-
-        self._build_model()
-        self._setup_sampler()
-
-    def _to_eval(self):
-        # Set model to eval mode
-        _ = [self.model[key].eval() for key in self.model]
-
-    def _to_device(self):
-        # Move model to device
-        _ = [self.model[key].to(self.device) for key in self.model]
-
-    def _load_symbols(self):
-        """Load symbols from symbol dictionary."""
-        self.text_cleaner = TextCleaner(
-            self.config.data_params.symbol_dict_path, pad=self.config.data_params.pad
-        )
-
-    def _setup_sampler(self):
-        """Setup diffusion sampler."""
-        self.sampler = DiffusionSampler(
-            self.model.diffusion.diffusion,
-            sampler=ADPM2Sampler(),
-            sigma_schedule=KarrasSchedule(
-                sigma_min=0.0001, sigma_max=3.0, rho=9.0
-            ),  # empirical parameters
-            clamp=False,
-        )
-
-    def generate_noise(self):
-        """Generate noise
-
-        Returns:
-            tensor: Noise for diffusion.
-        """
-        return torch.randn(1, 1, 256, device=self.device)
-
-    def _build_model(self):
-        """Build model."""
-        # Build model
-        self.model = models.build_model(
-            munchify(self.config["model_params"]), self.text_aligner, self.f0_extractor, self.plbert
-        )
-        self._to_eval()
-        self._to_device()
-        params = torch.load(self.model_path, map_location="cpu")["net"]  # Load model parameters
-
-        # Hack to cope with model prefix
-        for key in self.model:
-            if key in params:
-                try:
-                    self.model[key].load_state_dict(params[key])
-                    self.logger.debug("%s loaded", key)
-                except Exception:
-                    state_dict = params[key]
-                    new_state_dict = OrderedDict()
-                    for k, v in state_dict.items():
-                        name = k[7:]  # remove `module.`
-                        new_state_dict[name] = v
-                    # Reload fixed params
-                    self.model[key].load_state_dict(new_state_dict, strict=False)
-                    self.logger.debug("%s loaded and fixed", key)
-
-            else:
-                self.logger.warning("Key %s not found in the model parameters.", key)
-
-        self._to_eval()  # Set model to eval mode
-
-    def synthesize(
-        self,
-        ph_strings,
-        diffusion_steps=5,
-        embedding_scale=1,
-        alpha=0.7,
-    ):
-        """Synthesize speech from phonetic strings.
-
-        Args:
-            ph_strings (list): Phonetic strings (made up from phonetic sentences).
-            diffusion_steps (int, optional): Number of diffusion steps. Defaults to 5.
-            embedding_scale (int, optional): Embedding scale. Defaults to 1.
-            alpha (float, optional): Weight for convex combination of current and previous styles. Defaults to 0.7.
-            fix_noise (bool, optional): Whether to fix noise across sentences. Defaults to False.
-
-        Returns:
-            list: Generated waveforms.
-        """
-        # Initialize previous style and wavs
-        wavs = []
-        s_prev = None
-        # Offset for silence used in training
-        offset_beg = self.config.preprocess_params.silence_beg
-        offset_end = self.config.preprocess_params.silence_end
-        self.logger.debug("Silence offset: %d, %d", offset_beg, offset_end)
-
-        # Iterate over phonetic strings (lines in the input phonetic file)
-        for ph_string in ph_strings:
-            self.logger.debug("Phonetic string: %s", ph_string)
-
-            if self.glob_noise is not None:
-                # Use the same noise for the entire document (across phonetic strings)
-                noise = self.glob_noise
-            elif self.fix_noise_in_ph_string:
-                # Use the same noise within a phonetic string (one phonetic line)
-                noise = self.generate_noise()
-            else:
-                # New noise will be generated for each sentence
-                noise = None
-
-            # Iterate over sentences in the phonetic string
-            for ph_sent in re.findall(r"[^.!?]*[.!?]", ph_string):
-                if not ph_sent.strip():  # skip empty phonetic string
-                    continue
-
-                self.logger.debug("Phonetic sentence: %s", ph_sent)
-
-                # add padding and tokenize phonetic sentence
-                ph_ids = self.text_cleaner(ph_sent, pad=True)
-                self.logger.debug("Phone IDs: %s", ph_ids)
-
-                # Generate wav
-                wav, s_prev = self._inference(
-                    torch.tensor(ph_ids, dtype=torch.long, device=self.device).unsqueeze(0),
-                    noise=noise,
-                    diffusion_steps=diffusion_steps,
-                    embedding_scale=embedding_scale,
-                    s_prev=s_prev,
-                    alpha=alpha,
-                )
-
-                # Collect wavs (without silence forced in training)
-                wavs.append(wav[offset_beg:-offset_end])
-
-        return wavs
-
-    def _inference(
-        self,
-        ph_ids,
-        noise=None,
-        diffusion_steps=5,
-        embedding_scale=1,
-        s_prev=None,
-        alpha=0.7,
-        speech_rate=1.0,
-    ):
-        """Inference for a single phonetic sentence.
-
-        Args:
-            ph_ids (tensor): Phoneme IDs
-            noise (tensor, optional): Noise for diffusion. Defaults to None.
-            diffusion_steps (int, optional): Number of diffusion steps. Defaults to 5.
-            embedding_scale (int, optional): Embedding scale. Defaults to 1.0.
-            s_prev (tensor, optional): Previous sentence style embedding. Defaults to None.
-            alpha (float, optional): Weight for convex combination of current and previous styles. Defaults to 0.7.
-            speech_rate (float, optional): Speech rate. Defaults to 1.0.
-
-        Returns:
-            tuple(numpy array, tensor): Current sentence waveform and style embedding.
-        """
-        with torch.no_grad():
-            input_lengths = torch.tensor([ph_ids.shape[-1]], dtype=torch.long, device=self.device)
-            text_mask = self.length_to_mask(input_lengths)
-
-            t_en = self.model.text_encoder(ph_ids, input_lengths, text_mask)
-            bert_dur = self.model.bert(ph_ids, attention_mask=(~text_mask).int())
-            d_en = self.model.bert_encoder(bert_dur).transpose(-1, -2)
-
-            s_curr = self.sampler(
-                self.generate_noise() if noise is None else noise,  # noise for diffusion
-                embedding=bert_dur[0].unsqueeze(0),
-                num_steps=diffusion_steps,
-                embedding_scale=embedding_scale,
-            ).squeeze(0)
-
-            # Combine styles
-            if s_prev is not None:
-                s_curr = (
-                    alpha * s_curr + (1 - alpha) * s_prev
-                )  # convex combination of previous and current styles
-
-            s = s_curr[:, 128:]
-            ref = s_curr[:, :128]
-
-            d = self.model.predictor.text_encoder(d_en, s, input_lengths, text_mask)
-
-            x = self.model.predictor.lstm(d)
-            x_mod = self.model.predictor.prepare_projection(x)  # 640 -> 512
-            duration = self.model.predictor.duration_proj(x_mod)
-
-            duration = torch.sigmoid(duration).sum(axis=-1) / speech_rate
-            pred_dur = torch.round(duration.squeeze()).clamp(min=1)
-
-            pred_aln_trg = torch.zeros(input_lengths, int(pred_dur.sum().data))
-            c_frame = 0
-            for i in range(pred_aln_trg.size(0)):
-                pred_aln_trg[i, c_frame : c_frame + int(pred_dur[i].data)] = 1
-                c_frame += int(pred_dur[i].data)
-
-            # Encode prosody
-            en = d.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0).to(self.device)
-            if self.model.decoder.type == "hifigan":
-                en_new = torch.zeros_like(en)
-                en_new[:, :, 0] = en[:, :, 0]
-                en_new[:, :, 1:] = en[:, :, 0:-1]
-                en = en_new
-
-            # Predict F0
-            f0_pred, n_pred = self.model.predictor.F0Ntrain(en, s)
-            asr = t_en @ pred_aln_trg.unsqueeze(0).to(self.device)
-            if self.model.decoder.type == "hifigan":
-                asr_new = torch.zeros_like(asr)
-                asr_new[:, :, 0] = asr[:, :, 0]
-                asr_new[:, :, 1:] = asr[:, :, 0:-1]
-                asr = asr_new
-
-            out = self.model.decoder(asr, f0_pred, n_pred, ref.squeeze().unsqueeze(0))
-
-        return out.squeeze().cpu().numpy(), s_curr
-        # weird pulse at the end of the model, need to be fixed later
-        # return out.squeeze().cpu().numpy()[..., :-50]
-
-    @staticmethod
-    def length_to_mask(lengths):
-        mask = (
-            torch.arange(lengths.max(), device=lengths.device)
-            .unsqueeze(0)
-            .expand(lengths.shape[0], -1)
-            .type_as(lengths)
-        )
-        mask = torch.gt(mask + 1, lengths.unsqueeze(1))
-        return mask
-
-    def save_wav(self, wavs, path):
-        """Save wavs to a single wav file.
-
-        Args:
-            wavs (list): Waveform numpy arrays
-            path (string): Output wav file path
-        """
-        wav = np.concatenate(wavs)
-        write(path, self.config.preprocess_params.sr, wav)
-        # torchaudio.save(path, torch.tensor(wav).float(), 24000)
-
-
-def set_random_seed(seed, deterministic=False):
-    """Set random seed.
-
-    Args:
-        seed (int): Seed to be used.
-        deterministic (bool): Whether to set the deterministic option for
-            CUDNN backend, i.e., set `torch.backends.cudnn.deterministic`
-            to True and `torch.backends.cudnn.benchmark` to False.
-            Default: False.
-    """
-    python_random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    if deterministic:
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-
-
-# to_mel = torchaudio.transforms.MelSpectrogram(
-#     n_mels=80, n_fft=2048, win_length=1200, hop_length=300
-# )
-# mean, std = -4, 4
-
-
-# def preprocess(wave):
-#     wave_tensor = torch.from_numpy(wave).float()
-#     mel_tensor = to_mel(wave_tensor)
-#     mel_tensor = (torch.log(1e-5 + mel_tensor.unsqueeze(0)) - mean) / std
-#     return mel_tensor
-
-# def compute_style(ref_dicts, model):
-#     reference_embeddings = {}
-#     for key, path in ref_dicts.items():
-#         wave, sr = librosa.load(path, sr=24000)
-#         audio, _ = librosa.effects.trim(wave, top_db=30)
-#         if sr != 24000:
-#             audio = librosa.resample(audio, sr, 24000)
-#         mel_tensor = preprocess(audio).to(DEVICE)
-
-#         with torch.no_grad():
-#             ref = model.style_encoder(mel_tensor.unsqueeze(1))
-#         reference_embeddings[key] = (ref.squeeze(1), audio)
-
-#     return reference_embeddings
+from Modules.pts import PTS, set_random_seed
 
 
 def main():
-    # pylint: disable=bad-option-value
-    parser = argparse.ArgumentParser(
-        description="""Synthesize speech from text file.\n\n"""
-        """
+    """
     # Example Runs:
 
-    - Simple usage
+    - Basic synthesis from text file:
+        $ ./pts.py input.txt config.yml /model.pth --out_path=output.wav
 
-    ```
-    $ ./pts.py --model=path/to/model.pth --config=path/to/config.yaml --out_path output/path/speech.wav
-    ```
-    """,
+    - Synthesis from stdin:
+        $ echo "tohle je skouSka." | ./pts.py config.yml model.pth
+
+    - Voice cloning from reference speaker (for a multi-speaker model):
+        $ ./pts.py input.txt config.yml model.pth --ref_spk=reference_speaker.wav
+
+    - Adjusting synthesis parameters:
+        $ ./pts.py input.txt config.yml model.pth --diffusion_steps=5 --embedding_scale=1.2 --alpha=0.1 --beta=0.6
+
+    - Using fixed noise for more consistent output:
+        $ ./pts.py input.txt config.yml model.pth --use_glob_noise --random-seed=42
+    """
+    # pylint: disable=bad-option-value
+    parser = argparse.ArgumentParser(
+        description="""Synthesize speech from phonetic text file.\n\n""",
         formatter_class=RawTextHelpFormatter,
     )
     # Input text file
@@ -421,9 +41,10 @@ def main():
         default=sys.stdin,
         help="Text file to generate speech from.",
     )
-    parser.add_argument("--model", type=str, default=None, help="Path to model file.")
-    parser.add_argument("--config", default=None, type=str, help="Path to model config file.")
+    parser.add_argument("config", type=str, help="Path to model config file.")
+    parser.add_argument("model", type=str, default=None, help="Path to model file.")
     parser.add_argument(
+        "-o",
         "--out_path",
         type=str,
         default="./out.wav",
@@ -447,8 +68,8 @@ def main():
         "-d",
         "--diffusion_steps",
         type=float,
-        help="Diffusion steps. Default=5",
-        default=5,
+        help="Diffusion steps. Default=10",
+        default=10,
     )
     parser.add_argument(
         "-e",
@@ -458,62 +79,91 @@ def main():
         default=1.0,
     )
     parser.add_argument(
-        "-a",
-        "--alpha",
+        "-t",
+        "--style_combination",
         type=float,
         help="Weight for convex combination of current and previous styles. Default=0.7",
         default=0.7,
     )
-    parser.add_argument("--use_cuda", action="store_true", help="Run model on CUDA.", default=False)
+    parser.add_argument(
+        "-a",
+        "--alpha",
+        type=float,
+        help="Weight for speech timbre. Default=0.3",
+        default=0.3,
+    )
+    parser.add_argument(
+        "-b",
+        "--beta",
+        type=float,
+        help="Weight for speech prosody. Default=0.7",
+        default=0.7,
+    )
     parser.add_argument(
         "-r",
+        "--speech_rate",
+        type=float,
+        help="Speech rate. Default=1.0",
+        default=1.0,
+    )
+    parser.add_argument(
+        "-s",
         "--random-seed",
         type=int,
         help="Random seed. None means no seed. Default=None.",
         default=None,
     )
     parser.add_argument(
-        "-D", "--debug", type=str.upper, help="Set debug level. Default=INFO", default="INFO"
+        "-R",
+        "--ref_spk",
+        type=str,
+        default=None,
+        help="Path to reference speaker wav for voice cloning. Default=None.",
+    )
+    parser.add_argument(
+        "-L", "--loglevel", type=str.upper, help="Set logging level. Default=INFO", default="INFO"
     )
     args = parser.parse_args()
 
     # Set up logging
+    log_level = getattr(logging, args.loglevel, logging.INFO)
     logging.basicConfig(
-        format="%(asctime)s %(levelname)-10s %(message)s",
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%H:%M:%S",
         stream=sys.stdout,
-        level=args.debug,
+        level=log_level,
     )
-    logger = logging.getLogger("__name__")
+    # formatter = logging.Formatter(
+    #             "%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    #         )
+    logger = logging.getLogger(__name__)
 
     # Set random seed if specified
     if args.random_seed is not None:
         set_random_seed(args.random_seed)
 
-    # Set device
-    device = "cuda" if args.use_cuda else "cpu"
-    logger.debug("Device: %s", device)
-
-    # Define synthesizer
-    synth = Synthesizer(
-        args.model,
+    pts = PTS(
         args.config,
+        args.model,
+        t=args.style_combination,
+        alpha=args.alpha,
+        beta=args.beta,
+        diffusion_steps=args.diffusion_steps,
+        embedding_scale=args.embedding_scale,
+        speech_rate=args.speech_rate,
         use_glob_noise=args.use_glob_noise,
         fix_noise_in_ph_string=args.fix_noise_in_ph_string,
-        device=device,
-        log_level=args.debug,
+        log_level=log_level,
     )
 
-    # Synthesize speech
+    # Synthesize speech from phonetic text file
     with args.ifile as f:
-        wavs = synth.synthesize(
-            f.readlines(),
-            args.diffusion_steps,
-            args.embedding_scale,
-            args.alpha,
-        )
+        lines = [line.strip() for line in f]
+        wavs = pts(lines, args.ref_spk)
 
     # Save wavs as a single file
-    synth.save_wav(wavs, args.out_path)
+    pts.save_wav(wavs, args.out_path)
+    logger.debug("Wav file saved to %s", args.out_path)
 
 
 if __name__ == "__main__":
