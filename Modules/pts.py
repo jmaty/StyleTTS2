@@ -77,7 +77,7 @@ class PTS:
         self.speech_rate = speech_rate
 
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.debug("Using device: %s", self.device)
+        logger.info("Using device: %s", self.device)
 
         # Configure logging
         self._setup_logging(log_level)
@@ -87,7 +87,8 @@ class PTS:
         self.setup_model(model)
 
         self.text_cleaner = TextCleaner(
-            self._config.data_params.symbol_dict_path, pad=self._config.data_params.pad
+            self._config.data_params.symbol_dict_path,
+            pad=self._config.data_params.pad,
         )
 
         symbol_count = len(self.text_cleaner)
@@ -119,13 +120,13 @@ class PTS:
         # Determine if config is a path or a pre-loaded configuration
         if isinstance(config, str):
             # It's a path
-            logger.debug("Initializing PTS with config from: %s", config)
+            logger.info("Initializing PTS with config from: %s", config)
             self.config_path = config
             with open(config, encoding="utf-8") as file:
                 self._config = munchify(yaml.safe_load(file))
         else:
             # It's a pre-loaded configuration
-            logger.debug("Initializing PTS with provided configuration object")
+            logger.info("Initializing PTS with provided configuration object")
             self.config_path = None  # No path since config was passed directly
             # Ensure it's a Munch object (if it's a dict, convert it)
             self._config = (
@@ -136,12 +137,12 @@ class PTS:
         # Determine if model is a path or a pre-loaded model
         if isinstance(model, str):
             # It's a path
-            logger.debug("Loading model from path: %s", model)
+            logger.info("Loading model from path: %s", model)
             self._build_model()
             self._load_model_params(model)
         else:  # It's a pre-loaded model
             self.model = model
-            logger.debug("Model loaded from pre-loaded object")
+            logger.info("Model loaded from pre-loaded object")
         # Set up the diffusion sampler
         self._setup_sampler()
 
@@ -150,7 +151,7 @@ class PTS:
         if self._model is None:
             logger.warning("Cannot set to evaluation mode: Model is not initialized")
             return
-        logger.debug("Setting model to evaluation mode")
+        logger.info("Setting model to evaluation mode")
         _ = [self._model[key].eval() for key in self._model]
 
     def to_device(self):
@@ -158,7 +159,7 @@ class PTS:
         if self._model is None:
             logger.warning("Cannot move to device: Model is not initialized")
             return
-        logger.debug("Moving model to device: %s", self.device)
+        logger.info("Moving model to device: %s", self.device)
         _ = [self._model[key].to(self.device) for key in self._model]
 
     def _build_model(self):
@@ -174,25 +175,25 @@ class PTS:
         Returns:
             None: The model is stored as self.model
         """
-        logger.debug("Building StyleTTS2 model...")
+        logger.info("Building StyleTTS2 model...")
 
         # Load models
-        logger.debug("Loading ASR model from %s", self._config.ASR_path)
+        logger.info("Loading ASR model from %s", self._config.ASR_path)
         text_aligner = load_ASR_models(self._config.ASR_path, self._config.ASR_config)
 
-        logger.debug("Loading F0 model from %s", self._config.F0_path)
+        logger.info("Loading F0 model from %s", self._config.F0_path)
         pitch_extractor = load_F0_models(self._config.F0_path)
 
-        logger.debug("Loading PLBERT from %s", self._config.PLBERT_dir)
+        logger.info("Loading PLBERT from %s", self._config.PLBERT_dir)
         plbert = load_plbert(self._config.PLBERT_dir)
 
         # Build StyleTTS2 model
-        logger.debug("Constructing StyleTTS2 model with components")
+        logger.info("Constructing StyleTTS2 model with components")
         self._model = build_model(self._config.model_params, text_aligner, pitch_extractor, plbert)
 
         self.to_eval()
         self.to_device()
-        logger.debug("Model building complete")
+        logger.info("Model building complete")
 
     def _load_model_params(self, model_path):
         """
@@ -208,9 +209,9 @@ class PTS:
             This method assumes the checkpoint contains parameters under the 'net' key
             and uses an internal method _hack_module_prefix to modify parameter names if needed.
         """
-        logger.debug("Loading model parameters from %s", model_path)
+        logger.info("Loading model parameters from %s", model_path)
         params = torch.load(model_path, map_location="cpu")
-        logger.debug("Model parameters loaded: %s", params.keys())
+        logger.info("Model parameters loaded: %s", params.keys())
 
         # Reduced model does not have 'net' key but the original full model has 'net' key
         # => handle both cases
@@ -220,7 +221,7 @@ class PTS:
             params = params["net"]
 
         self._hack_module_prefix(params)
-        logger.debug("Model parameters loaded successfully")
+        logger.info("Model parameters loaded successfully")
         self.to_eval()
 
     def _hack_module_prefix(self, params):
@@ -249,9 +250,9 @@ class PTS:
         for key in self.model:
             if key in params:
                 try:
-                    logger.debug("Loading parameters for component: %s", key)
+                    logger.info("Loading parameters for component: %s", key)
                     self.model[key].load_state_dict(params[key])
-                    logger.debug("Successfully loaded parameters for: %s", key)
+                    logger.info("Successfully loaded parameters for: %s", key)
                 except Exception:
                     logger.warning(
                         "Direct loading failed for %s, trying to remove 'module.' prefix.",
@@ -265,7 +266,7 @@ class PTS:
                     # load params
                     try:
                         self.model[key].load_state_dict(new_state_dict, strict=False)
-                        logger.debug(
+                        logger.info(
                             "Successfully loaded parameters for %s after prefix removal", key
                         )
                     except Exception as exc:
@@ -341,11 +342,11 @@ class PTS:
         s_prev = None
 
         if isinstance(ref_s, str):
-            # If ref_s is a path, compute style embedding
+            # If ref_s is a path, compute style embedding.
+            # Otherwise, ref_s is assumed to be a reference speaker style embedding tensor or None
             ref_s = self.compute_style(ref_s, top_db=30)
-        # Otherwise, ref_s is assumed to be a reference speaker style embedding tensor or None
 
-        logger.debug("Phoneme strings: %s", ph_strings)
+        logger.info("Generating wavs from phoneme strings: %s", ph_strings)
 
         # Iterate over phoneme strings
         for ph_string in ph_strings:
@@ -365,11 +366,11 @@ class PTS:
             for ph_sent in re.findall(r"[^.!?]*[.!?]", ph_string):
                 if not ph_sent.strip():  # skip empty phonetic string
                     continue
-                logger.debug("Processing phonetic sentence: %s", ph_sent)
+                logger.debug("Phonetic sentence: %s", ph_sent)
 
                 # Add padding and tokenize phonetic sentence
                 ph_ids = self.text_cleaner(ph_sent, pad=True)
-                logger.debug("Phone IDs: %s", ph_ids)
+                logger.debug("Phoneme IDs: %s", ph_ids)
 
                 # Perform inference => generate wav
                 wav, s_prev = self.infer(
@@ -381,6 +382,7 @@ class PTS:
 
                 # Collect wavs (without silence forced in training)
                 wavs.append(wav[self.offset_beg : -self.offset_end])
+                logger.debug("Phonetic sentence generated")
 
         return wavs
 
@@ -405,6 +407,8 @@ class PTS:
             torch.Tensor: Style embedding.
         """
         with torch.no_grad():
+            logger.debug("Infering from phoneme IDs")
+            logger.debug("Computing phoentic features")
             # Prepare input lengths and masks
             input_lengths = torch.tensor([ph_ids.shape[-1]], dtype=torch.long, device=self.device)
             text_mask = length_to_mask(input_lengths)
@@ -451,12 +455,14 @@ class PTS:
             ref_s (torch.Tensor): Reference speaker embedding.
         """
         with torch.no_grad():
+            logger.debug("Infering from phonetic features")
             # Sampling from the diffusion model
             # - generate style embedding from contextual PL-BERT based features
             # - represent timbre and prosody
             # - `ref_s` is 256-dimensional tensor
             if ref_s is None:
                 # No reference speaker style embedding, typically for a single speaker model
+                logger.debug("No reference speaker style embedding provided")
                 s_pred = self._sampler(
                     self.generate_noise() if noise is None else noise,  # noise for diffusion
                     embedding=bert_en[0].unsqueeze(0),
@@ -464,6 +470,7 @@ class PTS:
                     num_steps=self.diffusion_steps,
                 ).squeeze(0)
             else:
+                logger.debug("Reference speaker style embedding provided: %s", ref_s.shape)
                 s_pred = self._sampler(
                     self.generate_noise() if noise is None else noise,  # noise for diffusion
                     embedding=bert_en[0].unsqueeze(0),
@@ -474,6 +481,7 @@ class PTS:
 
             # Combine styles
             if s_prev is not None:
+                logger.debug("Combining styles with previous style embedding")
                 # convex combination of previous and current styles
                 s_pred = self.t * s_pred + (1 - self.t) * s_prev
 
@@ -489,6 +497,7 @@ class PTS:
             #   (higher = more similar to the generated style,
             #   lower = more similar to the reference style)
             if ref_s is not None:
+                logger.debug("Combining styles with reference speaker style embedding")
                 ref = self.alpha * ref + (1 - self.alpha) * ref_s[:, :128]
                 s = self.beta * s + (1 - self.beta) * ref_s[:, 128:]
                 s_pred = torch.cat([ref, s], dim=-1)
@@ -597,13 +606,16 @@ class PTS:
             torch.Tensor: Style embedding.
         """
         with torch.no_grad():
+            logger.debug("Computing style from wav file: %s", wavpath)
             wav, sr = librosa.load(wavpath, sr=self._config.preprocess_params.sr)
 
             if top_db is not None:
                 # Trim silence
+                logger.debug("Trimming silence from wav (%d dB", top_db)
                 wav, _ = librosa.effects.trim(wav, top_db=top_db)
             if sr != self._config.preprocess_params.sr:
                 # Resample if necessary
+                logger.debug("Resampling wav from %d to %d", sr, self._config.preprocess_params.sr)
                 wav = librosa.resample(wav, sr, self._config.preprocess_params.sr)
 
             mel_tensor = preprocess(wav).to(self.device)
