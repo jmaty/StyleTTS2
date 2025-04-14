@@ -12,7 +12,8 @@ import torch
 import torch.nn.functional as F
 import yaml
 from accelerate import Accelerator, DistributedDataParallelKwargs
-from accelerate.logging import get_logger
+
+# from accelerate.logging import get_logger
 from monotonic_align import mask_from_lens
 from munch import Munch
 from torch.utils.tensorboard import SummaryWriter
@@ -79,7 +80,8 @@ def main():
     # Init NVLM
     nvidia_smi.nvmlInit()
     n_gpus = nvidia_smi.nvmlDeviceGetCount()
-    logger.info("NVLM initialized")
+    if accelerator.is_main_process:
+        logger.info("NVLM initialized")
 
     # Set up training parameters
     batch_size = config.get("batch_size", 4)
@@ -111,7 +113,8 @@ def main():
 
     # Set up text cleaner and pre-processing function
     text_cleaner = TextCleaner(data_params["symbol_dict_path"], pad=data_params["pad"])
-    logger.debug("Number of symbols: %d", len(text_cleaner))
+    if accelerator.is_main_process:
+        logger.debug("Number of symbols: %d", len(text_cleaner))
     assert len(text_cleaner) == 81, f"Number of symbols must be 81 but it is {len(text_cleaner)}"
     assert (
         model_params.n_token == 81
@@ -139,7 +142,8 @@ def main():
 
     model = build_model(model_params, text_aligner, pitch_extractor, plbert)
     bert_size = model.bert.config.max_position_embeddings  # ALBERT config
-    logger.info("BERT size: %d", bert_size)
+    if accelerator.is_main_process:
+        logger.info("BERT size: %d", bert_size)
 
     for k in model:
         model[k] = accelerator.prepare(model[k])
@@ -244,12 +248,13 @@ def main():
 
     best_loss = float("inf")  # best test loss
 
-    logger.info(" > Start training cycles:")
-    logger.info(" | > Starting epoch:   %d", start_epoch)
-    logger.info(" | > Total epochs:     %d", epochs)
-    logger.info(" | > Steps per epoch:  %d", tot_num_steps)
-    logger.info(" | > Input iterations: %d", iters)
-    logger.info()
+    if accelerator.is_main_process:
+        logger.info(" > Start training cycles:")
+        logger.info(" | > Starting epoch:   %d", start_epoch)
+        logger.info(" | > Total epochs:     %d", epochs)
+        logger.info(" | > Steps per epoch:  %d", tot_num_steps)
+        logger.info(" | > Input iterations: %d", iters)
+        logger.info()
 
     # === Start of training loop ==============================================
 
