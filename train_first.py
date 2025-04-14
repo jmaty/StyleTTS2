@@ -17,6 +17,7 @@ from monotonic_align import mask_from_lens
 from munch import Munch
 from torch.utils.tensorboard import SummaryWriter
 
+from logger import get_logger, setup_logging
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, create_slm_loss
 from meldataset import build_dataloader
 from models import build_model, load_ASR_models, load_checkpoint, load_F0_models, save_checkpoint
@@ -28,7 +29,6 @@ from utils import (
     get_image,
     length_to_mask,
     log_norm,
-    log_print,
     maximum_path,
     recursive_munch,
 )
@@ -38,8 +38,6 @@ warnings.simplefilter("ignore")
 
 # Disable TF32 computations for cuDNN
 torch.backends.cudnn.allow_tf32 = False
-
-logger = get_logger(__name__, log_level="DEBUG")
 
 
 def main():
@@ -53,20 +51,27 @@ def main():
     with open(args.config_path, encoding="utf-8") as fr:
         config = yaml.safe_load(fr)
 
-    log_dir = config["log_dir"]
     writer = None
+
+    # Set up logging
+    log_dir = config["log_dir"]
+    formatter_file = logging.Formatter(
+        fmt="%(levelname)s:%(asctime)s: %(message)s",
+        datefmt="%y%m%d-%H:%M:%S",
+    )
+    setup_logging(
+        level=logging.DEBUG,
+        file=osp.join(log_dir, "train.log"),
+        formatter_file=formatter_file,
+        level_file=logging.DEBUG,
+    )
+    logger = get_logger(__name__)  # Get a logger
 
     # Distrinuted computing
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(project_dir=log_dir, split_batches=True, kwargs_handlers=[ddp_kwargs])
     if accelerator.is_main_process:
-        writer = SummaryWriter(log_dir + "/tensorboard")
-
-    # Set up logging
-    file_handler = logging.FileHandler(osp.join(log_dir, "train.log"))
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter("%(levelname)s:%(asctime)s: %(message)s"))
-    logger.logger.addHandler(file_handler)
+        writer = SummaryWriter(osp.join(log_dir, "tensorboard"))
 
     # Set up device
     device = accelerator.device
@@ -106,7 +111,7 @@ def main():
 
     # Set up text cleaner and pre-processing function
     text_cleaner = TextCleaner(data_params["symbol_dict_path"], pad=data_params["pad"])
-    print(f"Number of symbols: {len(text_cleaner)}")
+    logger.debug("Number of symbols: %d", len(text_cleaner))
     assert len(text_cleaner) == 81, f"Number of symbols must be 81 but it is {len(text_cleaner)}"
     assert (
         model_params.n_token == 81
@@ -134,7 +139,7 @@ def main():
 
     model = build_model(model_params, text_aligner, pitch_extractor, plbert)
     bert_size = model.bert.config.max_position_embeddings  # ALBERT config
-    print(f"BERT size: {bert_size}")
+    logger.info("BERT size: %d", bert_size)
 
     for k in model:
         model[k] = accelerator.prepare(model[k])
@@ -205,10 +210,10 @@ def main():
             )
             # advance start epoch or we'd re-train and rewrite the last epoch file
             # start_epoch += 1
-            print(f'Loading pre-trained model: {config["pretrained_model"]}')
-            print(f"Starting epoch:      {start_epoch}")
-            print(f"Starting iterations: {iters}")
-            print()
+            logger.info("Loading pre-trained model: %s", config["pretrained_model"])
+            logger.info("Starting epoch:            %d", start_epoch)
+            logger.info("Starting iterations:       %d", iters)
+            logger.info("")
         else:
             start_epoch = 0
             iters = 0
@@ -217,7 +222,7 @@ def main():
     try:
         n_down = model.text_aligner.module.n_down
     except AttributeError:
-        print("Distributed computing NOT used")
+        logger.warning("Distributed computing NOT used")
         n_down = model.text_aligner.n_down
 
     # wrapped losses for compatibility with mixed precision
@@ -239,12 +244,12 @@ def main():
 
     best_loss = float("inf")  # best test loss
 
-    print(" > Start training cycles:")
-    print(f" | > Starting epoch:   {start_epoch}")
-    print(f" | > Total epochs:     {epochs}")
-    print(f" | > Steps per epoch:  {tot_num_steps}")
-    print(f" | > Input iterations: {iters}")
-    print()
+    logger.info(" > Start training cycles:")
+    logger.info(" | > Starting epoch:   %d", start_epoch)
+    logger.info(" | > Total epochs:     %d", epochs)
+    logger.info(" | > Steps per epoch:  %d", tot_num_steps)
+    logger.info(" | > Input iterations: %d", iters)
+    logger.info()
 
     # === Start of training loop ==============================================
 
@@ -442,9 +447,18 @@ def main():
 
             if (i + 1) % log_interval == 0 and accelerator.is_main_process:
                 mel_loss = running_loss / log_interval
-                log_print(
-                    f"Epoch [{epoch+1:3}/{epochs}], Step [{i+1:4}/{tot_num_steps}], Mel Loss: {mel_loss:.5f}, Gen Loss: {loss_gen_all:.5f}, Disc Loss: {d_loss:.5f}, Mono Loss: {loss_mono:.5f}, S2S Loss: {loss_s2s:.5f}, SLM Loss: {loss_slm:.5f}",
-                    logger,
+                logger.info(
+                    "Epoch [%3d/%d], Step [%4d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f",
+                    epoch + 1,
+                    epochs,
+                    i + 1,
+                    tot_num_steps,
+                    mel_loss,
+                    loss_gen_all,
+                    d_loss,
+                    loss_mono,
+                    loss_s2s,
+                    loss_slm,
                 )
                 writer.add_scalar("train/mel_loss", mel_loss, iters)
                 writer.add_scalar("train/gen_loss", loss_gen_all, iters)
@@ -452,13 +466,20 @@ def main():
                 writer.add_scalar("train/mono_loss", loss_mono, iters)
                 writer.add_scalar("train/s2s_loss", loss_s2s, iters)
                 writer.add_scalar("train/slm_loss", loss_slm, iters)
+
                 for device_idx in range(n_gpus):
-                    handle = nvidia_smi.nvmlDeviceGetHandleByIndex(device_idx)
-                    info = nvidia_smi.nvmlDeviceGetMemoryInfo(handle)
-                    print(
-                        f"Device {device_idx} VRAM usage: {info.used>>30}/{info.total>>30} GB ({info.used/info.total:.2%})"
-                    )
-                print("Time elapsed:", time.time() - start_time)
+                    for device_idx in range(n_gpus):
+                        handle = nvidia_smi.nvmlDeviceGetHandleByIndex(device_idx)
+                        info = nvidia_smi.nvmlDeviceGetMemoryInfo(handle)
+                        logger.info(
+                            "Device %d VRAM usage: %d/%d GB (%.2f%%)",
+                            device_idx,
+                            info.used >> 30,
+                            info.total >> 30,
+                            info.used / info.total * 100,
+                        )
+                logger.info("Time elapsed: %.2f seconds", time.time() - start_time)
+
                 running_loss = 0
 
         # === Start of validation part ==============================================
@@ -540,11 +561,12 @@ def main():
                 iters_test += 1
 
         if accelerator.is_main_process:
-            # print('Epochs:', epoch + 1)
-            log_print(
-                f"Epoch [{epoch+1:3}/{epochs}]: validation loss: {loss_test/iters_test:.3f}", logger
+            logger.info(
+                "Epoch [%3d/%d]: validation loss: %.3f",
+                epoch + 1,
+                epochs,
+                loss_test / iters_test,
             )
-            # print('\n\n\n')
             writer.add_scalar("eval/mel_loss", loss_test / iters_test, epoch)
             attn_image = get_image(s2s_attn[0].cpu().numpy().squeeze())
             writer.add_figure("eval/attn", attn_image, epoch)
@@ -618,11 +640,13 @@ def main():
                 log_dir, config.get("first_stage_path", "first_stage.pth")
             )
             os.symlink(osp.basename(final_filepath), first_stage_symlink)
-            print(f"Final first-stage model saved to {final_filepath}")
+            logger.info("Final first-stage model saved to %s", final_filepath)
         except FileExistsError:
-            print(
-                f"Symlink or file {first_stage_symlink} already exists\
-                   => {final_filepath} was not symlinked!"
+            logger.warning(
+                "Symlink or file %s already exists\
+                   => %s was not symlinked!",
+                first_stage_symlink,
+                final_filepath,
             )
 
         # Ending work with NVIDIA NVLM
