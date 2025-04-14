@@ -70,7 +70,7 @@ def main():
         formatter_file=formatter_file,
     )
     logger = get_logger(__name__)  # Get a logger
-    writer = SummaryWriter(log_dir + "/tensorboard")
+    writer = SummaryWriter(osp.join(log_dir, "tensorboard"))
 
     # Init NVLM
     nvidia_smi.nvmlInit()
@@ -977,6 +977,10 @@ def main():
                         outfile = f"epoch_2nd_{epoch:0>5}_val-pred-{idx}.wav"
                         pts.save_wav(wav, os.path.join(test_audio_dir, outfile))
 
+        # --- End of validation part ------------------------------------------
+
+        # --- Start of saving part --------------------------------------------
+
         # Save progress
         if epoch % saving_epoch == 0:
             curr_loss = loss_test.item() / iters_test
@@ -1013,7 +1017,6 @@ def main():
                     yaml.dump(config, outfile, default_flow_style=False)
 
             # Synthesize test audios to evaluate the model's performance after diffusion training has started.
-            # Does not work for multispeaker mode so far.
             if save_test_audio and epoch >= diff_epoch:
                 # Set up number of speakers to test if multispeaker is enabled
                 n_speakers = min(3, len(ref_s)) if multispeaker else 1
@@ -1053,6 +1056,12 @@ def main():
                     log_dir,
                     use_epoch_in_name=False,
                 )
+
+        # --- End of saving part ----------------------------------------------
+
+    # === End of training loop ================================================
+
+    # === Final model saving ==================================================
 
     # Save the final checkpoint
     final_filepath = save_checkpoint(
