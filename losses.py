@@ -7,6 +7,11 @@ import whisper
 from transformers import AutoModel, WhisperConfig, WhisperPreTrainedModel
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
+from logger import get_logger
+
+# Setup logger
+logger = get_logger(__name__)
+
 
 class SpectralConvergengeLoss(torch.nn.Module):
     """Spectral convergence loss module."""
@@ -375,7 +380,7 @@ class WhisperLoss(SLMLoss):
         converting the model to bfloat16 precision for efficiency.
         """
         super().__init__(wd, model_sr, slm_sr)
-        print(f"Using Whisper for SLM loss: {model_name}")
+        logger.info("Using Whisper for SLM loss: %s", model_name)
         # # Load the Whisper large-v2 model encoder-only configuration and
         # # set it to be non-decoder
         # config = WhisperConfig.from_pretrained("Respair/Whisper_Large_v2_Encoder_Block")
@@ -611,7 +616,7 @@ class WavLMLoss(SLMLoss):
             Sample rate for the speech language model, defaults to 16000 Hz.
         """
         super().__init__(wd, model_sr, slm_sr)
-        print(f"Using WavLM for SLM loss: {model_name}")
+        logger.info("Using WavLM for SLM loss: %s", model_name)
         self.slm = AutoModel.from_pretrained(model_name)
 
     def forward(self, wav, y_rec):

@@ -29,6 +29,10 @@ from Modules.hifigan import Decoder as HifiDecoder
 from Modules.istftnet import Decoder as ISTFTDecoder
 from Utils.ASR.models import ASRCNN
 from Utils.JDC.model import JDCNet
+from logger import get_logger
+
+# Setup logger
+logger = get_logger(__name__)
 
 
 class LearnedDownSample(nn.Module):
@@ -918,7 +922,7 @@ def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_module
     params = state["net"]
     for key in model:
         if key in params and key not in ignore_modules:
-            print(f"{key} loaded")
+            logger.info("%s loaded", key)
             try:
                 model[key].load_state_dict(params[key], strict=True)
             except RuntimeError:  # DataParallel module. mismatch
@@ -980,10 +984,10 @@ def save_checkpoint(
     filepath = os.path.join(save_dir, filename)
     if os.path.isfile(filepath):
         # Skip saving model when already exists
-        print(f"Model {filepath} already exists => skipping")
+        logger.warning("Model %s already exists => skipping", filepath)
         return filepath
     torch.save(state_dict, filepath)
-    print(f"New model saved to {filepath}")
+    logger.info("New model saved to %s", filepath)
 
     if max_saved_models:
         # Get list of all saved models and sort by epoch number
@@ -996,7 +1000,7 @@ def save_checkpoint(
         while len(saved_models) > max_saved_models:
             old_model = saved_models.pop(0)
             os.remove(os.path.join(save_dir, old_model))
-            print(f"Old model {old_model} removed")
+            logger.info("Old model %s removed", old_model)
 
     # Return saved model's filepath
     return filepath

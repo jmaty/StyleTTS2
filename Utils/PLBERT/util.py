@@ -1,9 +1,15 @@
 import os
+import os.path as osp
 from collections import OrderedDict
 
 import torch
 import yaml
 from transformers import AlbertConfig, AlbertModel
+
+from logger import get_logger
+
+# Setup logger
+logger = get_logger(__name__)
 
 
 class CustomAlbert(AlbertModel):
@@ -34,8 +40,8 @@ def load_plbert(log_dir):
     ]
     iters = sorted(iters)[-1]
 
-    checkpoint_path = log_dir + "/step_" + str(iters) + ".t7"
-    print(f"Loading PL-BERT at {checkpoint_path} ...")
+    checkpoint_path = osp.join(log_dir, f"step_{iters}.t7")
+    logger.info("Loading PL-BERT from %s", checkpoint_path)
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     state_dict = checkpoint["net"]
     new_state_dict = OrderedDict()
