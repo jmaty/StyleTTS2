@@ -103,15 +103,10 @@ class AlignedColoredFormatter(logging.Formatter):
 
 def setup_logging(
     level=logging.INFO,
-    fmt="%(asctime)s %(levelname)s %(name)s %(message)s",
-    datefmt="%y%m%d-%H:%M:%S",
-    level_file=None,
+    formatter=None,
     file=None,
-    fmt_file=None,
-    datefmt_file=None,
-    aligned=False,
-    level_width=8,
-    name_width=25,
+    level_file=None,
+    formatter_file=None,
 ):
     """
     Configure root logger with consistent formatting and handling.
@@ -131,10 +126,8 @@ def setup_logging(
     if file:
         if level_file is None:
             level_file = level
-        if fmt_file is None:
-            fmt_file = fmt
-        if datefmt_file is None:
-            datefmt_file = datefmt
+        if formatter_file is None:
+            formatter_file = formatter
         # Set root logger level to the minimum of console and file levels
         # to ensure all logs are captured
         root_logger.setLevel(min(level, level_file))
@@ -146,30 +139,17 @@ def setup_logging(
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
 
-    if aligned:
-        # Create formatter for aligned output with colors
-        console_formatter = AlignedColoredFormatter(
-            fmt=fmt,
-            datefmt=datefmt,
-            level_width=level_width,
-            name_width=name_width,
-        )
-    else:
-        # Create basic console formatter
-        console_formatter = ColoredFormatter(fmt=fmt, datefmt=datefmt)
-
     # Create console handler
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(console_formatter)
+    console_handler.setFormatter(formatter)
     console_handler.setLevel(level)
     root_logger.addHandler(console_handler)
 
     # Create file handler if log file is specified
     if file:
         # Create basic formatter for file handler
-        file_formatter = logging.Formatter(fmt=fmt_file, datefmt=datefmt_file)
         file_handler = logging.FileHandler(file)
-        file_handler.setFormatter(file_formatter)
+        file_handler.setFormatter(formatter_file)
         file_handler.setLevel(level_file)
         root_logger.addHandler(file_handler)
 

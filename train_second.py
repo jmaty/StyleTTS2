@@ -60,11 +60,14 @@ def main():
 
     # Set up logging
     log_dir = config["log_dir"]
+    formatter_file = logging.Formatter(
+        fmt="%(levelname)s:%(asctime)s: %(message)s",
+        datefmt="%y%m%d-%H:%M:%S",
+    )
     setup_logging(
-        level=logging.WARNING,
+        level=logging.INFO,
         file=osp.join(log_dir, "train.log"),
-        fmt_file="%(levelname)s:%(asctime)s: %(message)s",
-        datefmt_file="%y%m%d-%H:%M:%S",
+        formatter_file=formatter_file,
     )
     logger = get_logger(__name__)  # Get a logger
     writer = SummaryWriter(log_dir + "/tensorboard")

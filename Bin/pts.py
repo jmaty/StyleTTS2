@@ -7,7 +7,7 @@ import sys
 from argparse import RawTextHelpFormatter
 
 from Modules.pts import PTS, set_random_seed
-from logger import setup_logging, get_logger
+from logger import setup_logging, get_logger, AlignedColoredFormatter
 
 
 def main():
@@ -127,10 +127,15 @@ def main():
     args = parser.parse_args()
 
     # Set up logging
+    formatter = AlignedColoredFormatter(
+        fmt="%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt="%y%m%d-%H:%M:%S",
+        name_width=15,
+    )
     setup_logging(
         level=getattr(logging, args.loglevel, logging.INFO),
-        aligned=True,
-        name_width=15,
+        formatter=formatter,
+        file=None,
     )
     logger = get_logger(__name__)  # Get a logger
 

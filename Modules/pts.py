@@ -13,8 +13,9 @@ from meldataset import preprocess
 from models import build_model, load_ASR_models, load_F0_models
 from Modules.diffusion.sampler import ADPM2Sampler, DiffusionSampler, KarrasSchedule
 from text_utils import TextCleaner
-from utils import get_logger, length_to_mask, log_norm
+from utils import length_to_mask, log_norm
 from Utils.PLBERT.util import load_plbert
+from logger import get_logger
 
 # Setup logger
 logger = get_logger(__name__)
@@ -164,7 +165,6 @@ class PTS:
         logger.info("Loading F0 model from %s", self._config.F0_path)
         pitch_extractor = load_F0_models(self._config.F0_path)
 
-        logger.info("Loading PLBERT from %s", self._config.PLBERT_dir)
         plbert = load_plbert(self._config.PLBERT_dir)
 
         # Build StyleTTS2 model
@@ -227,17 +227,12 @@ class PTS:
         - Uses OrderedDict for maintaining the order of parameters during the prefix removal process.
         - Performs strict=False loading in the fallback case to allow for partial state dict loading.
         """
+        logger.warning("Hacking model parameters with module prefix handling")
         for key in self.model:
             if key in params:
                 try:
-                    logger.info("Loading parameters for component: %s", key)
                     self.model[key].load_state_dict(params[key])
-                    logger.info("Successfully loaded parameters for: %s", key)
                 except Exception:
-                    logger.warning(
-                        "Direct loading failed for %s, trying to remove 'module.' prefix.",
-                        key,
-                    )
                     state_dict = params[key]
                     new_state_dict = OrderedDict()
                     for k, v in state_dict.items():
@@ -246,15 +241,11 @@ class PTS:
                     # load params
                     try:
                         self.model[key].load_state_dict(new_state_dict, strict=False)
-                        logger.info(
-                            "Successfully loaded parameters for %s after prefix removal", key
-                        )
                     except Exception as exc:
                         logger.error("Failed to load parameters for %s: %s}", key, str(exc))
             else:
-                logger.warning(
-                    "No parameters found for component: %s => not used in inference", key
-                )
+                logger.debug("No parameters found for component: %s => not used in inference", key)
+        logger.info("Model parameters hacked successfully")
 
     def generate_noise(self):
         """Generate noise
