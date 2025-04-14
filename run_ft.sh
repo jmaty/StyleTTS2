@@ -8,7 +8,7 @@ export LC_NUMERIC="en_US.UTF-8"
 # -----------------------------------------------------------------------------
 # Default params
 SPEC="gpu3"
-HOURS=72
+HOURS=24
 INTB=Train_finetune.ipynb
 # QSUB ARGUMENTS
 MEM=128gb
@@ -17,12 +17,16 @@ NCPUS=8
 NGPUS=1
 
 if [[ "$#" -lt 1 ]]; then
-     printf "Usage: run_ft.sh exp_dir [specification: iti dgx gpu<3-4>] [hours] [jobid]\n" >&2
+     printf "Usage: run_ft.sh pretrained_model [specification: iti dgx gpu<3-4>] [hours] [jobid]\n" >&2
      exit 1
 fi
 
-# Input experimental directory
-EXPDIR=$1
+PRETRAINED_MODEL=$1  # Path to the pretrained model
+# Set up experiment directory and config file:
+# - experiment directory is the directory of the pretrained model
+# - config file is the config2b.yml in the experiment directory
+EXPDIR=$(dirname $PRETRAINED_MODEL)
+
 # Check that config file exists
 CFG=$EXPDIR/config.yml
 if [[ ! -e $CFG ]]; then
@@ -87,7 +91,7 @@ EXP="$(basename $EXPDIR)_ft"
 # Timestep to differentiate among runs with the same run name
 TIMESTEP=$(date +"%y%m%d-%H%M%S")
 
-SINGULARITY=/storage/plzen4-ntis/home/jmatouse/singularity/papermill_23.12-latest.sh
+SINGULARITY=/storage/plzen4-ntis/home/jmatouse/singularity/papermill_24.12-r8.sh
 
 # Set the log dir according to the input experiment directory
 # (the original log dir in the config file serves just as a placeholder)
