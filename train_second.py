@@ -118,7 +118,7 @@ def main():
 
     # Set up text cleaner
     text_cleaner = TextCleaner(data_params["symbol_dict_path"], pad=data_params["pad"])
-    print(f"Number of symbols: {len(text_cleaner)}")
+    logger.debug("Number of symbols: %d", len(text_cleaner))
     assert len(text_cleaner) == 81, f"Number of symbols must be 81 but it is {len(text_cleaner)}"
 
     # Load pretrained utility models
@@ -143,7 +143,7 @@ def main():
     # Load data & dataloaders
     train_list, val_list = get_data_path_list(train_path, val_path)
 
-    print(f"BERT size: {model.bert.config.max_position_embeddings}")
+    logger.info("BERT size: %d", model.bert.config.max_position_embeddings)
 
     dataset_config = {
         "sr": sr,
@@ -194,7 +194,7 @@ def main():
     if not load_pretrained:
         if config.get("first_stage_path", "") != "":
             first_stage_path = osp.join(log_dir, config.get("first_stage_path", "first_stage.pth"))
-            print(f"Loading the first stage model at {first_stage_path} ...")
+            logger.info("Loading the first stage model at %s ...", first_stage_path)
             model, _, start_epoch, _ = load_checkpoint(
                 model,
                 None,
@@ -281,10 +281,10 @@ def main():
         )
         # # advance start epoch or we'd re-train and rewrite the last epoch file
         # start_epoch += 1
-        print(f'Loading pre-trained model: {config["pretrained_model"]}')
-        print(f"Starting epoch:      {start_epoch}")
-        print(f"Starting iterations: {iters}")
-        print()
+        logger.info("Loading pre-trained model: %s", config["pretrained_model"])
+        logger.info("Starting epoch:      %d", start_epoch)
+        logger.info("Starting iterations: %d", iters)
+        logger.info("")
 
     n_down = model.text_aligner.n_down
 
@@ -296,8 +296,8 @@ def main():
 
     stft_loss = MultiResolutionSTFTLoss().to(device)
 
-    print("BERT", optimizer.optimizers["bert"])
-    print("decoder", optimizer.optimizers["decoder"])
+    # print("BERT", optimizer.optimizers["bert"])
+    # print("decoder", optimizer.optimizers["decoder"])
 
     # === Change sigma data calculation ===
     # Working with running values to enable following calculation from already saved model
@@ -334,13 +334,13 @@ def main():
     # Total number of steps given the batch size
     tot_num_steps = len(train_list) // batch_size
 
-    print(" > Start training cycles:")
-    print(f" | > Starting epoch:   {start_epoch}")
-    print(f" | > Total epochs:     {epochs}")
-    print(f" | > Steps per epoch:  {tot_num_steps}")
-    print(f" | > Input iterations: {iters}")
-    print(f" | > Sigma data:       {inp_sigma_data}")
-    print()
+    logger.info(" > Start training cycles:")
+    logger.info(" | > Starting epoch:   %d", start_epoch)
+    logger.info(" | > Total epochs:     %d", epochs)
+    logger.info(" | > Steps per epoch:  %d", tot_num_steps)
+    logger.info(" | > Input iterations: %d", iters)
+    logger.info(" | > Sigma data:       %f", inp_sigma_data)
+    logger.info("")
 
     # === Start of training loop ==============================================
 
@@ -761,10 +761,14 @@ def main():
                 for device_idx in range(n_gpus):
                     handle = nvidia_smi.nvmlDeviceGetHandleByIndex(device_idx)
                     info = nvidia_smi.nvmlDeviceGetMemoryInfo(handle)
-                    print(
-                        f"Device {device_idx} VRAM usage: {info.used>>30}/{info.total>>30} GB ({info.used/info.total:.2%})"
+                    logger.info(
+                        "Device %d VRAM usage: %d/%d GB (%.2f%%)",
+                        device_idx,
+                        info.used >> 30,
+                        info.total >> 30,
+                        info.used / info.total * 100,
                     )
-                print("Time elapsed:", time.time() - start_time)
+                logger.info("Time elapsed: %.2f seconds", time.time() - start_time)
 
         # === Start of validation part ==============================================
 
@@ -885,7 +889,7 @@ def main():
                     iters_test += 1
 
                 except Exception as e:
-                    print(f"[!] Error: {e}")
+                    logger.error("[!] Error: %s", e)
                     traceback.print_exc()
                     continue
 
@@ -996,8 +1000,8 @@ def main():
                 config["model_params"]["diffusion"]["dist"]["sigma_data"] = float(
                     sigma_sum / sigma_count
                 )
-                print(
-                    f'Estimated sigma: {config["model_params"]["diffusion"]["dist"]["sigma_data"]}'
+                logger.info(
+                    "Estimated sigma: %f", config["model_params"]["diffusion"]["dist"]["sigma_data"]
                 )
 
                 #     config["model_params"]["diffusion"]["dist"]["sigma_data"] = float(np.mean(running_std))
@@ -1066,7 +1070,7 @@ def main():
             # Create a symlink to the final model
             final_model_symlink = osp.join(log_dir, "second_stage.pth")
             os.symlink(osp.basename(final_filepath), final_model_symlink)
-            print(f"Final second-stage model saved to {final_filepath}")
+            logger.info("Final second-stage model saved to %s", final_filepath)
 
             # Reduce the final model size by removing the optimizer state
             del model["mpd"]
@@ -1081,14 +1085,16 @@ def main():
             state_dict = {key: model[key].state_dict() for key in model}
             filepath = osp.join(log_dir, "model4tts.pth")
             torch.save(state_dict, filepath)
-            print(f"Reduced model saved to {filepath}")
+            logger.info("Reduced model saved to %s", filepath)
 
     except FileExistsError:
-        print(
-            f"Symlink or file {final_model_symlink} already exists => {final_filepath} was not symlinked!"
+        logger.warning(
+            "Symlink or file %s already exists => %s was not symlinked!",
+            final_model_symlink,
+            final_filepath,
         )
     except Exception as e:
-        print(f"Error when reducing model: {e}")
+        logger.error("Error when reducing model: %s", e)
     # # if estimate sigma, save the estimated sigma
     # if epoch >= diff_epoch and model_params.diffusion.dist.estimate_sigma_data:
     #     # config["model_params"]["diffusion"]["dist"]["sigma_data"] = float(np.mean(running_std))
