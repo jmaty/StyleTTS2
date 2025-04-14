@@ -1,5 +1,4 @@
 # coding: utf-8
-import logging
 import os.path as osp
 import random
 
@@ -12,8 +11,10 @@ import torch.nn.functional as F
 import torchaudio
 from torch.utils.data import DataLoader
 
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+from logger import get_logger
+
+# Setup logger
+logger = get_logger(__name__)
 
 np.random.seed(1)
 random.seed(1)
