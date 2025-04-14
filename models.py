@@ -93,8 +93,7 @@ class LearnedUpSample(nn.Module):
             )
         else:
             raise RuntimeError(
-                "Got unexpected upsampletype %s, expected is [none, timepreserve, half]"
-                % self.layer_type
+                f"Got unexpected upsampletype {self.layer_type}, expected is [none, timepreserve, half]"
             )
 
     def forward(self, x):
@@ -739,7 +738,24 @@ class DurationEncoder(nn.Module):
 
 
 def load_F0_models(path):
-    # load F0 model
+    """
+    Load a JDCNet fundamental frequency (F0) model from a specified path.
+    This function loads the pretrained F0 model from a checkpoint file, initializes
+    the model with appropriate parameters, and loads the state dictionary from the
+    checkpoint. The model is set to training mode after loading.
+    Parameters
+    ----------
+    path : str
+        The file path to the saved F0 model checkpoint.
+    Returns
+    -------
+    f0_model : JDCNet
+        The loaded fundamental frequency model instance ready for use.
+    Notes
+    -----
+    The model expects the checkpoint to have a 'net' key containing the state dictionary.
+    """
+    logger.info("Loading F0 model from %s", path)
     f0_model = JDCNet(num_class=1, seq_len=192)
     params = torch.load(path, map_location="cpu")["net"]
     f0_model.load_state_dict(params)
@@ -749,9 +765,30 @@ def load_F0_models(path):
 
 
 def load_ASR_models(ASR_MODEL_PATH, ASR_MODEL_CONFIG):
-    # load ASR model
+    """
+    Load an Automatic Speech Recognition (ASR) model using the specified model path and configuration.
+    Parameters
+    ----------
+    ASR_MODEL_PATH : str
+        Path to the saved ASR model weights.
+    ASR_MODEL_CONFIG : str
+        Path to the YAML configuration file for the ASR model.
+    Returns
+    -------
+    asr_model : ASRCNN
+        The loaded ASR model instance set to training mode.
+    Notes
+    -----
+    The function performs the following steps:
+    1. Loads the model configuration from the specified YAML file
+    2. Initializes an ASRCNN model with the loaded configuration
+    3. Loads the model weights from the specified path
+    4. Sets the model to training mode before returning
+    The ASRCNN class should be imported before calling this function.
+    """
+
     def _load_config(path):
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             config = yaml.safe_load(f)
         model_config = config["model_params"]
         return model_config
@@ -762,6 +799,7 @@ def load_ASR_models(ASR_MODEL_PATH, ASR_MODEL_CONFIG):
         model.load_state_dict(params)
         return model
 
+    logger.info("Loading ASR model from %s", ASR_MODEL_PATH)
     asr_model_config = _load_config(ASR_MODEL_CONFIG)
     asr_model = _load_model(asr_model_config, ASR_MODEL_PATH)
     _ = asr_model.train()
@@ -770,6 +808,59 @@ def load_ASR_models(ASR_MODEL_PATH, ASR_MODEL_CONFIG):
 
 
 def build_model(args, text_aligner, pitch_extractor, bert):
+    """
+    Builds the StyleTTS2 model components.
+    This function constructs and configures all neural network components required for the
+    StyleTTS2 TTS system, including text encoding, style encoding, prosody prediction,
+    diffusion model, and waveform generation.
+    Parameters
+    ----------
+    args : object
+        Configuration object containing model hyperparameters:
+        - hidden_dim: Dimension of hidden layers
+        - style_dim: Dimension of style vectors
+        - n_mels: Number of mel spectrogram bins
+        - n_layer: Number of layers in various components
+        - max_dur: Maximum duration for prosody prediction
+        - dropout: Dropout rate for predictor
+        - dim_in: Input dimension for style encoders
+        - n_token: Number of tokens in the vocabulary
+        - multispeaker: Boolean flag for multispeaker model configuration
+        - diffusion: Configuration for diffusion model parameters
+        - slm: Configuration for SLM discriminator parameters
+        - decoder: Configuration for the decoder:
+          - type: Either "istftnet" or "hifigan"
+          - resblock_kernel_sizes: Kernel sizes for residual blocks
+          - upsample_rates: Rates for upsampling
+          - upsample_initial_channel: Initial channel count for upsampling
+          - resblock_dilation_sizes: Dilation sizes for residual blocks
+          - upsample_kernel_sizes: Kernel sizes for upsampling
+          - gen_istft_n_fft: FFT size for ISTFT (for istftnet only)
+          - gen_istft_hop_size: Hop size for ISTFT (for istftnet only)
+    text_aligner : nn.Module
+        Module that aligns text with audio features
+    pitch_extractor : nn.Module
+        Module that extracts pitch information from audio
+    bert : nn.Module
+        Pre-trained BERT model for extracting contextual text embeddings
+    Returns
+    -------
+    nets : Munch
+        A Munch object containing all model components:
+        - bert: BERT model for text embedding
+        - bert_encoder: Linear projection of BERT embeddings
+        - predictor: Prosody predictor module
+        - decoder: Mel-spectrogram decoder (ISTFTNet or HifiGAN)
+        - text_encoder: Text encoding module
+        - predictor_encoder: Style encoder for prosody prediction
+        - style_encoder: Style encoder for acoustic features
+        - diffusion: Audio diffusion model for generating waveforms
+        - text_aligner: Module for aligning text with audio
+        - pitch_extractor: Module for extracting pitch information
+        - mpd: Multi-Period Discriminator for adversarial training
+        - msd: Multi-Resolution Spectrogram Discriminator
+        - wd: Waveform Discriminator for SLM
+    """
     assert args.decoder.type in ["istftnet", "hifigan"], "Decoder type unknown"
 
     if args.decoder.type == "istftnet":
@@ -871,51 +962,41 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     return nets
 
 
-# def load_checkpoint2(model, optimizer, path, load_only_params=True, ignore_modules=None, n_gpus=1):
-#     # Modified to deal with inconsistent key names between first and second training stages
-#     # => see https://github.com/yl4579/StyleTTS2/issues/121
-#     if ignore_modules is None:
-#         ignore_modules = []
-#     state = torch.load(path, map_location="cpu")
-#     params = state["net"]
-#     for key in model:
-#         if key in params and key not in ignore_modules:
-#             print(f"== {key} loaded")
-#             try:
-#                 model[key].load_state_dict(params[key], strict=True)
-#             except RuntimeError:  # DataParallel module. mismatch
-#                 print(model[key].state_dict().keys())
-#                 state_dict = params[key]
-#                 new_state_dict = OrderedDict()
-#                 for k, v in state_dict.items():
-#                     name = k
-#                     if n_gpus == 1 and k.startswith("module."):
-#                         name = k[7:]  # remove `module.`
-#                     elif not k.startswith("module."):
-#                         name = "module." + k
-#                     print(f"{k} => {name}")
-#                     new_state_dict[name] = v
-#                 # load params
-#                 model[key].load_state_dict(new_state_dict, strict=False)
-#     _ = [model[key].eval() for key in model]
-
-#     if not load_only_params:
-#         # advance start epoch or we'd re-train and rewrite the last epoch file
-#         epoch = state["epoch"] + 1
-#         iters = state["iters"]
-#         optimizer.load_state_dict(state["optimizer"])
-#     else:
-#         epoch = 0
-#         iters = 0
-
-#     return model, optimizer, epoch, iters
-
-
 def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_modules=None):
+    """
+    Load model and optimizer states from a checkpoint file.
+    This function handles loading model parameters with special handling for
+    DataParallel modules that might have key name inconsistencies between
+    training stages.
+    Parameters
+    ----------
+    model : dict
+        Dictionary of model components to load
+    optimizer : torch.optim.Optimizer
+        Optimizer to load state
+    path : str
+        Path to the checkpoint file
+    load_only_params : bool, default=True
+        If True, only loads model parameters without optimizer state,
+        and resets epoch/iters to 0. If False, loads optimizer state
+        and continues from saved epoch/iters.
+    ignore_modules : list, optional
+        List of module names to ignore during loading
+    Returns
+    -------
+    tuple
+        (model, optimizer, epoch, iters) - The loaded model, optimizer,
+        current epoch, and iteration count
+    Notes
+    -----
+    This function includes handling for inconsistent key names between first
+    and second training stages as noted in StyleTTS2 GitHub issues.
+    """
     # Modified to deal with inconsistent key names between first and second training stages
     # => see https://github.com/yl4579/StyleTTS2/issues/254,
     # https://github.com/yl4579/StyleTTS2/issues/21#issue-1962579727
     # https://github.com/pytorch/pytorch/issues/9176#issuecomment-403570715
+
     if ignore_modules is None:
         ignore_modules = []
     state = torch.load(path, map_location="cpu")
@@ -967,6 +1048,27 @@ def save_checkpoint(
     max_saved_models=None,
     use_epoch_in_name=True,
 ):
+    """
+    Save model checkpoint to disk.
+    Args:
+        model (dict): Dictionary of network models to save
+        optimizer: Optimizer whose state will be saved
+        epoch (int): Current epoch number
+        iters (int): Current iteration count
+        loss (float): Current validation loss
+        basename (str): Base filename for the saved model
+        save_dir (str): Directory to save the model in
+        max_saved_models (int, optional): Maximum number of saved models to keep.
+            If exceeded, oldest models will be deleted. If None, all models are kept.
+        use_epoch_in_name (bool, optional): Whether to include epoch number in filename.
+            Defaults to True.
+    Returns:
+        str: Path to the saved checkpoint file
+    Notes:
+        - Creates save_dir if it doesn't exist
+        - Skips saving if the exact file already exists
+        - If max_saved_models is specified, maintains only the N most recent checkpoints
+    """
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
