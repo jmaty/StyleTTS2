@@ -282,8 +282,8 @@ def main():
         # # advance start epoch or we'd re-train and rewrite the last epoch file
         # start_epoch += 1
         logger.info("Loading pre-trained model: %s", config["pretrained_model"])
-        logger.info("Starting epoch:      %d", start_epoch)
-        logger.info("Starting iterations: %d", iters)
+        logger.info("Starting epoch:            %d", start_epoch)
+        logger.info("Starting iterations:       %d", iters)
         logger.info("")
 
     n_down = model.text_aligner.n_down
