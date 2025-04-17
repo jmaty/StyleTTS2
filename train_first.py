@@ -259,7 +259,7 @@ def main():
 
     # === Start of training loop ==============================================
 
-    # Train model
+    # Iterate through the defined number of epochs
     for epoch in range(start_epoch, epochs):
         running_loss = 0
         start_time = time.time()
@@ -272,26 +272,33 @@ def main():
 
         # Train loop for each epoch
         for i, batch in enumerate(train_dataloader):
-            waves = batch[0]
+            waves = batch[0]  # Keep ground truth audio
+            # Move other batch tensors to device
             batch = [b.to(device) for b in batch[1:]]
+            # Keep individual batch tensors
             texts, input_lengths, _, _, mels, mel_input_length, _ = batch
 
+            # Generate masks for text and mel spectrograms
             with torch.no_grad():
-                mask = length_to_mask(mel_input_length // (2**n_down)).to(mel_input_length.device)
+                # `2**n_down` scaling ensures the mask aligns with the downsampled feature dimension
+                mel_mask = length_to_mask(mel_input_length // (2**n_down)).to(
+                    mel_input_length.device
+                )
                 text_mask = length_to_mask(input_lengths).to(texts.device)
 
             # Align text and audio (mel)
-            _, s2s_pred, s2s_attn = model.text_aligner(mels, mask, texts)
-
+            _, s2s_pred, s2s_attn = model.text_aligner(mels, mel_mask, texts)
+            # Refine attention matrix
             s2s_attn = s2s_attn.transpose(-1, -2)
             s2s_attn = s2s_attn[..., 1:]
             s2s_attn = s2s_attn.transpose(-1, -2)
 
+            # Create attention mask
             with torch.no_grad():
                 attn_mask = (
-                    (~mask)
+                    (~mel_mask)
                     .unsqueeze(-1)
-                    .expand(mask.shape[0], mask.shape[1], text_mask.shape[-1])
+                    .expand(mel_mask.shape[0], mel_mask.shape[1], text_mask.shape[-1])
                     .float()
                     .transpose(-1, -2)
                 )
@@ -299,12 +306,12 @@ def main():
                     attn_mask.float()
                     * (~text_mask)
                     .unsqueeze(-1)
-                    .expand(text_mask.shape[0], text_mask.shape[1], mask.shape[-1])
+                    .expand(text_mask.shape[0], text_mask.shape[1], mel_mask.shape[-1])
                     .float()
                 )
-                attn_mask = attn_mask < 1
+                attn_mask = attn_mask < 1  # Convert to boolean tensor
 
-            s2s_attn.masked_fill_(attn_mask, 0.0)
+            s2s_attn.masked_fill_(attn_mask, 0.0)  # Apply attention mask to the attention matrix
 
             with torch.no_grad():
                 # Create monotonic attention
@@ -321,7 +328,7 @@ def main():
                 asr = t_en @ s2s_attn_mono
 
             # Get clips
-            # TODO: not to dived by 2?
+            # TODO: not to divide by 2?
             # TODO: get max (+ padding) instead of min?
             mel_input_length_all = accelerator.gather(mel_input_length)  # for balanced load
             mel_len = min([int(mel_input_length_all.min().item() / 2 - 1), max_len // 2])
@@ -571,8 +578,8 @@ def main():
                 texts, input_lengths, _, _, mels, mel_input_length, _ = batch
 
                 with torch.no_grad():
-                    mask = length_to_mask(mel_input_length // (2**n_down)).to("cuda")
-                    _, s2s_pred, s2s_attn = model.text_aligner(mels, mask, texts)
+                    mel_mask = length_to_mask(mel_input_length // (2**n_down)).to("cuda")
+                    _, s2s_pred, s2s_attn = model.text_aligner(mels, mel_mask, texts)
 
                     s2s_attn = s2s_attn.transpose(-1, -2)
                     s2s_attn = s2s_attn[..., 1:]
@@ -580,9 +587,9 @@ def main():
 
                     text_mask = length_to_mask(input_lengths).to(texts.device)
                     attn_mask = (
-                        (~mask)
+                        (~mel_mask)
                         .unsqueeze(-1)
-                        .expand(mask.shape[0], mask.shape[1], text_mask.shape[-1])
+                        .expand(mel_mask.shape[0], mel_mask.shape[1], text_mask.shape[-1])
                         .float()
                         .transpose(-1, -2)
                     )
@@ -590,7 +597,7 @@ def main():
                         attn_mask.float()
                         * (~text_mask)
                         .unsqueeze(-1)
-                        .expand(text_mask.shape[0], text_mask.shape[1], mask.shape[-1])
+                        .expand(text_mask.shape[0], text_mask.shape[1], mel_mask.shape[-1])
                         .float()
                     )
                     attn_mask = attn_mask < 1
