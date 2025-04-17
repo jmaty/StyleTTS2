@@ -86,7 +86,7 @@ SELECT="-l select=1:ncpus=$NCPUS:mem=$MEM:scratch_local=$LSCRATCH:ngpus=$NGPUS$C
 WALLTIME="-l walltime=$HOURS:00:00"
 
 # Extract name of the experiment
-EXP="$(basename $EXPDIR)_ft"
+EXP="$(basename $EXPDIR)"
 
 # Timestep to differentiate among runs with the same run name
 TIMESTEP=$(date +"%y%m%d-%H%M%S")
