@@ -93,6 +93,7 @@ def main():
 
     data_params = config.get("data_params", None)
     sr = config["preprocess_params"].get("sr", 24000)
+    hop_length = config["preprocess_params"]["spect_params"].get("hop_length", 300)
     train_path = data_params["train_data"]
     val_path = data_params["val_data"]
     root_path = data_params["root_path"]
@@ -279,6 +280,7 @@ def main():
                 mask = length_to_mask(mel_input_length // (2**n_down)).to(mel_input_length.device)
                 text_mask = length_to_mask(input_lengths).to(texts.device)
 
+            # Align text and audio (mel)
             _, s2s_pred, s2s_attn = model.text_aligner(mels, mask, texts)
 
             s2s_attn = s2s_attn.transpose(-1, -2)
@@ -305,10 +307,11 @@ def main():
             s2s_attn.masked_fill_(attn_mask, 0.0)
 
             with torch.no_grad():
+                # Create monotonic attention
                 mask_st = mask_from_lens(s2s_attn, input_lengths, mel_input_length // (2**n_down))
                 s2s_attn_mono = maximum_path(s2s_attn, mask_st)
 
-            # encode
+            # Encode
             t_en = model.text_encoder(texts, input_lengths, text_mask)
 
             # 50% of chance of using monotonic version
@@ -317,47 +320,102 @@ def main():
             else:
                 asr = t_en @ s2s_attn_mono
 
-            # get clips
+            # Get clips
+            # TODO: not to dived by 2?
+            # TODO: get max (+ padding) instead of min?
             mel_input_length_all = accelerator.gather(mel_input_length)  # for balanced load
             mel_len = min([int(mel_input_length_all.min().item() / 2 - 1), max_len // 2])
             mel_len_st = int(mel_input_length.min().item() / 2 - 1)
 
             en, gt, wav, st = [], [], [], []
 
+            # Iterate through the batch samples
+            # TODO: vectorize this
             for idx, (mel_input_length_item, wave_item) in enumerate(zip(mel_input_length, waves)):
+                # Mel-spectrogram length (dividing by 2 due to a downsampling factor?)
                 mel_length = int(mel_input_length_item.item() / 2)
-
+                # Randomly select a start point for the mel spectrogram within valid range
                 random_start = np.random.randint(0, mel_length - mel_len)
+                # Extract text-audio aligned encoded features
                 en.append(asr[idx, :, random_start : random_start + mel_len])
+                # Extract ground-truth mel spectrogram
                 gt.append(mels[idx, :, (random_start * 2) : ((random_start + mel_len) * 2)])
-
-                y = wave_item[(random_start * 2) * 300 : ((random_start + mel_len) * 2) * 300]
+                # Extract corresponding ground-truth audio
+                y = wave_item[
+                    (random_start * 2) * hop_length : ((random_start + mel_len) * 2) * hop_length
+                ]
                 wav.append(torch.from_numpy(y).to(device))
 
-                # style reference (better to be different from the GT)
+                # Style reference (better to be different from the GT)
                 random_start = np.random.randint(0, mel_length - mel_len_st)
+                # Extract style reference mel spectrogram for style conditioning
                 st.append(mels[idx, :, (random_start * 2) : ((random_start + mel_len_st) * 2)])
 
+            # Stack the extracted features into batched-sized tensors
             en = torch.stack(en)
             gt = torch.stack(gt).detach()
             st = torch.stack(st).detach()
-
             wav = torch.stack(wav).float().detach()
 
-            # clip too short to be used by the style encoder
+            # # Plně vektorizovaná verze s využitím torch operací
+            # batch_size = mel_input_length.shape[0]
+            # mel_lengths = (mel_input_length // 2).cpu().numpy()
+
+            # # Generování náhodných začátků pomocí PyTorch
+            # random_starts = torch.tensor(
+            #     [np.random.randint(0, max(1, length - mel_len)) for length in mel_lengths],
+            #     device=device
+            # )
+            # random_starts_st = torch.tensor(
+            #     [np.random.randint(0, max(1, length - mel_len_st)) for length in mel_lengths],
+            #     device=device
+            # )
+
+            # # Indexy pro výběr
+            # batch_indices = torch.arange(batch_size, device=device)
+
+            # # Použití funkcionálního přístupu pro výběr segmentů
+            # en = torch.stack([
+            #     asr[i, :, start:start+mel_len]
+            #     for i, start in zip(range(batch_size), random_starts)
+            # ])
+
+            # gt = torch.stack([
+            #     mels[i, :, start*2:(start+mel_len)*2]
+            #     for i, start in zip(range(batch_size), random_starts)
+            # ]).detach()
+
+            # wav = torch.stack([
+            #     torch.from_numpy(waves[i][(start*2)*hop_length:((start+mel_len)*2)*hop_length]).to(device)
+            #     for i, start in zip(range(batch_size), random_starts)
+            # ]).detach()
+
+            # st = torch.stack([
+            #     mels[i, :, start*2:(start+mel_len_st)*2]
+            #     for i, start in zip(range(batch_size), random_starts_st)
+            # ]).detach()
+
+            # Clip too short to be used by the style encoder => skipping
             if gt.shape[-1] < 80:
                 continue
 
             with torch.no_grad():
+                # Get the pitch and norm of the ground truth samples
                 real_norm = log_norm(gt.unsqueeze(1)).squeeze(1).detach()
                 f0_real, _, _ = model.pitch_extractor(gt.unsqueeze(1))
 
+            # Style encoding:
+            # - if not multispeaker, use the ground truth mel spectrogram
+            # - if multispeaker, use other (style reference) mel spectrogram
             s = model.style_encoder(st.unsqueeze(1) if multispeaker else gt.unsqueeze(1))
 
+            # Recontruct the audio from the text-audio aligned encoded features, predicted style,
+            # and ground truth pitch and norm
             y_rec = model.decoder(en, f0_real, real_norm, s)
 
             # --- Discriminator loss ---
             if epoch >= tma_epoch:
+                # Compute decoder's discriminator loss
                 d_loss = dl(wav.detach().unsqueeze(1).float(), y_rec.detach()).mean()
                 d_loss = d_loss / grad_accum_steps  # JMa: normalize loss
                 # JMa: Compute gradients only for discriminators
@@ -382,7 +440,9 @@ def main():
             # --- Generator loss ---
             loss_mel = stft_loss(y_rec.squeeze(), wav.detach())
 
-            if epoch >= tma_epoch:  # start TMA training
+            if epoch >= tma_epoch:  # Start TMA training
+                # Seq2seq loss measures the difference between the predicted and
+                # ground truth text tokens
                 loss_s2s = 0
                 for _s2s_pred, _text_input, _text_length in zip(s2s_pred, texts, input_lengths):
                     loss_s2s += F.cross_entropy(
@@ -390,11 +450,17 @@ def main():
                     )
                 loss_s2s /= texts.size(0)
 
+                # Monotonic attention loss measures the difference between the
+                # predicted and ground truth attention weights
                 loss_mono = F.l1_loss(s2s_attn, s2s_attn_mono) * 10
 
+                # Generator loss measures the difference between the
+                # predicted and ground truth waveforms
                 loss_gen_all = gl(wav.detach().unsqueeze(1).float(), y_rec).mean()
+                # SLM loss to ensure the generated audio follows natural speech patterns
                 loss_slm = wl(wav.detach(), y_rec).mean()
 
+                # Final generator loss is a weighted sum of the above losses
                 g_loss = (
                     loss_params.lambda_mel * loss_mel
                     + loss_params.lambda_mono * loss_mono
@@ -421,6 +487,7 @@ def main():
                 inputs += list(model.text_aligner.parameters())
             accelerator.backward(g_loss, inputs=inputs)
 
+            # Accumulate mean mel-spectrogram loss (over all GPUs) across batches for logging
             running_loss += accelerator.gather(loss_mel).mean().item()
 
             # JMa: Gradient accumulation
@@ -450,6 +517,7 @@ def main():
 
             iters += 1
 
+            # Log training progress
             if (i + 1) % log_interval == 0 and accelerator.is_main_process:
                 mel_loss = running_loss / log_interval
                 logger.info(
@@ -473,19 +541,18 @@ def main():
                 writer.add_scalar("train/slm_loss", loss_slm, iters)
 
                 for device_idx in range(n_gpus):
-                    for device_idx in range(n_gpus):
-                        handle = nvidia_smi.nvmlDeviceGetHandleByIndex(device_idx)
-                        info = nvidia_smi.nvmlDeviceGetMemoryInfo(handle)
-                        logger.info(
-                            "Device %d VRAM usage: %d/%d GB (%.2f%%)",
-                            device_idx,
-                            info.used >> 30,
-                            info.total >> 30,
-                            info.used / info.total * 100,
-                        )
+                    handle = nvidia_smi.nvmlDeviceGetHandleByIndex(device_idx)
+                    info = nvidia_smi.nvmlDeviceGetMemoryInfo(handle)
+                    logger.info(
+                        "Device %d VRAM usage: %d/%d GB (%.2f%%)",
+                        device_idx,
+                        info.used >> 30,
+                        info.total >> 30,
+                        info.used / info.total * 100,
+                    )
                 logger.info("Time elapsed: %.2f seconds", time.time() - start_time)
 
-                running_loss = 0
+                running_loss = 0  # Reset running loss for next log interval
 
         # === Start of validation part ==============================================
 
@@ -547,7 +614,11 @@ def main():
                     random_start = np.random.randint(0, mel_length - mel_len)
                     en.append(asr[idx, :, random_start : random_start + mel_len])
                     gt.append(mels[idx, :, (random_start * 2) : ((random_start + mel_len) * 2)])
-                    y = wave_item[(random_start * 2) * 300 : ((random_start + mel_len) * 2) * 300]
+                    y = wave_item[
+                        (random_start * 2)
+                        * hop_length : ((random_start + mel_len) * 2)
+                        * hop_length
+                    ]
                     wav.append(torch.from_numpy(y).to("cuda"))
 
                 wav = torch.stack(wav).float().detach()
