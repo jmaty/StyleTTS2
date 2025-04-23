@@ -159,24 +159,37 @@ def main():
         "max_length": bert_size,
         "silence_beg": config["preprocess_params"].get("silence_beg", 4800),
         "silence_end": config["preprocess_params"].get("silence_end", 4800),
+        "n_mels": config["model_params"].get("n_mels", 80),
+        "spect_params": config["preprocess_params"].get(
+            "spect_params",
+            {
+                "n_fft": 2048,
+                "win_length": 1024,
+                "hop_length": 300,
+            },
+        ),
     }
 
+    logger.info("Dataset config: %s", dataset_config)
+
+    logger.info("Building training dataloader...")
     train_dataloader = build_dataloader(
         train_list,
         root_path,
         text_cleaner,
-        ood_data=ood_data,
+        ood_data=None,  # OOD data not used for 1st stage training
         batch_size=batch_size,
         num_workers=args.num_workers,
         device=device,
         dataset_config=dataset_config,
     )
 
+    logger.info("Building validation dataloader...")
     val_dataloader = build_dataloader(
         val_list,
         root_path,
         text_cleaner,
-        ood_data=ood_data,
+        ood_data=None,  # OOD data not used for validation
         batch_size=batch_size,
         validation=True,
         num_workers=0,
@@ -334,36 +347,6 @@ def main():
             mel_len = min([int(mel_input_length_all.min().item() / 2 - 1), max_len // 2])
             mel_len_st = int(mel_input_length.min().item() / 2 - 1)
 
-            # en, gt, wav, st = [], [], [], []
-
-            # # Iterate through the batch samples
-            # # TODO: vectorize this
-            # for idx, (mel_input_length_item, wave_item) in enumerate(zip(mel_input_length, waves)):
-            #     # Mel-spectrogram length (dividing by 2 due to a downsampling factor?)
-            #     mel_length = int(mel_input_length_item.item() / 2)
-            #     # Randomly select a start point for the mel spectrogram within valid range
-            #     random_start = np.random.randint(0, mel_length - mel_len)
-            #     # Extract text-audio aligned encoded features
-            #     en.append(asr[idx, :, random_start : random_start + mel_len])
-            #     # Extract ground-truth mel spectrogram
-            #     gt.append(mels[idx, :, (random_start * 2) : ((random_start + mel_len) * 2)])
-            #     # Extract corresponding ground-truth audio
-            #     y = wave_item[
-            #         (random_start * 2) * hop_length : ((random_start + mel_len) * 2) * hop_length
-            #     ]
-            #     wav.append(torch.from_numpy(y).to(device))
-
-            #     # Style reference (better to be different from the GT)
-            #     random_start = np.random.randint(0, mel_length - mel_len_st)
-            #     # Extract style reference mel spectrogram for style conditioning
-            #     st.append(mels[idx, :, (random_start * 2) : ((random_start + mel_len_st) * 2)])
-
-            # # Stack the extracted features into batched-sized tensors
-            # en = torch.stack(en)
-            # gt = torch.stack(gt).detach()
-            # st = torch.stack(st).detach()
-            # wav = torch.stack(wav).float().detach()
-
             # --- Vectorized Segment Extraction ---
             batch_size = mel_input_length.shape[0]
             # Calculate effective mel lengths (after potential downsampling by factor 2) on the correct device
@@ -409,28 +392,18 @@ def main():
 
             # Extract ground-truth audio
             # This part remains the least vectorized due to the input format.
-            # We slice numpy arrays on CPU then convert and move to device.
             wav_gt = (
                 torch.stack(
                     [
-                        torch.from_numpy(
-                            # Slice the numpy array on CPU using .item() to get Python int
-                            waves[idx][
-                                start.item()
-                                * 2
-                                * hop_length : (start.item() + mel_len)
-                                * 2
-                                * hop_length
-                            ]
-                        ).to(
-                            device
-                        )  # Move the resulting tensor slice to the target device
+                        # Ensure waves[idx] is 1D or appropriately shaped for this slice
+                        waves[idx][start * 2 * hop_length : (start + mel_len) * 2 * hop_length]
+                        # .to(device) # Keep if waves might not be on the target device
                         for idx, start in enumerate(random_starts)
                     ]
                 )
                 .float()
                 .detach()
-            )  # Keep float() and detach() as in original code
+            )  # Keep float() and detach()
 
             # Extract style reference mel spectrogram for style conditioning
             # Use style-specific random starts and length
@@ -690,50 +663,18 @@ def main():
                     ]
                 ).detach()  # Keep detach
 
-                # Extract 'wav_gt' segments (from 'waves' - list of CPU numpy arrays)
+                # Extract 'wav_gt' segments (from 'waves' tensor on device)
                 wav_gt = (
                     torch.stack(
                         [
-                            torch.from_numpy(
-                                # Slice numpy array on CPU
-                                waves[idx][
-                                    start.item()
-                                    * 2
-                                    * hop_length : (start.item() + mel_len)
-                                    * 2
-                                    * hop_length
-                                ]
-                            ).to(
-                                device
-                            )  # Move slice to device
+                            waves[idx][start * 2 * hop_length : (start + mel_len) * 2 * hop_length]
                             for idx, start in enumerate(random_starts_val)
                         ]
                     )
                     .float()
                     .detach()
                 )  # Keep float() and detach()
-
                 # --- End of Vectorized Segment Extraction for Validation ---
-
-                # The original loop is now replaced by the vectorized code above
-                # en, gt_mel, wav_gt = [], [], [] # Removed initialization
-                # for idx, (mel_input_length_item, wave_item) in enumerate(
-                #     zip(mel_input_length, waves)
-                # ):
-                #     mel_length = int(mel_input_length_item.item() / 2)
-                #     random_start = np.random.randint(0, mel_length - mel_len)
-                #     en.append(asr[idx, :, random_start : random_start + mel_len])
-                #     gt_mel.append(mels[idx, :, (random_start * 2) : ((random_start + mel_len) * 2)])
-                #     y = wave_item[
-                #         (random_start * 2)
-                #         * hop_length : ((random_start + mel_len) * 2)
-                #         * hop_length
-                #     ]
-                #     wav_gt.append(torch.from_numpy(y).to("cuda")) # Original used hardcoded "cuda"
-
-                # wav_gt = torch.stack(wav_gt).float().detach() # Removed, done above
-                # en = torch.stack(en) # Removed, done above
-                # gt_mel = torch.stack(gt_mel).detach() # Removed, done above
 
                 f0_real, _, _ = model.pitch_extractor(mel_gt.unsqueeze(1))
                 s = model.style_encoder(mel_gt.unsqueeze(1))
@@ -804,43 +745,13 @@ def main():
 
                     # Save original ground truth audio (only at epoch 0)
                     if epoch == 0:
-                        # Get the original waveform for this index
-                        wav_gt = waves_val_subset[idx].squeeze()
-                        # wav_gt = (
-                        #     torch.from_numpy(waves_val_subset[idx]).squeeze().to(device)
-                        # )  # Convert numpy to tensor if needed
+                        # Get the numpy version of original waveform for this index
+                        wav_gt = waves_val_subset[idx].cpu().numpy().squeeze()
                         if save_val_audio:
                             outfile = f"epoch_1st_{epoch:0>5}_gt-{idx}.wav"
                             pts.save_wav(wav_gt, os.path.join(test_audio_dir, outfile))
                         writer.add_audio(f"gt/y{idx}", wav_gt, epoch, sample_rate=sr)
-
             # --- End of Vectorized Preparation and Saving Loop ---
-
-            # with torch.no_grad():
-            #     # Iterate over the defined number of validation samples
-            #     for idx in range(min(n_val_audios, len(mel_input_length))):
-            #         mel_length = int(mel_input_length[idx].item())
-            #         # Ground-truth mel spectrogram
-            #         mel_gt = mels[idx, :, :mel_length].unsqueeze(0)
-            #         # Ground-truth phonemes-audio alignment
-            #         en_gt = asr[idx, :, : mel_length // 2].unsqueeze(0)
-            #         # Reconstruct audio from ground-truth mel spectrogram and
-            #         # phoneme-audio alignment
-            #         gt_wav = pts.reconstruct(mel_gt, en_gt)
-
-            #         # Write and save val audio
-            #         writer.add_audio(f"eval/y{idx}", gt_wav, epoch, sample_rate=sr)
-            #         if save_val_audio and epoch % saving_epoch == 0:
-            #             outfile = f"epoch_1st_{epoch:0>5}_val-rec-{idx}.wav"
-            #             pts.save_wav(gt_wav, os.path.join(test_audio_dir, outfile))
-
-            #         # Save ground truth
-            #         if epoch == 0:
-            #             gt_wav = waves[idx].squeeze()
-            #             if save_val_audio:
-            #                 outfile = f"epoch_1st_{epoch:0>5}_gt-{idx}.wav"
-            #                 pts.save_wav(gt_wav, os.path.join(test_audio_dir, outfile))
-            #             writer.add_audio(f"gt/y{idx}", gt_wav, epoch, sample_rate=sr)
 
             if epoch % saving_epoch == 0:
                 curr_loss = loss_test / iters_test
