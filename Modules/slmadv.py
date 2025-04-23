@@ -2,6 +2,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from logger import get_logger
+
+# Setup logger
+logger = get_logger(__name__)
+
 
 class SLMAdversarialLoss(torch.nn.Module):
     """SLMAdversarialLoss implements adversarial training for Style Language Models.
@@ -199,15 +204,23 @@ class SLMAdversarialLoss(torch.nn.Module):
             p_en.append(p_pred[bib, :, random_start : random_start + mel_len])
 
             # get ground truth clips
+            # TODO: 300 -> hop_length
             random_start = np.random.randint(0, mel_length_gt - mel_len)
             y = w[(random_start * 2) * 300 : ((random_start + mel_len) * 2) * 300]
-            wav.append(torch.from_numpy(y).to(ref_text.device))
+            # wav.append(torch.from_numpy(y).to(ref_text.device))
+            wav.append(y.to(ref_text.device))
 
             if len(wav) >= self.batch_percentage * len(waves):  # prevent OOM due to longer lengths
+                logger.debug(
+                    "Prevent OOM due to longer lengths: %d >= %d",
+                    len(wav),
+                    self.batch_percentage * len(waves),
+                )
                 break
 
         # if len(sp) <= 1: # Originally, batch size >=2 supported
         if len(sp) < 1:  # JMa: Can we use only 1 sample for SLM adversarial loss training?
+            logger.warning("No samples left after filtering, skipping SLMADV batch")
             return None
 
         sp = torch.stack(sp)
