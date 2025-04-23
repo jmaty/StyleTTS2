@@ -6,7 +6,6 @@ import random
 import time
 import warnings
 
-import numpy as np
 import nvidia_smi
 import torch
 import torch.nn.functional as F
@@ -43,7 +42,7 @@ torch.backends.cudnn.allow_tf32 = False
 
 def main():
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description="StyleTTS2 finetuning")
+    parser = argparse.ArgumentParser(description="StyleTTS2 stage 1 training")
     parser.add_argument("config_path", type=str, help="path to config")
     parser.add_argument("-w", "--num_workers", type=int, default=0, help="number of workers")
     parser.add_argument("-L", "--log_level", type=int, default=logging.INFO, help="log level")
@@ -170,7 +169,6 @@ def main():
             },
         ),
     }
-
     logger.info("Dataset config: %s", dataset_config)
 
     # Prepare dataloaders
@@ -734,6 +732,7 @@ def main():
                     # Reconstruct audio from ground-truth mel spectrogram and
                     # phoneme-audio alignment using pts object
                     # pts.reconstruct likely expects single-item batches
+                    # TODO: Enable reconstruction from multiple tensors
                     wav_rec = pts.reconstruct(mel_gt, en_gt)
 
                     # Write and save reconstructed validation audio
