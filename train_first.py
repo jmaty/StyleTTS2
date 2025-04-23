@@ -98,7 +98,7 @@ def main():
     train_path = data_params["train_data"]
     val_path = data_params["val_data"]
     root_path = data_params["root_path"]
-    ood_data = data_params["OOD_data"]
+    # ood_data = data_params["OOD_data"]  # OOD texts are not used during 1st stage training
     save_val_audio = data_params.get("save_val_audio", False)
     n_val_audios = config["data_params"].get("n_val_audios", 3)
     save_test_audio = False
@@ -153,6 +153,7 @@ def main():
     # Load data
     train_list, val_list = get_data_path_list(train_path, val_path)
 
+    # Set up dataset parameters (from config)
     dataset_config = {
         "sr": sr,
         "min_length": data_params["min_length"],
@@ -172,6 +173,7 @@ def main():
 
     logger.info("Dataset config: %s", dataset_config)
 
+    # Prepare dataloaders
     logger.info("Building training dataloader...")
     train_dataloader = build_dataloader(
         train_list,
@@ -183,7 +185,6 @@ def main():
         device=device,
         dataset_config=dataset_config,
     )
-
     logger.info("Building validation dataloader...")
     val_dataloader = build_dataloader(
         val_list,
@@ -196,7 +197,6 @@ def main():
         device=device,
         dataset_config=dataset_config,
     )
-
     train_dataloader, val_dataloader = accelerator.prepare(train_dataloader, val_dataloader)
 
     scheduler_params = {
@@ -254,7 +254,7 @@ def main():
     if (save_val_audio or save_test_audio) and not os.path.exists(test_audio_dir):
         os.makedirs(test_audio_dir, exist_ok=True)
 
-    # Create phoneme-to-speech object for synthesizing test sentences
+    # Create phoneme-to-speech object for synthesizing validation sentences
     # - use global noise for speed
     pts = PTS(config, model, use_glob_noise=True)
 
@@ -503,7 +503,7 @@ def main():
                 loss_slm = 0
                 g_loss = loss_mel
 
-            g_loss = g_loss / grad_accum_steps  # JMa: normalize loss
+            g_loss /= grad_accum_steps  # JMa: normalize loss
             # JMa: Compute gradients only for generator
             inputs = (
                 list(model.decoder.parameters())
