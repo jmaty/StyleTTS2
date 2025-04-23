@@ -39,7 +39,7 @@ class TextCleaner:
         Returns:
             list: list of token IDs
         """
-        logger.debug("Cleaning text: %s", text)
+        # logger.debug("Cleaning text: %s", text)
 
         indexes = [self.pad[1]] if pad else []
         # Add spaces around punctuation and convert the text into a list of token IDs
@@ -51,7 +51,7 @@ class TextCleaner:
         if pad:
             indexes.append(self.pad[1])
 
-        logger.debug("Token IDs: %s", indexes)
+        # logger.debug("Token IDs: %s", indexes)
         return indexes
 
     def declean(self, indexes):
@@ -142,7 +142,7 @@ class TextCleaner:
         # Add a space after punctuation if it is not already followed by a space
         text = self._re_after_punctuation.sub(r"\1 ", text).strip()
 
-        logger.debug("Text after adding spaces: %s", text)
+        # logger.debug("Text after adding spaces: %s", text)
         return text
 
     @staticmethod
