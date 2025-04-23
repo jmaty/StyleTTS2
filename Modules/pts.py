@@ -9,7 +9,7 @@ import yaml
 from munch import munchify
 from scipy.io.wavfile import write
 
-from meldataset import preprocess
+from meldataset import AudioProcessor
 from models import build_model, load_ASR_models, load_F0_models
 from Modules.diffusion.sampler import ADPM2Sampler, DiffusionSampler, KarrasSchedule
 from text_utils import TextCleaner
@@ -98,6 +98,16 @@ class PTS:
         self.fix_noise_in_ph_string = fix_noise_in_ph_string if not use_glob_noise else True
         logger.debug("Using global noise: %s", use_glob_noise)
         logger.debug("Fix noise in phonetic string: %s", fix_noise_in_ph_string)
+
+        # Create audio processor
+        self.audio_processor = AudioProcessor(
+            n_mels=self._config.model_params.n_mels,
+            n_fft=self._config.preprocess_params.spect_params.n_fft,
+            win_length=self._config.preprocess_params.spect_params.win_length,
+            hop_length=self._config.preprocess_params.spect_params.hop_length,
+            mean=self._config.preprocess_params.mean,
+            std=self._config.preprocess_params.std,
+        )
 
     def setup_config(self, config):
         # Determine if config is a path or a pre-loaded configuration
@@ -575,6 +585,7 @@ class PTS:
         Returns:
             torch.Tensor: Style embedding.
         """
+        # TODO: Change loading wav to torchaudio
         with torch.no_grad():
             logger.debug("Computing style from wav file: %s", wavpath)
             wav, sr = librosa.load(wavpath, sr=self._config.preprocess_params.sr)
@@ -588,7 +599,8 @@ class PTS:
                 logger.debug("Resampling wav from %d to %d", sr, self._config.preprocess_params.sr)
                 wav = librosa.resample(wav, sr, self._config.preprocess_params.sr)
 
-            mel_tensor = preprocess(wav).to(self.device)
+            wave_tensor = torch.from_numpy(wav).float()
+            mel_tensor = self.audio_processor(wave_tensor).to(self.device)
 
             # Compute style embedding
             ref_s = self.model.style_encoder(mel_tensor.unsqueeze(1))  # style = timbre
