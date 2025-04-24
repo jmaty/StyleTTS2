@@ -41,8 +41,8 @@ def load_plbert(log_dir):
     iters = sorted(iters)[-1]
 
     checkpoint_path = osp.join(log_dir, f"step_{iters}.t7")
-    logger.info("Loading PL-BERT from %s", checkpoint_path)
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
+
     state_dict = checkpoint["net"]
     new_state_dict = OrderedDict()
     for k, v in state_dict.items():
@@ -55,5 +55,9 @@ def load_plbert(log_dir):
     except KeyError:
         pass
     bert.load_state_dict(new_state_dict, strict=False)
+
+    logger.info(
+        "Loading PL-BERT with size %d from %s", bert.config.max_position_embeddings, checkpoint_path
+    )
 
     return bert
