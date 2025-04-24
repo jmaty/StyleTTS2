@@ -5,6 +5,7 @@ import os.path as osp
 import random
 import time
 import warnings
+import numpy as np
 
 import nvidia_smi
 import torch
@@ -143,8 +144,6 @@ def main():
 
     model = build_model(model_params, text_aligner, pitch_extractor, plbert)
     bert_size = model.bert.config.max_position_embeddings  # ALBERT config
-    if accelerator.is_main_process:
-        logger.info("BERT size: %d", bert_size)
 
     for k in model:
         model[k] = accelerator.prepare(model[k])
@@ -156,7 +155,7 @@ def main():
     dataset_config = {
         "sr": sr,
         "min_length": data_params["min_length"],
-        "max_length": bert_size,
+        "max_length": bert_size,  # limit max length of the input sequence to the max length of the BERT model
         "silence_beg": config["preprocess_params"].get("silence_beg", 4800),
         "silence_end": config["preprocess_params"].get("silence_end", 4800),
         "n_mels": config["model_params"].get("n_mels", 80),
@@ -287,7 +286,15 @@ def main():
             # Move other batch tensors to device
             batch = [b.to(device) for b in batch[1:]]
             # Keep individual batch tensors
-            texts, input_lengths, _, _, mels, mel_input_length, _ = batch
+            (
+                texts,  # Padded input phoneme IDs [B, T_text]
+                input_lengths,  # Input phoneme lengths [B]
+                _,
+                _,
+                mels,  # Padded mel spectrograms [B, n_mels, T_mel]
+                mel_input_length,  # Mel spectrogram lengths [B]
+                _,
+            ) = batch
 
             # Generate masks for text and mel spectrograms
             with torch.no_grad():
@@ -341,81 +348,95 @@ def main():
             # Get clips
             # TODO: not to divide by 2?
             # TODO: get max (+ padding) instead of min?
+
+            # # --- Original code ---
+
+            # mel_input_length_all = accelerator.gather(mel_input_length)  # for balanced load
+            # mel_len_gt = min([int(mel_input_length_all.min().item() / 2 - 1), max_len // 2])
+            # mel_len_st = int(mel_input_length.min().item() / 2 - 1)
+            # en, mel_gt, wav_gt, mel_st = [], [], [], []
+            # # Iterate through the batch samples
+            # for idx, (mel_input_length_item, wave_item) in enumerate(zip(mel_input_length, waves)):
+            #     # Mel-spectrogram length (dividing by 2 due to a downsampling factor?)
+            #     mel_length = int(mel_input_length_item.item() / 2)
+            #     # Randomly select a start point for the mel spectrogram within valid range
+            #     random_start = np.random.randint(0, mel_length - mel_len_gt)
+            #     # Extract text-audio aligned encoded features
+            #     en.append(asr[idx, :, random_start : random_start + mel_len_gt])
+            #     # Extract ground-truth mel spectrogram
+            #     mel_gt.append(mels[idx, :, (random_start * 2) : ((random_start + mel_len_gt) * 2)])
+            #     # Extract corresponding ground-truth audio
+            #     y = wave_item[
+            #         (random_start * 2) * hop_length : ((random_start + mel_len_gt) * 2) * hop_length
+            #     ]
+            #     wav_gt.append(y.to(device))
+
+            #     # Style reference (better to be different from the GT)
+            #     random_start = np.random.randint(0, mel_length - mel_len_st)
+            #     # Extract style reference mel spectrogram for style conditioning
+            #     mel_st.append(mels[idx, :, (random_start * 2) : ((random_start + mel_len_st) * 2)])
+
+            # # Stack the extracted features into batched-sized tensors
+            # en = torch.stack(en)
+            # mel_gt = torch.stack(mel_gt).detach()
+            # mel_st = torch.stack(mel_st).detach()
+            # wav_gt = torch.stack(wav_gt).float().detach()
+
+            # # --- End of Original code ---
+
+            # --- Pre-allocate tensors ---
+
             mel_input_length_all = accelerator.gather(mel_input_length)  # for balanced load
-            mel_len = min([int(mel_input_length_all.min().item() / 2 - 1), max_len // 2])
+            mel_len_gt = min([int(mel_input_length_all.min().item() / 2 - 1), max_len // 2])
             mel_len_st = int(mel_input_length.min().item() / 2 - 1)
 
-            # --- Vectorized Segment Extraction ---
-            batch_size = mel_input_length.shape[0]
-            # Calculate effective mel lengths (after potential downsampling by factor 2) on the correct device
-            effective_mel_lengths = mel_input_length // 2  # Integer division
+            bsize = mel_input_length.shape[0]  # Use current batch size
+            # Calculate fixed waveform segment length
+            wav_len = (mel_len_gt * 2) * hop_length
 
-            # --- Generate random start indices for main segments (en, gt, wav) on device ---
-            # Randomly select a start point for the mel spectrogram within valid range
-            # Clamp minimum to 0 to handle cases where mel_len might be larger than effective_mel_lengths
-            max_valid_start = torch.clamp(effective_mel_lengths - mel_len, min=0)
-            # Generate random integers uniformly in the range [0, max_valid_start] for each batch item
-            # We use torch.rand and scaling/flooring for efficient batch generation on device
-            random_starts = torch.floor(
-                torch.rand(batch_size, device=device) * (max_valid_start.float())
-            ).long()
-
-            # --- Generate random start indices for style segments (st) on device ---
-            # Style reference (better to be different from the GT)
-            max_valid_start_st = torch.clamp(effective_mel_lengths - mel_len_st, min=0)
-            random_starts_st = torch.floor(
-                torch.rand(batch_size, device=device) * (max_valid_start_st.float())
-            ).long()
-
-            # --- Extract segments using list comprehensions combined with torch.stack ---
-            # This approach is significantly faster than the original loop by vectorizing index generation.
-            # Fully tensor-based slicing without list comprehension is complex due to varying start indices per item.
-
-            # Extract text-audio aligned encoded features
-            en = torch.stack(
-                [
-                    asr[idx, :, start : start + mel_len]
-                    for idx, start in enumerate(random_starts)  # Use generated tensor indices
-                ]
+            # Pre-allocate tensors with the calculated fixed length
+            en = torch.empty(bsize, asr.shape[1], mel_len_gt, device=device, dtype=asr.dtype)
+            mel_gt = torch.empty(
+                bsize, mels.shape[1], mel_len_gt * 2, device=device, dtype=mels.dtype
             )
+            mel_st = torch.empty(
+                bsize, mels.shape[1], mel_len_st * 2, device=device, dtype=mels.dtype
+            )
+            wav_gt = torch.empty(bsize, wav_len, device=device, dtype=torch.float)
 
-            # Extract ground-truth mel spectrogram
-            # Indices are doubled to match the original mel spectrogram resolution
-            mel_gt = torch.stack(
-                [
-                    mels[idx, :, start * 2 : (start + mel_len) * 2]
-                    for idx, start in enumerate(random_starts)
-                ]
-            ).detach()  # Keep detach as in original code
+            # Iterate through the batch samples
+            for bidx in range(bsize):
+                # Mel-spectrogram length (dividing by 2 due to a downsampling factor?)
+                mel_length = int(mel_input_length[bidx].item() / 2)
 
-            # Extract ground-truth audio
-            # This part remains the least vectorized due to the input format.
-            wav_gt = (
-                torch.stack(
-                    [
-                        # Ensure waves[idx] is 1D or appropriately shaped for this slice
-                        waves[idx][start * 2 * hop_length : (start + mel_len) * 2 * hop_length]
-                        # .to(device) # Keep if waves might not be on the target device
-                        for idx, start in enumerate(random_starts)
-                    ]
-                )
-                .float()
-                .detach()
-            )  # Keep float() and detach()
+                # --- Segment for en, mel_gt, wav_gt ---
+                # Randomly select a start point for the mel spectrogram within valid range
+                beg_gt = np.random.randint(0, mel_length - mel_len_gt)
 
-            # Extract style reference mel spectrogram for style conditioning
-            # Use style-specific random starts and length
-            # Use `random_starts_st` here to be different from `random_starts`
-            st = torch.stack(
-                [
-                    mels[idx, :, start * 2 : (start + mel_len_st) * 2]
-                    for idx, start in enumerate(random_starts_st)
-                ]
-            ).detach()  # Keep detach as in original code
+                # Extract text-audio aligned encoded features and assign to tensor
+                en[bidx] = asr[bidx, :, beg_gt : beg_gt + mel_len_gt]
+                # Extract ground-truth mel spectrogram and assign to tensor
+                mel_gt[bidx] = mels[bidx, :, (beg_gt * 2) : ((beg_gt + mel_len_gt) * 2)]
+                # Extract corresponding ground-truth audio and assign to tensor
+                beg_idx_wav = (beg_gt * 2) * hop_length
+                end_idx_wav = beg_idx_wav + wav_len  # Use pre-calculated length
+                wav_gt[bidx] = waves[bidx][beg_idx_wav:end_idx_wav].to(device).float()
 
-            # --- End of Vectorized Segment Extraction ---
+                # --- Segment for mel_st ---
+                # Style reference (better to be different from the GT)
+                beg_st = np.random.randint(0, mel_length - mel_len_st)
+                # Extract style reference mel spectrogram for style conditioning and assign to tensor
+                mel_st[bidx] = mels[bidx, :, (beg_st * 2) : ((beg_st + mel_len_st) * 2)]
 
-            # Clip too short to be used by the style encoder => skipping
+            # Detach tensors to avoid unnecessary gradient tracking
+            # `en` is not detached as it is used for gradient computation
+            mel_gt = mel_gt.detach()
+            mel_st = mel_st.detach()
+            wav_gt = wav_gt.detach()
+
+            # --- End of Pre-allocated tensors ---
+
+            # Segment too short to be used by the style encoder => skipping
             if mel_gt.shape[-1] < 80:
                 logger.warning(
                     "GT mel spectrogram is too short => skipping batch %d in epoch %d",
@@ -432,7 +453,7 @@ def main():
             # Style encoding:
             # - if not multispeaker, use the ground truth mel spectrogram
             # - if multispeaker, use other (style reference) mel spectrogram
-            s = model.style_encoder(st.unsqueeze(1) if multispeaker else mel_gt.unsqueeze(1))
+            s = model.style_encoder(mel_st.unsqueeze(1) if multispeaker else mel_gt.unsqueeze(1))
 
             # Recontruct the audio from the text-audio aligned encoded features, predicted style,
             # and ground truth pitch and norm
@@ -593,7 +614,15 @@ def main():
 
                 waves = batch[0]
                 batch = [b.to(device) for b in batch[1:]]
-                texts, input_lengths, _, _, mels, mel_input_length, _ = batch
+                (
+                    texts,  # Padded input phoneme IDs [B, T_text]
+                    input_lengths,  # Input phoneme lengths [B]
+                    _,
+                    _,
+                    mels,  # Padded mel spectrograms [B, n_mels, T_mel]
+                    mel_input_length,  # Mel spectrogram lengths [B]
+                    _,
+                ) = batch
 
                 with torch.no_grad():
                     mel_mask = length_to_mask(mel_input_length // (2**n_down)).to("cuda")
@@ -628,51 +657,72 @@ def main():
 
                 # Get clips
                 # Note: Validation uses local min length, not gathered length like training
-                mel_len = min([int(mel_input_length.min().item() / 2 - 1), max_len // 2])
+                # mel_input_length_all = accelerator.gather(mel_input_length)  # for balanced load
+                mel_len_gt = min([int(mel_input_length.min().item() / 2 - 1), max_len // 2])
 
-                # --- Vectorized Segment Extraction for Validation ---
-                batch_size_val = mel_input_length.shape[0]
-                # Calculate effective mel lengths on the correct device
-                effective_mel_lengths_val = mel_input_length // 2  # Integer division
+                # # --- Original code ---
 
-                # Generate random start indices for validation segments on device
-                # Clamp minimum to 0
-                max_valid_start_val = torch.clamp(effective_mel_lengths_val - mel_len, min=0)
-                # Generate random integers uniformly in the range [0, max_valid_start_val)
-                # Mimics original np.random.randint(0, high) where high is exclusive
-                random_starts_val = torch.floor(
-                    torch.rand(batch_size_val, device=device) * max_valid_start_val.float()
-                ).long()
+                # en, mel_gt, wav_gt = [], [], []
+                # for idx, (mel_input_length_item, wave_item) in enumerate(
+                #     zip(mel_input_length, waves)
+                # ):
+                #     mel_length = int(mel_input_length_item.item() / 2)
 
-                # Extract 'en' segments (from 'asr' tensor on device)
-                en = torch.stack(
-                    [
-                        asr[idx, :, start : start + mel_len]
-                        for idx, start in enumerate(random_starts_val)
-                    ]
+                #     random_start = np.random.randint(0, mel_length - mel_len_gt)
+                #     en.append(asr[idx, :, random_start : random_start + mel_len_gt])
+                #     mel_gt.append(
+                #         mels[idx, :, (random_start * 2) : ((random_start + mel_len_gt) * 2)]
+                #     )
+                #     y = wave_item[
+                #         (random_start * 2)
+                #         * hop_length : ((random_start + mel_len_gt) * 2)
+                #         * hop_length
+                #     ]
+                #     # Change to device
+                #     wav_gt.append(y.to(device))
+
+                # wav_gt = torch.stack(wav_gt).float().detach()
+                # en = torch.stack(en)
+                # mel_gt = torch.stack(mel_gt).detach()
+
+                # # --- Original code ---
+
+                # --- Pre-allocate tensors ---
+
+                bsize = mel_input_length.shape[0]  # Use current batch size
+                # Calculate fixed waveform segment length
+                wav_len = (mel_len_gt * 2) * hop_length
+
+                # Pre-allocate tensors with the calculated fixed length
+                # Note: Style tensor `mel_st` is not used in validation
+                en = torch.empty(bsize, asr.shape[1], mel_len_gt, device=device, dtype=asr.dtype)
+                mel_gt = torch.empty(
+                    bsize, mels.shape[1], mel_len_gt * 2, device=device, dtype=mels.dtype
                 )
+                wav_gt = torch.empty(bsize, wav_len, device=device, dtype=torch.float)
 
-                # Extract 'gt_mel' segments (from 'mels' tensor on device)
-                # Indices are doubled
-                mel_gt = torch.stack(
-                    [
-                        mels[idx, :, start * 2 : (start + mel_len) * 2]
-                        for idx, start in enumerate(random_starts_val)
-                    ]
-                ).detach()  # Keep detach
+                # Iterate through the batch samples
+                for bidx in range(bsize):
+                    # Mel-spectrogram length (dividing by 2 due to a downsampling factor?)
+                    mel_length = int(mel_input_length[bidx].item() / 2)
 
-                # Extract 'wav_gt' segments (from 'waves' tensor on device)
-                wav_gt = (
-                    torch.stack(
-                        [
-                            waves[idx][start * 2 * hop_length : (start + mel_len) * 2 * hop_length]
-                            for idx, start in enumerate(random_starts_val)
-                        ]
-                    )
-                    .float()
-                    .detach()
-                )  # Keep float() and detach()
-                # --- End of Vectorized Segment Extraction for Validation ---
+                    # Randomly select a start point for the mel spectrogram within valid range
+                    beg_gt = np.random.randint(0, mel_length - mel_len_gt)
+
+                    # Extract text-audio aligned encoded features and assign to tensor
+                    en[bidx] = asr[bidx, :, beg_gt : beg_gt + mel_len_gt]
+                    # Extract ground-truth mel spectrogram and assign to tensor
+                    mel_gt[bidx] = mels[bidx, :, (beg_gt * 2) : ((beg_gt + mel_len_gt) * 2)]
+                    # Extract corresponding ground-truth audio and assign to tensor
+                    beg_idx_wav = (beg_gt * 2) * hop_length
+                    end_idx_wav = beg_idx_wav + wav_len  # Use pre-calculated length
+                    wav_gt[bidx] = waves[bidx][beg_idx_wav:end_idx_wav].to(device).float()
+
+                # # There is no need to detach tensors as in training loop
+                # wav_gt = wav_gt.detach()
+                # mel_gt = mel_gt.detach()
+
+                # --- End of Pre-allocated tensors ---
 
                 f0_real, _, _ = model.pitch_extractor(mel_gt.unsqueeze(1))
                 s = model.style_encoder(mel_gt.unsqueeze(1))
@@ -695,62 +745,89 @@ def main():
             attn_image = get_image(s2s_attn[0].cpu().numpy().squeeze())
             writer.add_figure("eval/attn", attn_image, epoch)
 
-            # --- Vectorized Preparation for Validation Audio Generation ---
             with torch.no_grad():
-                # Determine the number of samples to generate/save
-                # Use the batch size from the last validation batch processed
-                num_samples_in_batch = mel_input_length.shape[0]
-                num_samples_to_process = min(n_val_audios, num_samples_in_batch)
-
-                # Select the relevant data slices for the samples to process
-                mels_val_subset = mels[:num_samples_to_process]
-                asr_val_subset = asr[:num_samples_to_process]
-                mel_input_length_subset = mel_input_length[:num_samples_to_process]
-                # Assuming 'waves' is a list/tuple of numpy arrays from the dataloader
-                waves_val_subset = waves[:num_samples_to_process]
-
-                # Get actual lengths as a list of Python ints
-                mel_lengths_list = [int(l.item()) for l in mel_input_length_subset]
-
-                # Prepare lists of sliced tensors using list comprehension
-                # Each element will have batch size 1 for pts.reconstruct
-                mel_gt_list = [
-                    mels_val_subset[i, :, :length].unsqueeze(0)
-                    for i, length in enumerate(mel_lengths_list)
-                ]
-                en_list = [
-                    asr_val_subset[i, :, : length // 2].unsqueeze(0)
-                    for i, length in enumerate(mel_lengths_list)
-                ]
-
-                # --- Loop for Reconstruction and Saving (Hard to fully vectorize) ---
-                # Iterate through the prepared samples
-                for idx in range(num_samples_to_process):
-                    mel_gt = mel_gt_list[idx]
-                    en_gt = en_list[idx]
-
+                # Iterate over the defined number of validation samples
+                for idx in range(min(n_val_audios, len(mel_input_length))):
+                    mel_length = int(mel_input_length[idx].item())
+                    # Ground-truth mel spectrogram
+                    mel_gt = mels[idx, :, :mel_length].unsqueeze(0)
+                    # Ground-truth phonemes-audio alignment
+                    en_gt = asr[idx, :, : mel_length // 2].unsqueeze(0)
                     # Reconstruct audio from ground-truth mel spectrogram and
-                    # phoneme-audio alignment using pts object
-                    # pts.reconstruct likely expects single-item batches
-                    # TODO: Enable reconstruction from multiple tensors
-                    wav_rec = pts.reconstruct(mel_gt, en_gt)
+                    # phoneme-audio alignment
+                    wav = pts.reconstruct(mel_gt, en_gt)
 
-                    # Write and save reconstructed validation audio
-                    writer.add_audio(f"eval/y{idx}", wav_rec, epoch, sample_rate=sr)
+                    # Write and save val audio
+                    writer.add_audio(f"eval/y{idx}", wav, epoch, sample_rate=sr)
                     if save_val_audio and epoch % saving_epoch == 0:
                         outfile = f"epoch_1st_{epoch:0>5}_val-rec-{idx}.wav"
-                        # pts.save_wav likely saves a single waveform
-                        pts.save_wav(wav_rec, os.path.join(test_audio_dir, outfile))
+                        pts.save_wav(wav, os.path.join(test_audio_dir, outfile))
 
-                    # Save original ground truth audio (only at epoch 0)
+                    # Save ground truth
                     if epoch == 0:
-                        # Get the numpy version of original waveform for this index
-                        wav_gt = waves_val_subset[idx].cpu().numpy().squeeze()
+                        # wav = waves[idx].squeeze()
+                        wav = np.squeeze(waves[idx].cpu().numpy())
                         if save_val_audio:
                             outfile = f"epoch_1st_{epoch:0>5}_gt-{idx}.wav"
-                            pts.save_wav(wav_gt, os.path.join(test_audio_dir, outfile))
-                        writer.add_audio(f"gt/y{idx}", wav_gt, epoch, sample_rate=sr)
-            # --- End of Vectorized Preparation and Saving Loop ---
+                            pts.save_wav(wav, os.path.join(test_audio_dir, outfile))
+                        writer.add_audio(f"gt/y{idx}", wav, epoch, sample_rate=sr)
+
+            # # --- Vectorized Preparation for Validation Audio Generation ---
+            # with torch.no_grad():
+            #     # Determine the number of samples to generate/save
+            #     # Use the batch size from the last validation batch processed
+            #     num_samples_in_batch = mel_input_length.shape[0]
+            #     num_samples_to_process = min(n_val_audios, num_samples_in_batch)
+
+            #     # Select the relevant data slices for the samples to process
+            #     mels_val_subset = mels[:num_samples_to_process]
+            #     asr_val_subset = asr[:num_samples_to_process]
+            #     mel_input_length_subset = mel_input_length[:num_samples_to_process]
+            #     # Assuming 'waves' is a list/tuple of numpy arrays from the dataloader
+            #     waves_val_subset = waves[:num_samples_to_process]
+
+            #     # Get actual lengths as a list of Python ints
+            #     mel_lengths_list = [int(l.item()) for l in mel_input_length_subset]
+
+            #     # Prepare lists of sliced tensors using list comprehension
+            #     # Each element will have batch size 1 for pts.reconstruct
+            #     mel_gt_list = [
+            #         mels_val_subset[i, :, :length].unsqueeze(0)
+            #         for i, length in enumerate(mel_lengths_list)
+            #     ]
+            #     en_list = [
+            #         asr_val_subset[i, :, : length // 2].unsqueeze(0)
+            #         for i, length in enumerate(mel_lengths_list)
+            #     ]
+
+            #     # --- Loop for Reconstruction and Saving (Hard to fully vectorize) ---
+            #     # Iterate through the prepared samples
+            #     for idx in range(num_samples_to_process):
+            #         mel_gt = mel_gt_list[idx]
+            #         en_gt = en_list[idx]
+
+            #         # Reconstruct audio from ground-truth mel spectrogram and
+            #         # phoneme-audio alignment using pts object
+            #         # pts.reconstruct likely expects single-item batches
+            #         # TODO: Enable reconstruction from multiple tensors
+            #         wav_rec = pts.reconstruct(mel_gt, en_gt)
+
+            #         # Write and save reconstructed validation audio
+            #         writer.add_audio(f"eval/y{idx}", wav_rec, epoch, sample_rate=sr)
+            #         if save_val_audio and epoch % saving_epoch == 0:
+            #             outfile = f"epoch_1st_{epoch:0>5}_val-rec-{idx}.wav"
+            #             # pts.save_wav likely saves a single waveform
+            #             pts.save_wav(wav_rec, os.path.join(test_audio_dir, outfile))
+
+            #         # Save original ground truth audio (only at epoch 0)
+            #         if epoch == 0:
+            #             # Get the numpy version of original waveform for this index
+            #             wav_gt = waves_val_subset[idx].cpu().numpy().squeeze()
+            #             if save_val_audio:
+            #                 outfile = f"epoch_1st_{epoch:0>5}_gt-{idx}.wav"
+            #                 pts.save_wav(wav_gt, os.path.join(test_audio_dir, outfile))
+            #             writer.add_audio(f"gt/y{idx}", wav_gt, epoch, sample_rate=sr)
+            # # --- End of Vectorized Preparation and Saving Loop ---
 
             if epoch % saving_epoch == 0:
                 curr_loss = loss_test / iters_test
