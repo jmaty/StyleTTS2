@@ -315,7 +315,7 @@ class FilePathDataset(torch.utils.data.Dataset):
             ref_ph_ids,  # phone IDs of OOD text with padding or empty tensor
             ref_mel_tensor,  # reference mel vector of the given speaker
             ref_label,  # reference speaker ID
-            data[0],  # wavfile
+            data[0],  # wavfile path
             wave,  # raw waveform tensor
         )
 
@@ -493,13 +493,15 @@ class Collater(object):
         # b[5] is ref_label (reference speaker ID) - not used
         # ref_labels = torch.zeros((batch_size)).long()
 
-        # b[6] is wavfile path
-        paths = ["" for _ in range(batch_size)]
+        # b[6] is wavfile path - not used anymore
+        # paths = ["" for _ in range(batch_size)]
+
         # b[7] is raw wave tensor
+        # Due to memory constraints, it is better to keep it as a list
         waves = [None for _ in range(batch_size)]
 
         # Rearrange batch data according to mel length
-        for bid, (label, mel, text, ref_text, ref_mel, _, path, wave) in enumerate(batch):
+        for bid, (label, mel, text, ref_text, ref_mel, _, _, wave) in enumerate(batch):
             mel_size = mel.size(1)  # Get sizes of current item
             text_size = text.size(0)
             rtext_size = ref_text.size(0)
@@ -513,10 +515,10 @@ class Collater(object):
             input_lengths[bid] = text_size
             ref_lengths[bid] = rtext_size
             output_lengths[bid] = mel_size
-            paths[bid] = path
+            # paths[bid] = path
 
             ref_mels[bid, :, :ref_mel_size] = ref_mel
-            # ref_labels[bid] = ref_label  # not used
+            # ref_labels[bid] = ref_label  # not used anymore
             waves[bid] = wave
 
         return (
