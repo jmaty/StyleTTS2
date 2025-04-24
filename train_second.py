@@ -723,6 +723,7 @@ def main():
 
             with torch.no_grad():
                 # Extract F0 and normalization from the ground truth segment [B, 1, n_mels, mel_len * 2]
+                # f0_real, _, f0 = model.pitch_extractor(gt.unsqueeze(1))
                 f0_real, _, _ = model.pitch_extractor(mel_gt.unsqueeze(1))
                 # f0 = f0.reshape(f0.shape[0], f0.shape[1] * 2, f0.shape[2], 1).squeeze()
                 n_real = log_norm(mel_gt.unsqueeze(1)).squeeze(1)  # [B, n_mels, mel_len * 2]
@@ -1180,9 +1181,8 @@ def main():
                     mel_len_gt = int(mel_input_length.min().item() / 2 - 1)
 
                     bsize = mel_input_length.shape[0]  # Use current batch size
-                    wav_len = (
-                        mel_len_gt * 2
-                    ) * hop_length  # Calculate fixed waveform segment length
+                    # Calculate fixed waveform segment length
+                    wav_len = (mel_len_gt * 2) * hop_length
 
                     # Pre-allocate tensors with the calculated fixed length
                     # Note: Style tensor `mel_st` is not used in validation
@@ -1219,6 +1219,7 @@ def main():
                     # # There is no need to detach tensors as in training loop
                     # wav_gt = wav_gt.detach()
                     # mel_gt = mel_gt.detach()
+                    # --- End of Pre-allocated Segment Extraction ---
 
                     # Recompute style using style_encoder for decoder input
                     s = model.predictor_encoder(mel_gt.unsqueeze(1))
@@ -1259,7 +1260,6 @@ def main():
                     traceback.print_exc()
                     continue
 
-        # print('Epochs:', epoch + 1)
         avg_loss_test = loss_test.item() / iters_test
         avg_dur_loss = loss_align.item() / iters_test
         avg_f_loss = loss_f.item() / iters_test
@@ -1311,7 +1311,8 @@ def main():
                     # Save ground truth
                     if epoch == 0:
                         # wav_gt = waves[idx].squeeze()
-                        wav_gt = np.squeeze(waves[idx].cpu().numpy())
+                        # wav_gt = np.squeeze(waves[idx].cpu().numpy())
+                        wav_gt = waves[idx].squeeze()
                         if save_val_audio:
                             outfile = f"epoch_2nd_{epoch:0>5}_gt-{idx}.wav"
                             pts.save_wav(wav_gt, os.path.join(test_audio_dir, outfile))
@@ -1321,11 +1322,21 @@ def main():
             # Generating sampled speech from text directly
             with torch.no_grad():
                 ref_s = None
-                # Compute reference styles from ground truth mel spectrogram
+                # # Compute reference styles from ground truth mel spectrogram
+                # if multispeaker and epoch >= diff_epoch:
+                #     ref_ss = model.style_encoder(ref_mels.unsqueeze(1))  # Timbre style
+                #     ref_sp = model.predictor_encoder(ref_mels.unsqueeze(1))  # Prosody style
+                #     ref_s = torch.cat([ref_ss, ref_sp], dim=1)  # Combined style [B, 256, T]
+
+                # --- Vectorized style computation ---
                 if multispeaker and epoch >= diff_epoch:
-                    ref_ss = model.style_encoder(ref_mels.unsqueeze(1))  # Timbre style
-                    ref_sp = model.predictor_encoder(ref_mels.unsqueeze(1))  # Prosody style
+                    # Add channel dimension
+                    mels_batch = mels.unsqueeze(1)  # Shape: [B, 1, n_mels, max_len]
+                    # Call encoders with the entire batch
+                    ref_ss = model.style_encoder(mels_batch)
+                    ref_sp = model.predictor_encoder(mels_batch)  # Shape: [B, style_dim]
                     ref_s = torch.cat([ref_ss, ref_sp], dim=1)  # Combined style [B, 256, T]
+                # --- End of Vectorized style computation ---
 
                 # Iterate over the defined number of validation samples
                 for idx in range(min(n_val_audios, len(mel_input_length))):
