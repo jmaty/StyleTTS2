@@ -23,31 +23,25 @@ class SLMAdversarialLoss(torch.nn.Module):
         batch_percentage (float, optional): Maximum percentage of batch to process. Defaults to 0.5.
         skip_update (int, optional): Number of iterations to skip discriminator updates. Defaults to 10.
         sig (float, optional): Sigma parameter for Gaussian smoothing. Defaults to 1.5.
+        hop_len (int, optional): Hop length for mel-spectrogram extraction. Defaults to 300.
 
     Methods:
         forward(iters, y_rec_gt, y_rec_gt_pred, waves, mel_input_length, ref_text,
                ref_lengths, use_ind, s_trg, ref_s=None):
             Computes the adversarial losses for a training step.
-
-            Args:
-                iters: Current training iteration
-                y_rec_gt: Ground truth reconstructed waveform
-                y_rec_gt_pred: Predicted reconstructed waveform
-                waves: Input waveforms
-                mel_input_length: Length of input mel-spectrograms
-                ref_text: Reference text embeddings
-                ref_lengths: Lengths of reference sequences
-                use_ind: Whether to use provided style embeddings
-                s_trg: Target style embeddings
-                ref_s: Reference style embeddings (optional)
-
-            Returns:
-                tuple: (discriminator_loss, generator_loss, predicted_waveform)
-                Returns None if batch size is insufficient
     """
 
     def __init__(
-        self, model, wl, sampler, min_len, max_len, batch_percentage=0.5, skip_update=10, sig=1.5
+        self,
+        model,
+        wl,
+        sampler,
+        min_len,
+        max_len,
+        batch_percentage=0.5,
+        skip_update=10,
+        sig=1.5,
+        hop_len=300,
     ):
         super().__init__()
         self.model = model
@@ -60,6 +54,8 @@ class SLMAdversarialLoss(torch.nn.Module):
 
         self.sig = sig
         self.skip_update = skip_update
+
+        self.hop_len = hop_len
 
     def forward(
         self,
@@ -87,7 +83,7 @@ class SLMAdversarialLoss(torch.nn.Module):
             mel_input_length (torch.Tensor): Length of input mel-spectrograms
             ref_text (torch.Tensor): Reference text embeddings
             ref_lengths (torch.Tensor): Lengths of reference sequences
-            use_ind (bool): Whether to use individual style transfer
+            use_ind (bool): Whether to use in-domain texts
             s_trg (torch.Tensor): Target style embeddings
             ref_s (torch.Tensor, optional): Reference style embeddings. Defaults to None.
 
@@ -105,8 +101,11 @@ class SLMAdversarialLoss(torch.nn.Module):
         d_en = self.model.bert_encoder(bert_dur).transpose(-1, -2)
 
         if use_ind and np.random.rand() < 0.5:
+            # Teacher forcing for the style component to
+            # use target style to stabilize training
             s_preds = s_trg
         else:
+            # Generate style predictions
             num_steps = np.random.randint(3, 5)
             if ref_s is not None:
                 s_preds = self.sampler(
@@ -129,6 +128,7 @@ class SLMAdversarialLoss(torch.nn.Module):
         s_dur = s_preds[:, 128:]
         # s = s_preds[:, :128]
 
+        # Predict durations
         d, _ = self.model.predictor(
             d_en,
             s_dur,
@@ -138,15 +138,12 @@ class SLMAdversarialLoss(torch.nn.Module):
         )
 
         bib = 0
-
         output_lengths = []
         attn_preds = []
 
-        # differentiable duration modeling
+        # Differentiable duration modeling
         for _s2s_pred, _text_length in zip(d, ref_lengths):
-
             _s2s_pred_org = _s2s_pred[:_text_length, :]
-
             _s2s_pred = torch.sigmoid(_s2s_pred_org)
             _dur_pred = _s2s_pred.sum(axis=-1)
 
@@ -181,52 +178,92 @@ class SLMAdversarialLoss(torch.nn.Module):
 
         asr_pred = t_en @ s2s_attn
 
+        # Predict aligned pitch features
         _, p_pred = self.model.predictor(d_en, s_dur, ref_lengths, s2s_attn, text_mask)
 
         mel_len = max(int(min(output_lengths) / 2 - 1), self.min_len // 2)
         mel_len = min(mel_len, self.max_len // 2)
 
-        # get clips
+        # --- Pre-allocate Segment Extraction ---
+        # Compute the batch size based on the given percentage of the original batch size,
+        # ensuring it is at least 1
+        # original_batch_size = len(waves)
+        bsize = max(1, int(self.batch_percentage * len(waves)))
+        # Calculate fixed waveform segment length
+        wav_len = (mel_len * 2) * self.hop_len
 
-        en, p_en, sp, wav = [], [], [], []
+        # Pre-allocate tensors with the calculated fixed length
+        en = torch.empty(
+            bsize, asr_pred.shape[1], mel_len, device=asr_pred.device, dtype=asr_pred.dtype
+        )
+        p_en = torch.empty(
+            bsize, p_pred.shape[1], mel_len, device=p_pred.device, dtype=p_pred.dtype
+        )
+        wav_gt = torch.empty(bsize, wav_len, device=p_pred.device, dtype=torch.float)
+        # Predicted styles: 'voice' style (128) + prosodic style (128)
+        sp = s_preds[:bsize, :]
 
-        for bib, (o, m, s, w) in enumerate(zip(output_lengths, mel_input_length, s_preds, waves)):
-            mel_length_pred = o
-            mel_length_gt = int(m.item() / 2)
+        # Iterate through the batch samples
+        for bidx in range(bsize):
+            mel_len_pred = output_lengths[bidx]
+            mel_len_gt = int(mel_input_length[bidx].item() / 2)
             # Skip too short mel-spectrogram segments
-            if mel_length_gt <= mel_len or mel_length_pred <= mel_len:
+            if mel_len_gt <= mel_len or mel_len_pred <= mel_len:
                 continue
 
-            sp.append(s)
+            # Randomly select a start point for features within valid range
+            beg = np.random.randint(0, mel_len_pred - mel_len)
+            # Extract features
+            en[bidx] = asr_pred[bidx, :, beg : beg + mel_len]
+            p_en[bidx] = p_pred[bidx, :, beg : beg + mel_len]
 
-            random_start = np.random.randint(0, mel_length_pred - mel_len)
-            en.append(asr_pred[bib, :, random_start : random_start + mel_len])
-            p_en.append(p_pred[bib, :, random_start : random_start + mel_len])
+            # Randomly select a start point for ground truth segments
+            beg = np.random.randint(0, mel_len_gt - mel_len)
+            beg_idx = (beg * 2) * self.hop_len
+            end_idx = beg_idx + wav_len
+            wav_gt[bidx] = waves[bidx][beg_idx:end_idx]
+        # --- End of Pre-allocate Segment Extraction ---
 
-            # get ground truth clips
-            # TODO: 300 -> hop_length
-            random_start = np.random.randint(0, mel_length_gt - mel_len)
-            y = w[(random_start * 2) * 300 : ((random_start + mel_len) * 2) * 300]
-            # wav.append(torch.from_numpy(y).to(ref_text.device))
-            wav.append(y.to(ref_text.device))
+        # # --- Original Segment Extraction ---
+        # # Get clips
+        # en, p_en, sp, wav = [], [], [], []
+        # for bib, (o, m, s, w) in enumerate(zip(output_lengths, mel_input_length, s_preds, waves)):
+        #     mel_length_pred = o
+        #     mel_length_gt = int(m.item() / 2)
+        #     # Skip too short mel-spectrogram segments
+        #     if mel_length_gt <= mel_len or mel_length_pred <= mel_len:
+        #         continue
 
-            if len(wav) >= self.batch_percentage * len(waves):  # prevent OOM due to longer lengths
-                logger.debug(
-                    "Prevent OOM due to longer lengths: %d >= %d",
-                    len(wav),
-                    self.batch_percentage * len(waves),
-                )
-                break
+        #     sp.append(s)
 
-        # if len(sp) <= 1: # Originally, batch size >=2 supported
-        if len(sp) < 1:  # JMa: Can we use only 1 sample for SLM adversarial loss training?
-            logger.warning("No samples left after filtering, skipping SLMADV batch")
-            return None
+        #     random_start = np.random.randint(0, mel_length_pred - mel_len)
+        #     en.append(asr_pred[bib, :, random_start : random_start + mel_len])
+        #     p_en.append(p_pred[bib, :, random_start : random_start + mel_len])
 
-        sp = torch.stack(sp)
-        wav = torch.stack(wav).float()
-        en = torch.stack(en)
-        p_en = torch.stack(p_en)
+        #     # Get ground truth clips
+        #     random_start = np.random.randint(0, mel_length_gt - mel_len)
+        #     y = w[(random_start * 2) * self.hop_len : ((random_start + mel_len) * 2) * self.hop_len]
+        #     # wav.append(torch.from_numpy(y).to(ref_text.device))
+        #     wav.append(y.to(ref_text.device))
+
+        #     if len(wav) >= self.batch_percentage * len(waves):  # prevent OOM due to longer lengths
+        #         logger.debug(
+        #             "Prevent OOM due to longer lengths: %d >= %d",
+        #             len(wav),
+        #             self.batch_percentage * len(waves),
+        #         )
+        #         break
+
+        # # if len(sp) <= 1: # Originally, batch size >=2 supported
+        # if len(sp) < 1:  # JMa: Can we use only 1 sample for SLM adversarial loss training?
+        #     logger.warning("No samples left after filtering, skipping SLMADV batch")
+        #     return None
+
+        # sp = torch.stack(sp)
+        # wav = torch.stack(wav).float()
+        # en = torch.stack(en)
+        # p_en = torch.stack(p_en)
+        # # --- End of Original Segment Extraction ---
 
         f0_fake, n_fake = self.model.predictor.F0Ntrain(p_en, sp[:, 128:])
         y_pred = self.model.decoder(en, f0_fake, n_fake, sp[:, :128])
@@ -237,6 +274,7 @@ class SLMAdversarialLoss(torch.nn.Module):
                 wav = y_rec_gt_pred
                 use_rec = True
             else:
+                wav = wav_gt
                 use_rec = False
 
             crop_size = min(wav.size(-1), y_pred.size(-1))
