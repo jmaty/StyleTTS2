@@ -391,8 +391,7 @@ def main():
             mel_len_st = int(mel_input_length.min().item() / 2 - 1)
 
             bsize = mel_input_length.shape[0]  # Use current batch size
-            # Calculate fixed waveform segment length
-            wav_len = (mel_len_gt * 2) * hop_length
+            wav_len = (mel_len_gt * 2) * hop_length  # Calculate fixed waveform segment length
 
             # Pre-allocate tensors with the calculated fixed length
             en = torch.empty(bsize, asr.shape[1], mel_len_gt, device=device, dtype=asr.dtype)
@@ -420,7 +419,7 @@ def main():
                 # Extract corresponding ground-truth audio and assign to tensor
                 beg_idx_wav = (beg_gt * 2) * hop_length
                 end_idx_wav = beg_idx_wav + wav_len  # Use pre-calculated length
-                wav_gt[bidx] = waves[bidx][beg_idx_wav:end_idx_wav].to(device).float()
+                wav_gt[bidx] = waves[bidx][beg_idx_wav:end_idx_wav]
 
                 # --- Segment for mel_st ---
                 # Style reference (better to be different from the GT)
@@ -690,8 +689,7 @@ def main():
                 # --- Pre-allocate tensors ---
 
                 bsize = mel_input_length.shape[0]  # Use current batch size
-                # Calculate fixed waveform segment length
-                wav_len = (mel_len_gt * 2) * hop_length
+                wav_len = (mel_len_gt * 2) * hop_length  # Calculate fixed waveform segment length
 
                 # Pre-allocate tensors with the calculated fixed length
                 # Note: Style tensor `mel_st` is not used in validation
@@ -716,7 +714,7 @@ def main():
                     # Extract corresponding ground-truth audio and assign to tensor
                     beg_idx_wav = (beg_gt * 2) * hop_length
                     end_idx_wav = beg_idx_wav + wav_len  # Use pre-calculated length
-                    wav_gt[bidx] = waves[bidx][beg_idx_wav:end_idx_wav].to(device).float()
+                    wav_gt[bidx] = waves[bidx][beg_idx_wav:end_idx_wav]
 
                 # # There is no need to detach tensors as in training loop
                 # wav_gt = wav_gt.detach()
@@ -747,7 +745,7 @@ def main():
 
             with torch.no_grad():
                 # Iterate over the defined number of validation samples
-                for idx in range(min(n_val_audios, len(mel_input_length))):
+                for idx in range(min(n_val_audios, bsize)):
                     mel_length = int(mel_input_length[idx].item())
                     # Ground-truth mel spectrogram
                     mel_gt = mels[idx, :, :mel_length].unsqueeze(0)
@@ -765,12 +763,11 @@ def main():
 
                     # Save ground truth
                     if epoch == 0:
-                        # wav = waves[idx].squeeze()
-                        wav = np.squeeze(waves[idx].cpu().numpy())
+                        wav_gt = waves[idx].squeeze()
                         if save_val_audio:
                             outfile = f"epoch_1st_{epoch:0>5}_gt-{idx}.wav"
-                            pts.save_wav(wav, os.path.join(test_audio_dir, outfile))
-                        writer.add_audio(f"gt/y{idx}", wav, epoch, sample_rate=sr)
+                            pts.save_wav(wav_gt, os.path.join(test_audio_dir, outfile))
+                        writer.add_audio(f"gt/y{idx}", wav_gt, epoch, sample_rate=sr)
 
             # # --- Vectorized Preparation for Validation Audio Generation ---
             # with torch.no_grad():
