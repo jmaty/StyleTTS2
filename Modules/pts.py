@@ -5,17 +5,17 @@ from collections import OrderedDict
 import librosa
 import numpy as np
 import torch
+from scipy.io.wavfile import write
 import yaml
 from munch import munchify
-from scipy.io.wavfile import write
 
+from logger import get_logger
 from meldataset import AudioProcessor
 from models import build_model, load_ASR_models, load_F0_models
 from Modules.diffusion.sampler import ADPM2Sampler, DiffusionSampler, KarrasSchedule
 from text_utils import TextCleaner
 from utils import length_to_mask, log_norm
 from Utils.PLBERT.util import load_plbert
-from logger import get_logger
 
 # Setup logger
 logger = get_logger(__name__)
@@ -612,13 +612,31 @@ class PTS:
         """Save wavs to a single wav file.
 
         Args:
-            wav (list): Waveform numpy arrays
+            wav (list): list of waveform numpy arrays or torch tensors.
             path (string): Output wav file path
         """
         if isinstance(wav, (list, tuple)):
-            wav = np.concatenate(wav)
-        write(path, self._config.preprocess_params.sr, wav)
-        # torchaudio.save(path, torch.tensor(wav).float(), 24000)
+            # Assuming wav is a list/tuple of torch tensors
+            if all(isinstance(w, torch.Tensor) for w in wav):
+                wav_numpy = torch.cat(wav, dim=0).cpu().numpy()
+            # Original numpy handling (kept for reference or if input is numpy)
+            elif all(isinstance(w, np.ndarray) for w in wav):
+                wav_numpy = np.concatenate(wav)
+            else:
+                # Handle mixed types or raise error
+                raise TypeError(
+                    "Input 'wav' must be a list/tuple of PyTorch tensors or NumPy arrays."
+                )
+        elif isinstance(wav, np.ndarray):
+            wav_numpy = wav  # Already a numpy array
+        elif isinstance(wav, torch.Tensor):
+            wav_numpy = wav.cpu().numpy()
+        else:
+            raise TypeError("Input 'wav' must be a list/tuple, NumPy array, or PyTorch tensor.")
+
+        # Save audio
+        # torchaudio.save(path, wav_tensor.cpu().float(), self._config.preprocess_params.sr)
+        write(path, self._config.preprocess_params.sr, wav_numpy)
 
     @property
     def model(self):
