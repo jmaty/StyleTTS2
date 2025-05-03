@@ -267,8 +267,15 @@ class PTS:
 
     def _setup_sampler(self):
         """Setup diffusion sampler."""
+        # Access the original model using .module if wrapped by DDP/FSDP
+        try:
+            diffusion_model = self.model.diffusion.module
+        except AttributeError:
+            # Model is not wrapped (e.g., single GPU or CPU)
+            diffusion_model = self.model.diffusion
+
         self._sampler = DiffusionSampler(
-            self.model.diffusion.diffusion,
+            diffusion_model.diffusion,  # access the inner diffusion attribute on the original model
             sampler=ADPM2Sampler(),
             sigma_schedule=KarrasSchedule(
                 sigma_min=0.0001, sigma_max=3.0, rho=9.0
@@ -388,7 +395,7 @@ class PTS:
         """
         with torch.no_grad():
             logger.debug("Infering from phoneme IDs")
-            logger.debug("Computing phoentic features")
+            logger.debug("Computing phonetic features")
             # Prepare input lengths and masks
             input_lengths = torch.tensor([ph_ids.shape[-1]], dtype=torch.long, device=self.device)
             text_mask = length_to_mask(input_lengths)
