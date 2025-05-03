@@ -11,6 +11,8 @@ import librosa
 import yaml
 from tqdm import tqdm
 
+# csv.field_size_limit(sys.maxsize)
+
 
 # Convert defaultdict to dict recursively
 def defaultdict_to_dict(d):
@@ -30,7 +32,7 @@ def get_audio_duration(file_path):
 def compute_stats(input_csv, audio_directory, spk_id_separator=None, default_spk_id=0):
     stats = defaultdict(lambda: defaultdict(dict))
     spk_names = {}
-    spk_id = 0
+    spk_id = default_spk_id
 
     # Open CSV file
     with open(input_csv, encoding="utf-8") as infile:
