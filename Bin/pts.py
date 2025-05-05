@@ -3,11 +3,12 @@
 
 import argparse
 import logging
+import os.path as osp
 import sys
 from argparse import RawTextHelpFormatter
 
+from logger import AlignedColoredFormatter, get_logger, setup_logging
 from Modules.pts import PTS, set_random_seed
-from logger import setup_logging, get_logger, AlignedColoredFormatter
 
 
 def main():
@@ -49,7 +50,14 @@ def main():
         "--out_path",
         type=str,
         default="./out.wav",
-        help="Output wav file path.",
+        help="Output wav file path. Not used if out_dir is specified. Default=out.wav.",
+    )
+    parser.add_argument(
+        "-O",
+        "--out_dir",
+        type=str,
+        default=None,
+        help="Output wav directory. Default=None. If None, use out_path.",
     )
     parser.add_argument(
         "-g",
@@ -122,7 +130,11 @@ def main():
         help="Path to reference speaker wav for voice cloning. Default=None.",
     )
     parser.add_argument(
-        "-L", "--loglevel", type=str.upper, help="Set logging level. Default=INFO", default="INFO"
+        "-L",
+        "--loglevel",
+        type=str.upper,
+        help="Set logging level. Default=INFO",
+        default="INFO",
     )
     args = parser.parse_args()
 
@@ -161,9 +173,17 @@ def main():
         lines = [line.strip() for line in f]
         wavs = pts(lines, args.ref_spk)
 
-    # Save wavs as a single file
-    pts.save_wav(wavs, args.out_path)
-    logger.debug("Wav file saved to %s", args.out_path)
+    if args.out_dir is not None:
+        # Save wavs as into a directory
+        wname = "utt"
+        for idx, wav in enumerate(wavs):
+            wpath = osp.join(args.out_dir, f"{wname}_{idx:02d}.wav")
+            pts.save_wav(wav, wpath)
+            logger.debug("Wav file saved to %s", wpath)
+    else:
+        # Save wavs as a single file
+        pts.save_wav(wavs, args.out_path)
+        logger.debug("Wav file saved to %s", args.out_path)
 
 
 if __name__ == "__main__":
