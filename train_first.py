@@ -864,19 +864,20 @@ def main():
             log_dir,
             max_saved_models,
         )
-        try:
-            first_stage_symlink = osp.join(
-                log_dir, config.get("first_stage_path", "first_stage.pth")
-            )
-            os.symlink(osp.basename(final_filepath), first_stage_symlink)
-            logger.info("Final first-stage model saved to %s", final_filepath)
-        except FileExistsError:
-            logger.warning(
-                "Symlink or file %s already exists\
-                   => %s was not symlinked!",
-                first_stage_symlink,
-                final_filepath,
-            )
+        if epoch > tma_epoch - 1:
+            try:
+                first_stage_symlink = osp.join(
+                    log_dir, config.get("first_stage_path", "first_stage.pth")
+                )
+                os.symlink(osp.basename(final_filepath), first_stage_symlink)
+                logger.info("Final first-stage model saved to %s", final_filepath)
+            except FileExistsError:
+                logger.warning(
+                    "Symlink or file %s already exists\
+                    => %s was not symlinked!",
+                    first_stage_symlink,
+                    final_filepath,
+                )
 
         # Ending work with NVIDIA NVLM
         nvidia_smi.nvmlShutdown()
