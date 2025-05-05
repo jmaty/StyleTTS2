@@ -26,6 +26,13 @@ fi
 # Input experimental directory
 EXPDIR=$1
 
+# Check that config file exists
+CFG=$EXPDIR/config2a.yml
+if [[ ! -e $CFG ]]; then
+     printf "Config file $CFG does not exists!" >&2
+     exit 1
+fi
+
 if [[ "$#" -gt 1 ]]; then
      # specification to run on (iti, gdx, gpu<3-4>)
      SPEC=$2
@@ -60,6 +67,7 @@ elif [[ $SPEC == "dgx" ]]; then
      # GDX queue: capy
      QUEUE="-q gpu_dgx"
      CLUSTER=""
+     SCRATCH_TYPE="scratch_ssd"
 elif [[ $SPEC == "gpu3" ]]; then
      # Any cluster with GPU memory > 40gb (zia, black)
      QUEUE="-q gpu"
@@ -88,14 +96,7 @@ EXP="$(basename $EXPDIR)_stage2a"
 # Timestep to differentiate among runs with the same run name
 TIMESTEP=$(date +"%y%m%d-%H%M%S")
 
-SINGULARITY=/storage/plzen4-ntis/projects/singularity/papermill_24.12-r6.sh
-
-# Check that config file exists
-CFG=$EXPDIR/config2a.yml
-if [[ ! -e $CFG ]]; then
-     printf "Config file $CFG does not exists!" >&2
-     exit 1
-fi
+SINGULARITY=/storage/plzen4-ntis/projects/singularity/papermill_24.12-r8.sh
 
 # Set the log dir according to the input experiment directory
 # (the original log dir in the config file serves just as a placeholder)

@@ -90,7 +90,7 @@ EXP="$(basename $EXPDIR)_stage2b"
 # Timestep to differentiate among runs with the same run name
 TIMESTEP=$(date +"%y%m%d-%H%M%S")
 
-SINGULARITY=/storage/plzen4-ntis/projects/singularity/papermill_24.12-r6.sh
+SINGULARITY=/storage/plzen4-ntis/projects/singularity/papermill_24.12-r8.sh
 
 # Check that config file exists
 CFG=$EXPDIR/config2b.yml
