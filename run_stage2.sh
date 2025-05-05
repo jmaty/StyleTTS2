@@ -8,22 +8,28 @@ export LC_NUMERIC="en_US.UTF-8"
 # -----------------------------------------------------------------------------
 # Default params
 SPEC="gpu3"
-HOURS=168
+HOURS=72
 INTB=Train_second.ipynb
 # QSUB ARGUMENTS
-MEM=128gb
+MEM=256gb
 LSCRATCH=20gb
+SCRATCH_TYPE="scratch-local"
 NCPUS=8
 NGPUS=2
 
 if [[ "$#" -lt 1 ]]; then
-     printf "Usage: run_stage2b.sh exp_dir [specification: iti dgx gpu<3-4>] [hours] [ngpus] [jobid]\n" >&2
+     printf "Usage: run_stage2b.sh config [specification: iti dgx gpu<3-4>] [hours] [ngpus] [jobid]\n" >&2
      exit 1
 fi
 
-# Input experimental directory
-EXPDIR=$1
-CFG=$EXPDIR/config2.yml
+CFG=$1
+# Check that config file exists
+if [[ ! -e $CFG ]]; then
+     printf "Config file $CFG does not exists!" >&2
+     exit 1
+fi
+# Experimental directory set to the directory of the config file
+EXPDIR=$(dirname $CFG)
 
 if [[ "$#" -gt 1 ]]; then
      # specification to run on (iti, gdx, gpu<3-4>)
@@ -59,6 +65,7 @@ elif [[ $SPEC == "dgx" ]]; then
      # GDX queue: capy
      QUEUE="-q gpu_dgx"
      CLUSTER=""
+     SCRATCH_TYPE="scratch_ssd"
 elif [[ $SPEC == "gpu3" ]]; then
      # Any cluster with GPU memory > 40gb (zia, black)
      QUEUE="-q gpu"
@@ -67,16 +74,17 @@ elif [[ $SPEC == "gpu4" ]]; then
      # Any cluster with GPU memory > 80gb (bee)
      QUEUE="-q gpu"
      CLUSTER=":gpu_mem=80000mb"
+     SCRATCH_TYPE="scratch_ssd"
 else
-     echo "Unsupported cluster/queue"
+     printf "Unsupported cluster/queue" >&2
      exit 1
 fi
 
-# Change GPU queue to gpu_long when number of hours is >24
-[[ $HOURS -gt 24 ]] && [[ $SPEC == gpu? ]] && QUEUE="${QUEUE}_long"
+# Change GPU queue to gpu_long when number of hours is >48
+[[ $HOURS -gt 48 ]] && [[ $SPEC == gpu? ]] && QUEUE="${QUEUE}_long"
 
 # Select argument
-SELECT="-l select=1:ncpus=$NCPUS:mem=$MEM:scratch_local=$LSCRATCH:ngpus=$NGPUS$CLUSTER"
+SELECT="-l select=1:ncpus=$NCPUS:mem=$MEM:$SCRATCH_TYPE=$LSCRATCH:ngpus=$NGPUS$CLUSTER"
 # Walltime argument
 WALLTIME="-l walltime=$HOURS:00:00"
 
@@ -86,33 +94,24 @@ EXP="$(basename $EXPDIR)_stage2"
 # Timestep to differentiate among runs with the same run name
 TIMESTEP=$(date +"%y%m%d-%H%M%S")
 
-SINGULARITY=/storage/plzen4-ntis/projects/singularity/papermill_24.12-latest.sh
-
-# Check that config file exists
-if [[ ! -e $CFG ]]; then
-     echo "Config file $CFG does not exists!"
-     exit 1
-fi
+SINGULARITY=/storage/plzen4-ntis/projects/singularity/papermill_24.12-r8.sh
 
 # Set the log dir according to the input experiment directory
 # (the original log dir in the config file serves just as a placeholder)
 sed -i "/^log_dir:/c\log_dir: $EXPDIR" $CFG
+
+# Transfer sigma_data between runs
+# - config2.processed.yml was created in previous run
+if [[ -e $EXPDIR/config2.processed.yml ]]; then     
+     sigma_data=$(grep -E '^[[:space:]]*sigma_data:' $EXPDIR/config2.processed.yml)
+     sed -i "/^[[:space:]]*sigma_data:/c\\$sigma_data" $CFG
+fi
 
 # -----------------------------------------------------------------------------
 # RUN TRAINING
 # -----------------------------------------------------------------------------
 OLOG=$EXPDIR/stage2.$TIMESTEP.log
 ONTB=$EXPDIR/$(basename "$INTB" .ipynb).processed.$TIMESTEP.ipynb
-
-# # Run PBS script
-# qsub -N "$EXP" \
-#      $QUEUE \
-#      -j oe \
-#      -o $OLOG \
-#      $WALLTIME \
-#      $SELECT \
-#      -- $SINGULARITY "$INTB" "$CFG" "$ONTB"
-# echo "$EXP: $QUEUE $SELECT, HOURS: $HOURS"
 
 # Run PBS script
 JOBID=$(qsub -N "$EXP" \
@@ -123,6 +122,5 @@ JOBID=$(qsub -N "$EXP" \
      $SELECT \
      $DEPS \
      -- $SINGULARITY "$INTB" "$CFG" "$ONTB")
-
-printf "$EXP: $QUEUE $SELECT, HOURS: $HOURS\n" >&2
 printf "$JOBID"
+# echo "$EXP: $QUEUE $SELECT, HOURS: $HOURS <-- $JOBID"

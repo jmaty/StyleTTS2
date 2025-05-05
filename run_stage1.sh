@@ -8,9 +8,7 @@ export LC_NUMERIC="en_US.UTF-8"
 # -----------------------------------------------------------------------------
 # Default params
 SPEC="gpu3"
-RUNS=1
 HOURS=24
-MODELS=""
 INTB=Train_first.ipynb
 # QSUB ARGUMENTS
 MEM=128gb
@@ -20,12 +18,18 @@ NCPUS=8
 NGPUS=2
 
 if [[ "$#" -lt 1 ]]; then
-     printf "Usage: run_stage1.sh exp_dir [specification: iti dgx gpu<3-4>] [hours] [ngpus]\n" >&2
+     printf "Usage: run_stage1.sh config [specification: iti dgx gpu<3-4>] [hours] [ngpus] [jobid]\n" >&2
      exit 1
 fi
 
-# Input experimental directory
-EXPDIR=$1
+CFG=$1
+# Check that config file exists
+if [[ ! -e $CFG ]]; then
+     printf "Config file $CFG does not exists!\n" >&2
+     exit 1
+fi
+# Experimental directory set to the directory of the config file
+EXPDIR=$(dirname "$CFG")
 
 if [[ "$#" -gt 1 ]]; then
      # specification to run on (iti, gdx, gpu<3-4>)
@@ -39,6 +43,18 @@ if [[ "$#" -gt 3 ]]; then
      # Number of GPUs
      NGPUS=$4
 fi
+if [[ "$#" -gt 4 ]]; then
+     # JOBID to continue run
+     JOBID=$5
+fi
+
+# Check dependencies
+if [[ -z $JOBID ]]; then
+     # No deps at the beginning
+     DEPS=""
+else
+     DEPS="-W depend=afterany:$JOBID"
+fi
 
 # Check run specification and set queue and cluster to run on
 if [[ $SPEC == "iti" ]]; then
@@ -49,6 +65,7 @@ elif [[ $SPEC == "dgx" ]]; then
      # GDX queue: capy
      QUEUE="-q gpu_dgx"
      CLUSTER=""
+     SCRATCH_TYPE="scratch_ssd"
 elif [[ $SPEC == "gpu3" ]]; then
      # Any cluster with GPU memory > 40gb (zia, black)
      QUEUE="-q gpu"
@@ -77,14 +94,7 @@ EXP="$(basename $EXPDIR)_stage1"
 # # Timestep to differentiate among runs with the same run name
 TIMESTEP=$(date +"%y%m%d-%H%M%S")
 
-SINGULARITY=/storage/plzen4-ntis/projects/singularity/papermill_24.12-r6.sh
-
-# Check that config file exists
-CFG=$EXPDIR/config1.yml
-if [[ ! -e $CFG ]]; then
-     printf "Config file $CFG does not exists!\n" >&2
-     exit 1
-fi
+SINGULARITY=/storage/plzen4-ntis/projects/singularity/papermill_24.12-r8.sh
 
 # Set the log dir according to the input experiment directory
 # (the original log dir in the config file serves just as a placeholder)
@@ -103,6 +113,7 @@ JOBID=$(qsub -N "$EXP" \
      -o $OLOG \
      $WALLTIME \
      $SELECT \
+     $DEPS \
      -- $SINGULARITY "$INTB" "$CFG" "$ONTB")
 printf "$JOBID"
 #printf "$EXP: $QUEUE $SELECT, HOURS: $HOURS\n" >&2
