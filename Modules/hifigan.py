@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn import Conv1d, Conv2d, ConvTranspose1d
+from torch.nn import Conv1d, ConvTranspose1d
 from torch.nn.utils import remove_weight_norm, weight_norm
 
 from logger import get_logger
@@ -175,7 +175,7 @@ class SineGen(torch.nn.Module):
         voiced_threshold=0,
         flag_for_pulse=False,
     ):
-        super(SineGen, self).__init__()
+        super().__init__()
         self.sine_amp = sine_amp
         self.noise_std = noise_std
         self.harmonic_num = harmonic_num
@@ -271,7 +271,6 @@ class SineGen(torch.nn.Module):
         output sine_tensor: tensor(batchsize=1, length, dim)
         output uv: tensor(batchsize=1, length, 1)
         """
-        f0_buf = torch.zeros(f0.shape[0], f0.shape[1], self.dim, device=f0.device)
         # fundamental component
         fn = torch.multiply(
             f0, torch.FloatTensor([[range(1, self.harmonic_num + 2)]]).to(f0.device)
@@ -324,7 +323,7 @@ class SourceModuleHnNSF(torch.nn.Module):
         add_noise_std=0.003,
         voiced_threshod=0,
     ):
-        super(SourceModuleHnNSF, self).__init__()
+        super().__init__()
 
         self.sine_amp = sine_amp
         self.noise_std = add_noise_std
@@ -355,8 +354,8 @@ class SourceModuleHnNSF(torch.nn.Module):
         return sine_merge, noise, uv
 
 
-def padDiff(x):
-    return F.pad(F.pad(x, (0, 0, -1, 1), "constant", 0) - x, (0, 0, 0, -1), "constant", 0)
+# def padDiff(x):
+#     return F.pad(F.pad(x, (0, 0, -1, 1), "constant", 0) - x, (0, 0, 0, -1), "constant", 0)
 
 
 class Generator(torch.nn.Module):
@@ -369,7 +368,7 @@ class Generator(torch.nn.Module):
         resblock_dilation_sizes,
         upsample_kernel_sizes,
     ):
-        super(Generator, self).__init__()
+        super().__init__()
         self.num_kernels = len(resblock_kernel_sizes)
         self.num_upsamples = len(upsample_rates)
         resblock = AdaINResBlock1
@@ -438,7 +437,7 @@ class Generator(torch.nn.Module):
 
         f0 = self.f0_upsamp(f0[:, None]).transpose(1, 2)  # bs,n,t
 
-        har_source, noi_source, uv = self.m_source(f0)
+        har_source, _, _ = self.m_source(f0)
         har_source = har_source.transpose(1, 2)
 
         for i in range(self.num_upsamples):
@@ -474,7 +473,13 @@ class Generator(torch.nn.Module):
 
 class AdainResBlk1d(nn.Module):
     def __init__(
-        self, dim_in, dim_out, style_dim=64, actv=nn.LeakyReLU(0.2), upsample="none", dropout_p=0.0
+        self,
+        dim_in,
+        dim_out,
+        style_dim=64,
+        actv=nn.LeakyReLU(0.2),
+        upsample="none",
+        dropout_p=0.0,
     ):
         super().__init__()
         self.actv = actv
@@ -545,9 +550,7 @@ class Decoder(nn.Module):
     def __init__(
         self,
         dim_in=512,
-        F0_channel=512,
         style_dim=64,
-        dim_out=80,
         resblock_kernel_sizes=[3, 7, 11],
         upsample_rates=[10, 5, 3, 2],
         upsample_initial_channel=512,
@@ -556,21 +559,29 @@ class Decoder(nn.Module):
     ):
         super().__init__()
 
+        logger.info("Initializing HiFiGAN Decoder: style_dim=%d", style_dim)
+
+        # self.encode = AdainResBlk1d(dim_in + 2, 1024, style_dim)
+        self.encode = AdainResBlk1d(dim_in + 2, 2048, style_dim)
+
         self.decode = nn.ModuleList()
+        # self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim))
+        # self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim))
+        # self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim))
+        # self.decode.append(AdainResBlk1d(1024 + 2 + 64, 512, style_dim, upsample=True))
+        decode_input_dim = 2048 + 2 + 128
+        self.decode.append(AdainResBlk1d(decode_input_dim, 2048, style_dim))
+        self.decode.append(AdainResBlk1d(decode_input_dim, 2048, style_dim))
+        self.decode.append(AdainResBlk1d(decode_input_dim, 2048, style_dim))
+        self.decode.append(AdainResBlk1d(decode_input_dim, 1024, style_dim, upsample=True))
 
-        self.encode = AdainResBlk1d(dim_in + 2, 1024, style_dim)
+        self.f0_conv = weight_norm(nn.Conv1d(1, 1, kernel_size=3, stride=2, groups=1, padding=1))
 
-        self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim))
-        self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim))
-        self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim))
-        self.decode.append(AdainResBlk1d(1024 + 2 + 64, 512, style_dim, upsample=True))
-
-        self.F0_conv = weight_norm(nn.Conv1d(1, 1, kernel_size=3, stride=2, groups=1, padding=1))
-
-        self.N_conv = weight_norm(nn.Conv1d(1, 1, kernel_size=3, stride=2, groups=1, padding=1))
+        self.n_conv = weight_norm(nn.Conv1d(1, 1, kernel_size=3, stride=2, groups=1, padding=1))
 
         self.asr_res = nn.Sequential(
-            weight_norm(nn.Conv1d(512, 64, kernel_size=1)),
+            # weight_norm(nn.Conv1d(512, 64, kernel_size=1)),
+            weight_norm(nn.Conv1d(512, 128, kernel_size=1)),
         )
 
         self.generator = Generator(
@@ -582,33 +593,33 @@ class Decoder(nn.Module):
             upsample_kernel_sizes,
         )
 
-    def forward(self, asr, F0_curve, N, s):
+    def forward(self, asr, f0_curve, n, s):
         if self.training:
             downlist = [0, 3, 7]
-            F0_down = downlist[random.randint(0, 2)]
+            f0_down = downlist[random.randint(0, 2)]
             downlist = [0, 3, 7, 15]
-            N_down = downlist[random.randint(0, 3)]
-            if F0_down:
-                F0_curve = (
+            n_down = downlist[random.randint(0, 3)]
+            if f0_down:
+                f0_curve = (
                     nn.functional.conv1d(
-                        F0_curve.unsqueeze(1),
-                        torch.ones(1, 1, F0_down).to("cuda"),
-                        padding=F0_down // 2,
+                        f0_curve.unsqueeze(1),
+                        torch.ones(1, 1, f0_down).to("cuda"),
+                        padding=f0_down // 2,
                     ).squeeze(1)
-                    / F0_down
+                    / f0_down
                 )
-            if N_down:
-                N = (
+            if n_down:
+                n = (
                     nn.functional.conv1d(
-                        N.unsqueeze(1), torch.ones(1, 1, N_down).to("cuda"), padding=N_down // 2
+                        n.unsqueeze(1), torch.ones(1, 1, n_down).to("cuda"), padding=n_down // 2
                     ).squeeze(1)
-                    / N_down
+                    / n_down
                 )
 
-        F0 = self.F0_conv(F0_curve.unsqueeze(1))
-        N = self.N_conv(N.unsqueeze(1))
+        f0 = self.f0_conv(f0_curve.unsqueeze(1))
+        n = self.n_conv(n.unsqueeze(1))
 
-        x = torch.cat([asr, F0, N], axis=1)
+        x = torch.cat([asr, f0, n], axis=1)
         x = self.encode(x, s)
 
         asr_res = self.asr_res(asr)
@@ -616,10 +627,10 @@ class Decoder(nn.Module):
         res = True
         for block in self.decode:
             if res:
-                x = torch.cat([x, asr_res, F0, N], axis=1)
+                x = torch.cat([x, asr_res, f0, n], axis=1)
             x = block(x, s)
             if block.upsample_type != "none":
                 res = False
 
-        x = self.generator(x, s, F0_curve)
+        x = self.generator(x, s, f0_curve)
         return x
