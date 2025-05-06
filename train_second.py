@@ -157,8 +157,8 @@ def main():
                 "hop_length": 300,
             },
         ),
+        "use_ref_mel": True,
     }
-    logger.info("Dataset config: %s", dataset_config)
 
     # Prepare dataloaders
     logger.info("Building training dataloader...")
@@ -368,7 +368,16 @@ def main():
         for batch_idx, batch in enumerate(train_dataloader):
             waves = batch[0]
             batch = [b.to(device) for b in batch[1:]]
-            texts, input_lengths, ref_texts, ref_lengths, mels, mel_input_length, ref_mels = batch
+            (
+                spk_embs,
+                texts,
+                input_lengths,
+                ref_texts,
+                ref_lengths,
+                mels,
+                mel_input_length,
+                ref_mels,
+            ) = batch
 
             with torch.no_grad():
                 mask = length_to_mask(mel_input_length // (2**n_down)).to(device)
@@ -406,7 +415,7 @@ def main():
                     ref_mels_batch = ref_mels.unsqueeze(1)  # Shape: [B, 1, n_mels, max_ref_len]
                     ref_ss = model.style_encoder(ref_mels_batch)
                     ref_sp = model.predictor_encoder(ref_mels_batch)
-                    ref = torch.cat([ref_ss, ref_sp], dim=1)
+                    ref = torch.cat([spk_embs, ref_ss, ref_sp], dim=1)
 
             # # --- Original code ---
             # # compute the style of the entire utterance
@@ -429,16 +438,16 @@ def main():
             # because AdaptiveAvgPool2d handles variable lengths.
 
             # Add channel dimension if needed by the encoders
-            mels_batch = mels.unsqueeze(1)  # Shape: [B, 1, n_mels, max_len]
+            ref_mels_batch = mels.unsqueeze(1)  # Shape: [B, 1, n_mels, max_len]
 
             # Call encoders with the entire batch
             # No mask needed due to AdaptiveAvgPool2d in the encoders
             # Global prosodic style [B, style_dim]
-            s_dur = model.predictor_encoder(mels_batch)
+            s_dur = model.predictor_encoder(ref_mels_batch)
             # Global acoustic style [B, style_dim]
-            gs = model.style_encoder(mels_batch)
+            gs = model.style_encoder(ref_mels_batch)
             # Set ground truth style for denoiser
-            s_trg = torch.cat([gs, s_dur], dim=-1).detach()
+            s_trg = torch.cat([spk_embs, gs, s_dur], dim=-1).detach()
             # --- End of Vectorized computation of styles ---
 
             try:
@@ -720,6 +729,7 @@ def main():
             # Compute styles for the extracted segments
             s_dur = model.predictor_encoder(style_input_mel_batch)
             s = model.style_encoder(style_input_mel_batch)
+            s = torch.cat([spk_embs, s], dim=1)
 
             with torch.no_grad():
                 # Extract F0 and normalization from the ground truth segment [B, 1, n_mels, mel_len * 2]
@@ -1004,6 +1014,7 @@ def main():
                     waves = batch[0]
                     batch = [b.to(device) for b in batch[1:]]
                     (
+                        spk_embs,
                         texts,
                         input_lengths,
                         ref_texts,
@@ -1034,15 +1045,16 @@ def main():
 
                     # --- Vectorized style computation ---
                     # Add channel dimension
-                    mels_batch = mels.unsqueeze(1)  # Shape: [B, 1, n_mels, max_len]
+                    ref_mels_batch = mels.unsqueeze(1)  # Shape: [B, 1, n_mels, max_len]
                     # Call encoders with the entire batch
                     # No mask needed due to AdaptiveAvgPool2d in the encoders
-                    s = model.predictor_encoder(mels_batch)  # Shape: [B, style_dim]
+                    s = model.predictor_encoder(ref_mels_batch)  # Shape: [B, style_dim]
                     # gs = model.style_encoder(mels_batch)      # Shape: [B, style_dim]
                     # --- End of vectorized style computation ---
 
                     # TODO: not used anymore!?
                     # s_trg = torch.cat([s, gs], dim=-1).detach()
+                    # --- End of Vectorized style computation ---
 
                     # Original non-vectorized style computation (commented out)
                     # ss, gs = [], []
@@ -1331,11 +1343,12 @@ def main():
                 # --- Vectorized style computation ---
                 if multispeaker and epoch >= diff_epoch:
                     # Add channel dimension
-                    mels_batch = mels.unsqueeze(1)  # Shape: [B, 1, n_mels, max_len]
+                    ref_mels_batch = ref_mels.unsqueeze(1)  # Shape: [B, 1, n_mels, max_len]
                     # Call encoders with the entire batch
-                    ref_ss = model.style_encoder(mels_batch)
-                    ref_sp = model.predictor_encoder(mels_batch)  # Shape: [B, style_dim]
-                    ref_s = torch.cat([ref_ss, ref_sp], dim=1)  # Combined style [B, 256, T]
+                    ref_ss = model.style_encoder(ref_mels_batch)
+                    ref_sp = model.predictor_encoder(ref_mels_batch)  # Shape: [B, style_dim]
+                    # Combined style [B, 256+512, T]
+                    ref_s = torch.cat([spk_embs, ref_ss, ref_sp], dim=1)
                 # --- End of Vectorized style computation ---
 
                 # Iterate over the defined number of validation samples
