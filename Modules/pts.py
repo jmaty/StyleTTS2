@@ -581,7 +581,7 @@ class PTS:
         """Compute style embedding from a waveform.
 
         Args:
-            wav (torch.Tensor): Waveform numpy array or path to waveform file.
+            wavpath (torch.Tensor): Waveform numpy array or path to waveform file.
             top_db (int): Threshold for trimming silence. Default: 30.
         Note:
             If wav is a path, it will be loaded using librosa.
