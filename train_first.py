@@ -167,8 +167,8 @@ def main():
                 "hop_length": 300,
             },
         ),
+        "use_ref_mel": False,
     }
-    logger.info("Dataset config: %s", dataset_config)
 
     # Prepare dataloaders
     logger.info("Building training dataloader...")
@@ -287,6 +287,7 @@ def main():
             batch = [b.to(device) for b in batch[1:]]
             # Keep individual batch tensors
             (
+                spk_embs,  # Speaker embeddings [B, 512]
                 texts,  # Padded input phoneme IDs [B, T_text]
                 input_lengths,  # Input phoneme lengths [B]
                 _,
@@ -453,6 +454,7 @@ def main():
             # - if not multispeaker, use the ground truth mel spectrogram
             # - if multispeaker, use other (style reference) mel spectrogram
             s = model.style_encoder(mel_st.unsqueeze(1) if multispeaker else mel_gt.unsqueeze(1))
+            s = torch.cat([spk_embs, s], dim=1)
 
             # Recontruct the audio from the text-audio aligned encoded features, predicted style,
             # and ground truth pitch and norm
@@ -614,6 +616,7 @@ def main():
                 waves = batch[0]
                 batch = [b.to(device) for b in batch[1:]]
                 (
+                    spk_embs,  # Speaker embeddings [B, 512]
                     texts,  # Padded input phoneme IDs [B, T_text]
                     input_lengths,  # Input phoneme lengths [B]
                     _,
@@ -723,7 +726,10 @@ def main():
                 # --- End of Pre-allocated tensors ---
 
                 f0_real, _, _ = model.pitch_extractor(mel_gt.unsqueeze(1))
+
                 s = model.style_encoder(mel_gt.unsqueeze(1))
+                s = torch.cat([spk_embs, s], dim=1)
+
                 real_norm = log_norm(mel_gt.unsqueeze(1)).squeeze(1)
                 y_rec = model.decoder(en, f0_real, real_norm, s)
 
