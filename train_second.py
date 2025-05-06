@@ -1331,10 +1331,10 @@ def main():
                 # --- Vectorized style computation ---
                 if multispeaker and epoch >= diff_epoch:
                     # Add channel dimension
-                    mels_batch = mels.unsqueeze(1)  # Shape: [B, 1, n_mels, max_len]
+                    ref_mels_batch = ref_mels.unsqueeze(1)  # Shape: [B, 1, n_mels, max_len]
                     # Call encoders with the entire batch
-                    ref_ss = model.style_encoder(mels_batch)
-                    ref_sp = model.predictor_encoder(mels_batch)  # Shape: [B, style_dim]
+                    ref_ss = model.style_encoder(ref_mels_batch)
+                    ref_sp = model.predictor_encoder(ref_mels_batch)  # Shape: [B, style_dim]
                     ref_s = torch.cat([ref_ss, ref_sp], dim=1)  # Combined style [B, 256, T]
                 # --- End of Vectorized style computation ---
 
