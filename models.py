@@ -866,8 +866,8 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     if args.decoder.type == "istftnet":
         decoder = ISTFTDecoder(
             dim_in=args.hidden_dim,
-            style_dim=args.style_dim,
-            dim_out=args.n_mels,
+            style_dim=args.style_dim + 512,  # TODO: 512 is the size of speaker embedding
+            # dim_out=args.n_mels,
             resblock_kernel_sizes=args.decoder.resblock_kernel_sizes,
             upsample_rates=args.decoder.upsample_rates,
             upsample_initial_channel=args.decoder.upsample_initial_channel,
@@ -879,8 +879,8 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     else:
         decoder = HifiDecoder(
             dim_in=args.hidden_dim,
-            style_dim=args.style_dim,
-            dim_out=args.n_mels,
+            style_dim=args.style_dim + 512,  # TODO: 512 is the size of speaker embedding
+            # dim_out=args.n_mels,
             resblock_kernel_sizes=args.decoder.resblock_kernel_sizes,
             upsample_rates=args.decoder.upsample_rates,
             upsample_initial_channel=args.decoder.upsample_initial_channel,
