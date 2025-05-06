@@ -144,6 +144,7 @@ class FilePathDataset(torch.utils.data.Dataset):
         self.data_augmentation = data_augmentation and (not validation)  # not used
         self.max_mel_length = 192
         self.root_path = root_path  # Set up path to waveform directory
+        self.ptexts = []  # Initialize list of OOD texts
 
         # Get parameters from kwargs (config)
         self.sr = kwargs.get("sr", 24000)
@@ -158,6 +159,9 @@ class FilePathDataset(torch.utils.data.Dataset):
         self.n_mels = kwargs.get("n_mels", 80)
         self.mean = kwargs.get("mean", -4)
         self.std = kwargs.get("std", 4)
+        self.use_ref_mel = kwargs.get("use_ref_mel", True)
+
+        logger.info("%s dataset config: %s", "validation" if validation else "training", kwargs)
 
         # Set up text cleaner for phone ID encoding and padding ID
         self.text_cleaner = text_cleaner
@@ -180,7 +184,8 @@ class FilePathDataset(torch.utils.data.Dataset):
         self.df = pd.DataFrame(self.data_list)
 
         # Load Out-of-distribution texts if provided
-        self.ptexts = self._load_ood_texts(ood_data)
+        if ood_data is not None:
+            self.ptexts = self._load_ood_texts(ood_data)
         logger.info("Loaded %d OOD texts.", len(self.ptexts))
 
     def _load_texts(self, data_list):
@@ -225,11 +230,6 @@ class FilePathDataset(torch.utils.data.Dataset):
         Returns:
             list: OOD phone IDs per text line.
         """
-        # Check if the OOD file is provided for loading.
-        # If not, return an empty list
-        if ood_file is None:
-            return []
-
         # Load OOD texts from the specified file
         with open(ood_file, "r", encoding="utf-8") as f:
             text_lines = f.readlines()
@@ -283,8 +283,13 @@ class FilePathDataset(torch.utils.data.Dataset):
               audio sample.
         """
         data = self.data_list[idx]  # [wavfile, phone IDs, speaker_id]
+
         # Load the waveform, phonetic string, and speaker ID
         wave, text_tensor, speaker_id = self._load_tensor(data)
+
+        # Load speaker embedding (data[0] is the path to the waveform)
+        spk_emb_path = data[0].replace("/wavs/", "/hasp/").replace(".wav", ".pt")
+        spk_emb = self._load_speaker_embedding(spk_emb_path)
 
         # Process audio: output [n_mels, n_frames]
         mel_normalized = self.audio_processor(wave)
@@ -296,17 +301,21 @@ class FilePathDataset(torch.utils.data.Dataset):
         acoustic_feature = acoustic_feature[:, : (length_feature - length_feature % 2)]
 
         # Get reference sample of max length `self.max_mel_length` (192)
-        ref_data = (self.df[self.df[2] == str(speaker_id)]).sample(n=1).iloc[0].tolist()
-        ref_mel_tensor, ref_label = self._load_data(ref_data[:3])  # ref_label is speaker ID
+        if self.use_ref_mel:
+            ref_data = (self.df[self.df[2] == str(speaker_id)]).sample(n=1).iloc[0].tolist()
+            ref_mel_tensor, ref_label = self._load_data(ref_data[:3])  # ref_label is speaker ID
+        else:
+            ref_mel_tensor = torch.tensor([], dtype=torch.float)  # Empty tensor
+            ref_label = 0
 
         # Randomly select a phonetic sentence from the OOD texts if available
         if self.ptexts:
             ref_ph_string = self.ptexts[np.random.randint(0, len(self.ptexts) - 1)]
             # Encode phonetic string as a list of phoneme IDs with padding
-            ref_ph_ids = torch.LongTensor(self.text_cleaner(ref_ph_string, pad=True))
+            ref_ph_ids = torch.tensor(self.text_cleaner(ref_ph_string, pad=True), dtype=torch.long)
         else:
             # Use empty tensor if no OOD texts are provided
-            ref_ph_ids = torch.LongTensor([])  # Empty tensor
+            ref_ph_ids = torch.tensor([], dtype=torch.long)  # Empty tensor
 
         return (
             speaker_id,  # speaker ID
@@ -317,6 +326,7 @@ class FilePathDataset(torch.utils.data.Dataset):
             ref_label,  # reference speaker ID
             data[0],  # wavfile path
             wave,  # raw waveform tensor
+            spk_emb,  # speaker embedding tensor
         )
 
     def _load_tensor(self, data):
@@ -363,6 +373,15 @@ class FilePathDataset(torch.utils.data.Dataset):
             int(speaker_id),  # speaker ID
         )
 
+    def _load_speaker_embedding(self, spk_emb_path):
+        """Loads the speaker embedding from a specified path.
+        Args:
+            spk_emb_path (str): Path to the speaker embedding file.
+        Returns:
+            torch.Tensor: The loaded speaker embedding tensor.
+        """
+        return torch.load(osp.join(self.root_path, spk_emb_path))
+
     def _load_data(self, data):
         """Takes a tuple containing the relative path to a waveform file,
         a string of phonemes, and a speaker ID. It loads the waveform, processes
@@ -380,6 +399,7 @@ class FilePathDataset(torch.utils.data.Dataset):
             Warning: Logs a warning if the mel spectrogram length exceeds
                 the maximum length and crops it."""
         # Loads the reference audio waveform
+        # TODO: not using speaker embedding?
         wave, _, speaker_id = self._load_tensor(data)
         # mel_tensor = preprocess(wave).squeeze()
         # Process audio
@@ -474,6 +494,11 @@ class Collater(object):
         max_text_length = max([b[2].shape[0] for b in batch])
         # b[3] is ref_ph_ids (OOD text)
         max_rtext_length = max([b[3].shape[0] for b in batch])
+        spk_emb_dim = batch[0][8].size(0)  # Assuming speaker embedding is 1D
+
+        # Check if batch has valid reference mel tensors
+        # b[4] is ref_mel_tensor from __getitem__
+        has_valid_ref_mel = batch[0][4].numel() != 0
 
         # Initialize padded tensors
         # b[0] is speaker_id (integer)
@@ -488,8 +513,15 @@ class Collater(object):
         input_lengths = torch.zeros(batch_size).long()
         ref_lengths = torch.zeros(batch_size).long()
         output_lengths = torch.zeros(batch_size).long()
+
+        # Initialize ref_mels conditionally
         # b[4] is ref_mel_tensor, use self.max_mel_length (fixed size from config)
-        ref_mels = torch.zeros((batch_size, nmels, self.max_mel_length)).float()
+        ref_mels = (
+            torch.zeros((batch_size, nmels, self.max_mel_length)).float()
+            if has_valid_ref_mel
+            else torch.tensor([], dtype=torch.float)  # Return None if no item has ref_mel
+        )
+
         # b[5] is ref_label (reference speaker ID) - not used
         # ref_labels = torch.zeros((batch_size)).long()
 
@@ -500,12 +532,15 @@ class Collater(object):
         # Due to memory constraints, it is better to keep it as a list
         waves = [None for _ in range(batch_size)]
 
+        # b[8] is speaker embedding
+        spk_embs = torch.zeros((batch_size, spk_emb_dim)).float()
+
         # Rearrange batch data according to mel length
-        for bid, (label, mel, text, ref_text, ref_mel, _, _, wave) in enumerate(batch):
+        for bid, (label, mel, text, ref_text, ref_mel, _, _, wave, spk_emb) in enumerate(batch):
             mel_size = mel.size(1)  # Get sizes of current item
             text_size = text.size(0)
             rtext_size = ref_text.size(0)
-            ref_mel_size = ref_mel.size(1)  # Actual size before padding/cropping
+            ref_mel_size = ref_mel.size(1) if has_valid_ref_mel else 0
 
             # Fill tensors
             labels[bid] = label
@@ -516,13 +551,21 @@ class Collater(object):
             ref_lengths[bid] = rtext_size
             output_lengths[bid] = mel_size
             # paths[bid] = path
+            # ref_mels[bid, :, :ref_mel_size] = ref_mel
 
-            ref_mels[bid, :, :ref_mel_size] = ref_mel
+            # Only assign if ref_mel is not None and size > 0
+            if ref_mel_size > 0:
+                # Ensure we don't try to assign beyond the bounds of ref_mels
+                ref_mels[bid, :, :ref_mel_size] = ref_mel
+            # If ref_mel_size is 0, ref_mels[bid] remains empty (as initialized)
+
             # ref_labels[bid] = ref_label  # not used anymore
             waves[bid] = wave
+            spk_embs[bid, :spk_emb_dim] = spk_emb
 
         return (
             waves,  # List of raw waveform tensors (or None)
+            spk_embs,  # Speaker embedding tensors [B, 512]
             texts,  # Padded input phoneme IDs [B, T_text]
             input_lengths,  # Input phoneme lengths [B]
             ref_texts,  # Padded OOD text phoneme IDs [B, T_ref_text]
