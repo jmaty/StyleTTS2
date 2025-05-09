@@ -255,8 +255,10 @@ def main():
     # - use global noise for speed
     pts = PTS(config, model, use_glob_noise=True)
 
-    # Total number of steps given the batch size
-    tot_num_steps = len(train_list) // batch_size
+    # # Total number of steps given the batch size
+    # tot_num_steps = len(train_list) // batch_size
+    # Number of steps per epoch for the current process
+    steps_this_epoch = len(train_dataloader)
 
     best_loss = float("inf")  # best test loss
 
@@ -264,7 +266,7 @@ def main():
         logger.info(" > Start training cycles:")
         logger.info(" | > Starting epoch:   %d", start_epoch)
         logger.info(" | > Total epochs:     %d", epochs)
-        logger.info(" | > Steps per epoch:  %d", tot_num_steps)
+        logger.info(" | > Steps per epoch:  %d", steps_this_epoch)
         logger.info(" | > Input iterations: %d\n", iters)
 
     # === Start of training loop ==============================================
@@ -572,7 +574,7 @@ def main():
                     epoch + 1,
                     epochs,
                     i + 1,
-                    tot_num_steps,
+                    steps_this_epoch,  # tot_num_steps,
                     mel_loss,
                     loss_gen_all,
                     d_loss,
@@ -753,13 +755,14 @@ def main():
                 # Iterate over the defined number of validation samples
                 for idx in range(min(n_val_audios, bsize)):
                     mel_length = int(mel_input_length[idx].item())
-                    # Ground-truth mel spectrogram
-                    mel_gt = mels[idx, :, :mel_length].unsqueeze(0)
-                    # Ground-truth phonemes-audio alignment
-                    en_gt = asr[idx, :, : mel_length // 2].unsqueeze(0)
                     # Reconstruct audio from ground-truth mel spectrogram and
                     # phoneme-audio alignment
-                    wav = pts.reconstruct(mel_gt, en_gt)
+                    wav = pts.reconstruct(
+                        mels[idx, :, :mel_length].unsqueeze(0),  # Ground-truth mel spectrogram
+                        # Ground-truth phoneme-audio alignment
+                        asr[idx, :, : mel_length // 2].unsqueeze(0),
+                        spk_emb=spk_embs[idx].unsqueeze(0),
+                    )
 
                     # Write and save val audio
                     writer.add_audio(f"eval/y{idx}", wav, epoch, sample_rate=sr)
@@ -834,8 +837,7 @@ def main():
 
             if epoch % saving_epoch == 0:
                 curr_loss = loss_test / iters_test
-                if curr_loss < best_loss:
-                    best_loss = curr_loss
+                best_loss = min(curr_loss, best_loss)
                 save_checkpoint(
                     model,
                     optimizer,
