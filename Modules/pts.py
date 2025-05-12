@@ -5,9 +5,9 @@ from collections import OrderedDict
 import librosa
 import numpy as np
 import torch
-from scipy.io.wavfile import write
 import yaml
 from munch import munchify
+from scipy.io.wavfile import write
 
 from logger import get_logger
 from meldataset import AudioProcessor
@@ -292,6 +292,7 @@ class PTS:
         self,
         ph_strings,
         ref_s=None,
+        spk_emb=None,
     ):
         """
         Generate wavs from phonetic strings.
@@ -329,10 +330,11 @@ class PTS:
         wavs = []
         s_prev = None
 
-        if isinstance(ref_s, str):
+        if isinstance(ref_s, str) and isinstance(spk_emb, str):
             # If ref_s is a path, compute style embedding.
-            # Otherwise, ref_s is assumed to be a reference speaker style embedding tensor or None
-            ref_s = self.compute_style(ref_s, top_db=30)
+            # Otherwise, both ref_s and spk_emb are assumed to be
+            # reference speaker style embedding tensors or None
+            ref_s = self.compute_style(ref_s, spk_emb, top_db=30)
 
         logger.info("Generating wavs from phoneme strings: %s", ph_strings)
 
@@ -472,8 +474,8 @@ class PTS:
                 # convex combination of previous and current styles
                 s_pred = self.t * s_pred + (1 - self.t) * s_prev
 
-            s = s_pred[:, 128:]  # prosodic features
-            ref = s_pred[:, :128]  # timbre features
+            s = s_pred[:, 640:]  # prosodic features: 128 (style) + 512 (speaker embedding)
+            ref = s_pred[:, :640]  # timbre features
 
             # If reference speaker style embedding  `ref_s` is provided,
             # combine it with the generated style
@@ -485,8 +487,8 @@ class PTS:
             #   lower = more similar to the reference style)
             if ref_s is not None:
                 logger.debug("Combining styles with reference speaker style embedding")
-                ref = self.alpha * ref + (1 - self.alpha) * ref_s[:, :128]
-                s = self.beta * s + (1 - self.beta) * ref_s[:, 128:]
+                ref = self.alpha * ref + (1 - self.alpha) * ref_s[:, :640]
+                s = self.beta * s + (1 - self.beta) * ref_s[:, 640:]
                 s_pred = torch.cat([ref, s], dim=-1)
 
             # Style-conditioned phonetic features
@@ -545,7 +547,7 @@ class PTS:
             return out.squeeze().cpu().numpy()[self.offset_beg : -self.offset_end], s_pred
             # return out.squeeze().cpu().numpy()[..., :-50], s_pred
 
-    def reconstruct(self, mel_gt, en, p_en=None, spk_emb=None):
+    def reconstruct(self, mel_gt, en, spk_emb, p_en=None):
         """Reconstruct the waveform from the mel spectrogram.
         This method uses the decoder of the model to generate the waveform
         Args:
@@ -578,7 +580,7 @@ class PTS:
         # Return the waveform without silence at the beginning and end
         return y_pred.cpu().numpy().squeeze()[self.offset_beg : -self.offset_end]
 
-    def compute_style(self, wavpath, top_db=30):
+    def compute_style(self, wavpath, spk_emb_path, top_db=30):
         """Compute style embedding from a waveform.
 
         Args:
@@ -614,7 +616,10 @@ class PTS:
             ref_s = self.model.style_encoder(mel_tensor.unsqueeze(1))  # style = timbre
             ref_p = self.model.predictor_encoder(mel_tensor.unsqueeze(1))  # style = prosody
 
-        return torch.cat([ref_s, ref_p], dim=1)
+            # Load speaker embedding
+            spk_emb = torch.load(spk_emb_path)
+
+        return torch.cat([spk_emb, ref_s, ref_p], dim=1)
 
     def save_wav(self, wav, path):
         """Save wavs to a single wav file.
