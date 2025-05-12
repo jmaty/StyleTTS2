@@ -761,7 +761,7 @@ def main():
                         mels[idx, :, :mel_length].unsqueeze(0),  # Ground-truth mel spectrogram
                         # Ground-truth phoneme-audio alignment
                         asr[idx, :, : mel_length // 2].unsqueeze(0),
-                        spk_emb=spk_embs[idx].unsqueeze(0),
+                        spk_embs[idx].unsqueeze(0),
                     )
 
                     # Write and save val audio
