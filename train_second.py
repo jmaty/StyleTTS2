@@ -723,7 +723,7 @@ def main():
 
             # Recompute styles based on the extracted segments
             # Use mel_gt for single speaker, mel_st for multispeaker reference
-            style_input_mel = mel_st if multispeaker else mel_gt  # Updated comment for clarity
+            style_input_mel = mel_st if multispeaker else mel_gt
             # Add channel dim for encoders
             style_input_mel_batch = style_input_mel.unsqueeze(1)
             # Compute styles for the extracted segments
@@ -738,7 +738,7 @@ def main():
                 # f0 = f0.reshape(f0.shape[0], f0.shape[1] * 2, f0.shape[2], 1).squeeze()
                 n_real = log_norm(mel_gt.unsqueeze(1)).squeeze(1)  # [B, n_mels, mel_len * 2]
 
-                # Ground truth waveform segment is already in 'wav'
+                # Ground truth waveform segment is already in 'wav_gt'
                 y_rec_gt = wav_gt.unsqueeze(1)
                 y_rec_gt_pred = model.decoder(en, f0_real, n_real, s)
 
@@ -1254,6 +1254,7 @@ def main():
 
                     # Recompute style using style_encoder for decoder input
                     s = model.style_encoder(mel_gt.unsqueeze(1))
+                    s = torch.cat([spk_embs, s], dim=1)
 
                     y_rec = model.decoder(en, f0_fake, n_fake, s)
                     loss_mel = stft_loss(y_rec.squeeze(), wav_gt.detach())
@@ -1287,19 +1288,17 @@ def main():
         writer.add_scalar("eval/F0_loss", avg_f_loss, epoch + 1)
 
         # Generate validation samples
+        n_val_samples = min(n_val_audios, bsize)
         if epoch < joint_epoch:
             # Generating reconstruction examples with GT duration
             with torch.no_grad():
                 # Iterate over the defined number of validation samples
-                for idx in range(min(n_val_audios, bsize)):
+                for idx in range(n_val_samples):
                     mel_length = int(mel_input_length[idx].item())
-                    # Ground-truth mel spectrogram
-                    mel_gt = mels[idx, :, :mel_length].unsqueeze(0)
-                    # Ground-truth phonemes-audio alignment
-                    en_gt = asr[idx, :, : mel_length // 2].unsqueeze(0)
+
                     # # Reconstruct audio from ground-truth mel spectrogram and
                     # # phoneme-audio alignment
-                    # wav = pts.reconstruct(mel_gt, en_gt)
+                    # wav = pts.reconstruct(mel_gt, en_gt, spk_emb=spk_embs[idx].unsqueeze(0))
 
                     # # Write and save val audio
                     # writer.add_audio(f"eval/y{idx}", wav, epoch, sample_rate=sr)
@@ -1307,12 +1306,17 @@ def main():
                     #     outfile = f"epoch_2nd_{epoch:0>5}_val-rec-{idx}.wav"
                     #     pts.save_wav(wav, os.path.join(test_audio_dir, outfile))
 
-                    # Predicted phonemes-audio alignment encoding
-                    p_en = p[idx, :, : mel_length // 2].unsqueeze(0)
                     # Reconstruct audio from ground-truth mel spectrogram,
                     # and extracted and predicted phoneme-audio alignment encoding
                     # TODO: Enable reconstruction from multiple tensors
-                    wav_pred = pts.reconstruct(mel_gt, en_gt, p_en)
+                    wav_pred = pts.reconstruct(
+                        mels[idx, :, :mel_length].unsqueeze(0),  # Ground-truth mel spectrogram
+                        # Ground-truth phonemes-audio alignment
+                        asr[idx, :, : mel_length // 2].unsqueeze(0),
+                        spk_embs[idx].unsqueeze(0),
+                        # Predicted phonemes-audio alignment encoding
+                        p[idx, :, : mel_length // 2].unsqueeze(0),
+                    )
 
                     # Write and save val audio
                     writer.add_audio(f"pred/y{idx}", wav_pred, epoch, sample_rate=sr)
@@ -1321,11 +1325,10 @@ def main():
                         pts.save_wav(wav_pred, os.path.join(test_audio_dir, outfile))
 
                     # Save ground truth
-                    if epoch == 0:
-                        # wav_gt = waves[idx].squeeze()
+                    if epoch == 0 or multispeaker:
                         # wav_gt = np.squeeze(waves[idx].cpu().numpy())
                         wav_gt = waves[idx].squeeze()
-                        if save_val_audio:
+                        if save_val_audio and epoch % saving_epoch == 0:
                             outfile = f"epoch_2nd_{epoch:0>5}_gt-{idx}.wav"
                             pts.save_wav(wav_gt, os.path.join(test_audio_dir, outfile))
                         writer.add_audio(f"gt/y{idx}", wav_gt, epoch, sample_rate=sr)
@@ -1342,17 +1345,22 @@ def main():
 
                 # --- Vectorized style computation ---
                 if multispeaker and epoch >= diff_epoch:
+                    # Take only the first `n_val_samples` samples
                     # Add channel dimension
-                    ref_mels_batch = ref_mels.unsqueeze(1)  # Shape: [B, 1, n_mels, max_len]
+                    # Shape: [n_val_samples, 1, n_mels, max_len]
+                    ref_mels_val = ref_mels[:n_val_samples].unsqueeze(1)
+                    spk_embs_val = spk_embs[:n_val_samples]
+
                     # Call encoders with the entire batch
-                    ref_ss = model.style_encoder(ref_mels_batch)
-                    ref_sp = model.predictor_encoder(ref_mels_batch)  # Shape: [B, style_dim]
+                    ref_ss = model.style_encoder(ref_mels_val)  # Shape: [ref_mels_val, style_dim]
+                    # Shape: [ref_mels_val, style_dim]
+                    ref_sp = model.predictor_encoder(ref_mels_val)
                     # Combined style [B, 256+512, T]
-                    ref_s = torch.cat([spk_embs, ref_ss, ref_sp], dim=1)
+                    ref_s = torch.cat([spk_embs_val, ref_ss, ref_sp], dim=1)
                 # --- End of Vectorized style computation ---
 
                 # Iterate over the defined number of validation samples
-                for idx in range(min(n_val_audios, len(mel_input_length))):
+                for idx in range(n_val_samples):
                     # Generate audio from phoneme features of the `idx`-th validation file
                     # TODO: Enable reconstruction from multiple tensors
                     wav_pred, _ = pts.infer_from_ph_features(
@@ -1369,6 +1377,14 @@ def main():
                     if save_val_audio and epoch % saving_epoch == 0:
                         outfile = f"epoch_2nd_{epoch:0>5}_val-pred-{idx}.wav"
                         pts.save_wav(wav_pred, os.path.join(test_audio_dir, outfile))
+
+                    # Save ground truth
+                    if epoch == 0 or multispeaker:
+                        wav_gt = waves[idx].squeeze()
+                        if save_val_audio and epoch % saving_epoch == 0:
+                            outfile = f"epoch_2nd_{epoch:0>5}_gt-{idx}.wav"
+                            pts.save_wav(wav_gt, os.path.join(test_audio_dir, outfile))
+                        writer.add_audio(f"gt/y{idx}", wav_gt, epoch, sample_rate=sr)
 
         # --- End of validation part ------------------------------------------
 
