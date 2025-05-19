@@ -80,15 +80,20 @@ def main():
 
     # Set up training parameters
     batch_size = config.get("batch_size", 10)
-    epochs = config.get("epochs_2nd", 200)
+    max_len = config.get("max_len", 200)
     log_interval = config.get("log_interval", 10)
     saving_epoch = config.get("save_freq", 2)
     max_saved_models = config.get("max_saved_models", 2)
     save_milestones = config.get("save_milestones", False)
-    max_len = config.get("max_len", 200)
     grad_clip = config.get("grad_clip", None)  # JMa: gradient clipping support
     device = config.get("cuda", "cuda")  # Set to cuda
 
+    # Set up epochs
+    epochs = config["epochs"].get("stage2", 100)
+    diff_epoch = config["epochs"].get("diff", 20)
+    joint_epoch = config["epochs"].get("joint", 50)
+
+    # Set up data parameters
     data_params = config.get("data_params", None)
     sr = config["preprocess_params"].get("sr", 24000)
     hop_length = config["preprocess_params"]["spect_params"].get("hop_length", 300)
@@ -102,15 +107,14 @@ def main():
     n_val_audios = config["data_params"].get("n_val_audios", 3)
     save_test_audio = data_params.get("save_test_audio", False)
     test_audio_dir = os.path.join(
-        config["log_dir"], config["data_params"].get("test_audio_dir", "test_audios")
+        config["log_dir"],
+        config["data_params"].get("test_audio_dir", "test_audios"),
     )
-
+    # Set up test sentences
     test_sentences = data_params.get("test_sentences", [])
 
     # Set up loss and optimizer parameters
     loss_params = Munch(config["loss_params"])
-    diff_epoch = loss_params.diff_epoch
-    joint_epoch = loss_params.joint_epoch
     optimizer_params = Munch(config["optimizer_params"])
 
     # Set up text cleaner
@@ -712,7 +716,7 @@ def main():
             # --- End of Pre-allocated Segment Extraction ---
 
             # Check if extracted tensors are too short or empty
-            if mel_gt.size(-1) < 80 or wav_gt.size(-1) == 0:  # Check waveform length too
+            if mel_gt.size(-1) < 80:
                 logger.warning(
                     "Segment is too short => skipping batch %d (gt: %d, wav: %d).",
                     batch_idx,

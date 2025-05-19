@@ -86,12 +86,19 @@ def main():
 
     # Set up training parameters
     batch_size = config.get("batch_size", 4)
-    epochs = config.get("epochs_1st", 200)
+    grad_accum_steps = config.get("grad_accum_steps", 1)  # JMa: gradient accumulation
+    max_len = config.get("max_len", 200)
     log_interval = config.get("log_interval", 10)
     saving_epoch = config.get("save_freq", 2)
     max_saved_models = config.get("max_saved_models", 2)
     save_milestones = config.get("save_milestones", False)
+    grad_clip = config.get("grad_clip", None)  # JMa: gradient clipping support
 
+    # Set up epochs
+    epochs = config["epochs"].get("stage1", 200)
+    tma_epoch = config["epochs"].get("TMA_epoch", 50)
+
+    # Set up data parameters
     data_params = config.get("data_params", None)
     sr = config["preprocess_params"].get("sr", 24000)
     hop_length = config["preprocess_params"]["spect_params"].get("hop_length", 300)
@@ -103,15 +110,13 @@ def main():
     n_val_audios = config["data_params"].get("n_val_audios", 3)
     save_test_audio = False
     test_audio_dir = os.path.join(
-        config["log_dir"], config["data_params"].get("test_audio_dir", "test_audios")
+        config["log_dir"],
+        config["data_params"].get("test_audio_dir", "test_audios"),
     )
-
-    max_len = config.get("max_len", 200)
 
     model_params = recursive_munch(config["model_params"])
     multispeaker = model_params.multispeaker
     loss_params = Munch(config["loss_params"])
-    tma_epoch = loss_params.TMA_epoch
 
     # Set up text cleaner and pre-processing function
     text_cleaner = TextCleaner(data_params["symbol_dict_path"], pad=data_params["pad"])
@@ -121,11 +126,6 @@ def main():
     assert (
         model_params.n_token == 81
     ), f"Number of tokens must be 81 but it is {model_params.n_token}"
-
-    # JMa: gradient clipping support
-    grad_clip = config.get("grad_clip", None)
-    # JMa: gradient accumulation
-    grad_accum_steps = config.get("grad_accum_steps", 1)
 
     # Load utility models
     with accelerator.main_process_first():
