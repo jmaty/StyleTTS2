@@ -126,9 +126,10 @@ def main():
     # Load pretrained F0 model
     f0_path = config.get("F0_path", False)
     pitch_extractor = load_F0_models(f0_path)
-    # Load PL-BERT model
-    bert_path = config.get("PLBERT_dir", False)
-    plbert = load_plbert(bert_path)
+    # # Load PL-BERT model
+    # bert_path = config.get("PLBERT_dir", False)
+    # plbert = load_plbert(bert_path)
+    plbert = None
 
     # Build model
     model_params = recursive_munch(config["model_params"])
@@ -140,12 +141,13 @@ def main():
     # Load data & dataloaders
     train_list, val_list = get_data_path_list(train_path, val_path)
 
-    logger.info("BERT size: %d", model.bert.config.max_position_embeddings)
+    # logger.info("BERT size: %d", model.bert.config.max_position_embeddings)
 
     dataset_config = {
         "sr": sr,
         "min_length": data_params["min_length"],
-        "max_length": model.bert.config.max_position_embeddings,  # ALBERT config
+        # "max_length": model.bert.config.max_position_embeddings,  # ALBERT config
+        "max_length": config["model_params"].get("max_length", 512),
         "silence_beg": silence_beg,
         "silence_end": silence_end,
         "n_mels": config["model_params"].get("n_mels", 80),
@@ -253,7 +255,7 @@ def main():
         "steps_per_epoch": len(train_dataloader),
     }
     scheduler_params_dict = {key: scheduler_params.copy() for key in model}
-    scheduler_params_dict["bert"]["max_lr"] = optimizer_params.bert_lr * 2
+    # scheduler_params_dict["bert"]["max_lr"] = optimizer_params.bert_lr * 2
     scheduler_params_dict["decoder"]["max_lr"] = optimizer_params.ft_lr * 2
     scheduler_params_dict["style_encoder"]["max_lr"] = optimizer_params.ft_lr * 2
 
@@ -263,13 +265,13 @@ def main():
         lr=optimizer_params.lr,
     )
 
-    # adjust BERT learning rate
-    for g in optimizer.optimizers["bert"].param_groups:
-        g["betas"] = (0.9, 0.99)
-        g["lr"] = optimizer_params.bert_lr
-        g["initial_lr"] = optimizer_params.bert_lr
-        g["min_lr"] = 0
-        g["weight_decay"] = 0.01
+    # # adjust BERT learning rate
+    # for g in optimizer.optimizers["bert"].param_groups:
+    #     g["betas"] = (0.9, 0.99)
+    #     g["lr"] = optimizer_params.bert_lr
+    #     g["initial_lr"] = optimizer_params.bert_lr
+    #     g["min_lr"] = 0
+    #     g["weight_decay"] = 0.01
 
     # adjust acoustic module learning rate
     for module in ["decoder", "style_encoder"]:
@@ -340,6 +342,8 @@ def main():
     # Total number of steps given the batch size
     tot_num_steps = len(train_list) // batch_size
 
+    # t_en_proj = torch.nn.Linear(model_params.hidden_dim, model.bert.config.max_position_embeddings).to(device)
+
     logger.info(" > Start training cycles:")
     logger.info(" | > Starting epoch:   %d", start_epoch)
     logger.info(" | > Total epochs:     %d", epochs)
@@ -360,8 +364,8 @@ def main():
 
         # Set following models to train mode
         model.predictor.train()
-        model.bert_encoder.train()
-        model.bert.train()
+        # model.bert_encoder.train()
+        # model.bert.train()
         model.msd.train()
         model.mpd.train()
 
@@ -441,16 +445,33 @@ def main():
             s_trg = torch.cat([gs, s_dur], dim=-1).detach()
             # --- End of Vectorized computation of styles ---
 
-            try:
-                # Compute contextualized embeddings from phonetic input
-                bert_dur = model.bert(texts, attention_mask=(~text_mask).int())
-            except RuntimeError as e:
-                logger.warning("Error: %s", e)
-                # print(f"[!] Error: {e}")
-                continue  # skip batch
+            # try:
+            #     # Compute contextualized embeddings from phonetic input
+            #     bert_dur = model.bert(texts, attention_mask=(~text_mask).int())
+            # except RuntimeError as e:
+            #     logger.warning("Error: %s", e)
+            #     # print(f"[!] Error: {e}")
+            #     continue  # skip batch
 
-            # Encoded duration information [B, max_len, 768]
-            d_en = model.bert_encoder(bert_dur).transpose(-1, -2)
+            # print(f"orig bert_dur: {bert_dur.shape}")
+
+            # # Encoded duration information [B, max_len, 768]
+            # d_en = model.bert_encoder(bert_dur).transpose(-1, -2)
+            # print(f"orig d_en: {d_en.shape}")
+
+            t_en_T = t_en.transpose(1, 2)
+            # bert_dur = t_en_proj(t_en_T)
+            bert_dur = t_en_T
+            d_en = t_en
+            # print(f"d_en: {d_en.shape}")
+
+            # asr = t_en @ s2s_attn_mono
+            # d_en = asr
+
+            # _, _, s2s_attn = model.text_aligner(mels, mel_mask, texts)
+            # d_en = t_en @ s2s_attn
+
+            # print(f"bert_dur: {bert_dur.shape}")
 
             # Denoiser training
             if epoch >= diff_epoch:
@@ -802,15 +823,15 @@ def main():
             # JMa: gradient clipping
             if grad_clip:
                 # _ = [nn.utils.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
-                nn.utils.clip_grad_norm_(model.bert_encoder.parameters(), grad_clip)
-                nn.utils.clip_grad_norm_(model.bert.parameters(), grad_clip)
+                # nn.utils.clip_grad_norm_(model.bert_encoder.parameters(), grad_clip)
+                # nn.utils.clip_grad_norm_(model.bert.parameters(), grad_clip)
                 nn.utils.clip_grad_norm_(model.predictor.parameters(), grad_clip)
                 nn.utils.clip_grad_norm_(model.predictor_encoder.parameters(), grad_clip)
             if torch.isnan(g_loss):
                 set_trace()
 
-            optimizer.step("bert_encoder")
-            optimizer.step("bert")
+            # optimizer.step("bert_encoder")
+            # optimizer.step("bert")
             optimizer.step("predictor")
             optimizer.step("predictor_encoder")
 
@@ -867,8 +888,8 @@ def main():
                     # JMa: gradient clipping
                     if grad_clip:
                         # _ = [nn.utils.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
-                        nn.utils.clip_grad_norm_(model.bert_encoder.parameters(), grad_clip)
-                        nn.utils.clip_grad_norm_(model.bert.parameters(), grad_clip)
+                        # nn.utils.clip_grad_norm_(model.bert_encoder.parameters(), grad_clip)
+                        # nn.utils.clip_grad_norm_(model.bert.parameters(), grad_clip)
                         nn.utils.clip_grad_norm_(model.predictor.parameters(), grad_clip)
                         nn.utils.clip_grad_norm_(model.diffusion.parameters(), grad_clip)
 
@@ -905,8 +926,8 @@ def main():
                         if p.grad is not None:
                             p.grad *= slmadv_params.scale
 
-                    optimizer.step("bert_encoder")
-                    optimizer.step("bert")
+                    # optimizer.step("bert_encoder")
+                    # optimizer.step("bert")
                     optimizer.step("predictor")
                     optimizer.step("diffusion")
 
@@ -1062,8 +1083,10 @@ def main():
                     # # gs = torch.stack(gs).squeeze(dim=1)        # !!! JMa: not used anymore?
                     # # s_trg = torch.cat([s, gs], dim=-1).detach() # !!! JMa: not used anymore?
 
-                    bert_dur = model.bert(texts, attention_mask=(~text_mask).int())  # [B, T, 768]
-                    d_en = model.bert_encoder(bert_dur).transpose(-1, -2)  # [B, 256, T]
+                    # bert_dur = model.bert(texts, attention_mask=(~text_mask).int())  # [B, T, 768]
+                    # d_en = model.bert_encoder(bert_dur).transpose(-1, -2)  # [B, 256, T]
+                    d_en = t_en
+                    bert_dur = t_en.transpose(1, 2)
 
                     # Predict duration and pitch [B, 256, T]
                     d, p = model.predictor(d_en, s, input_lengths, s2s_attn_mono, text_mask)

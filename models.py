@@ -900,32 +900,42 @@ def build_model(args, text_aligner, pitch_extractor, bert):
         dropout=args.dropout,
     )
 
+    # Acoustic style encoder
     style_encoder = StyleEncoder(
-        dim_in=args.dim_in, style_dim=args.style_dim, max_conv_dim=args.hidden_dim
-    )  # acoustic style encoder
+        dim_in=args.dim_in,
+        style_dim=args.style_dim,
+        max_conv_dim=args.hidden_dim,
+    )
+    # Prosodic style encoder
     predictor_encoder = StyleEncoder(
-        dim_in=args.dim_in, style_dim=args.style_dim, max_conv_dim=args.hidden_dim
-    )  # prosodic style encoder
+        dim_in=args.dim_in,
+        style_dim=args.style_dim,
+        max_conv_dim=args.hidden_dim,
+    )
 
     # define diffusion model
     if args.multispeaker:
         transformer = StyleTransformer1d(
             channels=args.style_dim * 2,
-            context_embedding_features=bert.config.hidden_size,
+            # context_embedding_features=bert.config.hidden_size,
+            context_embedding_features=args.hidden_dim,
             context_features=args.style_dim * 2,
             **args.diffusion.transformer,
         )
     else:
         transformer = Transformer1d(
             channels=args.style_dim * 2,
-            context_embedding_features=bert.config.hidden_size,
+            # context_embedding_features=bert.config.hidden_size,
+            context_embedding_features=args.hidden_dim,
             **args.diffusion.transformer,
         )
 
     diffusion = AudioDiffusionConditional(
         in_channels=1,
-        embedding_max_length=bert.config.max_position_embeddings,
-        embedding_features=bert.config.hidden_size,
+        # embedding_max_length=bert.config.max_position_embeddings,
+        embedding_max_length=args.hidden_dim,
+        # embedding_features=bert.config.hidden_size,  # --> To change embedding size: use `args.hidden_dim`
+        embedding_features=args.hidden_dim,  # --> To change embedding size: use `args.hidden_dim`
         embedding_mask_proba=args.diffusion.embedding_mask_proba,  # Conditional dropout of batch elements,
         channels=args.style_dim * 2,
         context_features=args.style_dim * 2,
@@ -934,7 +944,8 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     diffusion.diffusion = KDiffusion(
         net=diffusion.unet,
         sigma_distribution=LogNormalDistribution(
-            mean=args.diffusion.dist.mean, std=args.diffusion.dist.std
+            mean=args.diffusion.dist.mean,
+            std=args.diffusion.dist.std,
         ),
         sigma_data=args.diffusion.dist.sigma_data,  # a placeholder, will be changed dynamically when start training diffusion model
         dynamic_threshold=0.0,
@@ -943,8 +954,8 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     diffusion.unet = transformer
 
     nets = Munch(
-        bert=bert,
-        bert_encoder=nn.Linear(bert.config.hidden_size, args.hidden_dim),
+        # bert=bert,
+        # bert_encoder=nn.Linear(bert.config.hidden_size, args.hidden_dim),
         predictor=predictor,
         decoder=decoder,
         text_encoder=text_encoder,

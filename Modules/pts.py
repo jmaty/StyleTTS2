@@ -404,9 +404,11 @@ class PTS:
             t_en = self.model.text_encoder(ph_ids, input_lengths, text_mask)
             # Contextual phonetic features encoded by PL-BERT catching
             # linguistic context of the whole sentence
-            bert_dur = self.model.bert(ph_ids, attention_mask=(~text_mask).int())
+            # bert_dur = self.model.bert(ph_ids, attention_mask=(~text_mask).int())
+            bert_dur = t_en.transpose(1, 2)
             # Transformed (and compressed) BERT-encoded linguistic features
-            d_en = self.model.bert_encoder(bert_dur).transpose(-1, -2)
+            # d_en = self.model.bert_encoder(bert_dur).transpose(-1, -2)
+            d_en = t_en
 
             # Generate the waveform from phonetic features
             return self.infer_from_ph_features(

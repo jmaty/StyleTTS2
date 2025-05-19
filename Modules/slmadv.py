@@ -96,9 +96,13 @@ class SLMAdversarialLoss(torch.nn.Module):
                   - generator_loss (torch.Tensor): Loss for generator
                   - predicted_audio (numpy.ndarray): Generated audio waveform
         """
+        # text_mask = length_to_mask(ref_lengths).to(ref_text.device)
+        # bert_dur = self.model.bert(ref_text, attention_mask=(~text_mask).int())
+        # d_en = self.model.bert_encoder(bert_dur).transpose(-1, -2)
+
         text_mask = length_to_mask(ref_lengths).to(ref_text.device)
-        bert_dur = self.model.bert(ref_text, attention_mask=(~text_mask).int())
-        d_en = self.model.bert_encoder(bert_dur).transpose(-1, -2)
+        d_en = self.model.text_encoder(ref_text, ref_lengths, text_mask)
+        bert_dur = d_en.transpose(1, 2)
 
         if use_ind and np.random.rand() < 0.5:
             # Teacher forcing for the style component to
