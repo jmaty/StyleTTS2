@@ -53,7 +53,7 @@ if [[ -z $JOBID ]]; then
      # No deps at the beginning
      DEPS=""
 else
-     DEPS="-W depend=afterany:$JOBID"
+     DEPS="-W depend=afterok:$JOBID"
 fi
 
 # Check run specification and set queue and cluster to run on
