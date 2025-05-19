@@ -46,6 +46,7 @@ def main():
 
     settings = load_config(args.settings)  # Load settings
     config = load_config(args.config)  # Load config
+    cfg_name, cfg_ext = osp.splitext(osp.basename(args.config))  # Get config name, extension
     out_dir = osp.dirname(args.settings)  # Output directory
 
     # Stage 1: epochs = 0 - TMA
@@ -55,7 +56,7 @@ def main():
     config_out.grad_accum_steps = settings.start1.grad_accum_steps
     config_out.max_len = settings.start1.max_len
     config_out.data_params.train_data = settings.start1.train_data
-    out_file = osp.join(out_dir, f"config{settings.start1.label}.yaml")
+    out_file = osp.join(out_dir, f"{cfg_name}{settings.start1.label}{cfg_ext}")
     save_config(config_out, out_file)
 
     # Stage 1: epochs = TMA - end
@@ -67,7 +68,7 @@ def main():
     config_out.data_params.train_data = settings.tma.train_data
     pretrained_model = osp.join(out_dir, f"epoch_1st_{config.epochs.tma-1:05}.pth")
     config_out.pretrained_model = pretrained_model
-    out_file = osp.join(out_dir, f"config{settings.tma.label}.yaml")
+    out_file = osp.join(out_dir, f"{cfg_name}{settings.tma.label}{cfg_ext}")
     save_config(config_out, out_file)
 
     # Stage 2: epochs = 0 - diffusion
@@ -76,7 +77,7 @@ def main():
     config_out.batch_size = settings.start2.batch_size
     config_out.max_len = settings.start2.max_len
     config_out.data_params.train_data = settings.start2.train_data
-    out_file = osp.join(out_dir, f"config{settings.start2.label}.yaml")
+    out_file = osp.join(out_dir, f"{cfg_name}{settings.start2.label}{cfg_ext}")
     save_config(config_out, out_file)
 
     # Stage 2: epochs = diffusion - joint training
@@ -87,7 +88,7 @@ def main():
     config_out.data_params.train_data = settings.diff.train_data
     pretrained_model = osp.join(out_dir, f"epoch_2nd_{config.epochs.diff-1:05}.pth")
     config_out.pretrained_model = pretrained_model
-    out_file = osp.join(out_dir, f"config{settings.diff.label}.yaml")
+    out_file = osp.join(out_dir, f"{cfg_name}{settings.diff.label}{cfg_ext}")
     save_config(config_out, out_file)
 
     # Stage 2: epochs =  joint training - end
@@ -98,7 +99,7 @@ def main():
     config_out.data_params.train_data = settings.joint.train_data
     pretrained_model = osp.join(out_dir, f"epoch_2nd_{config.epochs.joint-1:05}.pth")
     config_out.pretrained_model = pretrained_model
-    out_file = osp.join(out_dir, f"config{settings.joint.label}.yaml")
+    out_file = osp.join(out_dir, f"{cfg_name}{settings.joint.label}{cfg_ext}")
     save_config(config_out, out_file)
 
 
