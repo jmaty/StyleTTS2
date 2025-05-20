@@ -96,7 +96,7 @@ def main():
 
     # Set up epochs
     epochs = config["epochs"].get("stage1", 200)
-    tma_epoch = config["epochs"].get("TMA_epoch", 50)
+    tma_epoch = config["epochs"].get("tma", 50)
 
     # Set up data parameters
     data_params = config.get("data_params", None)
