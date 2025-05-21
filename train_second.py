@@ -405,13 +405,6 @@ def main():
 
                 d_gt = s2s_attn_mono.sum(axis=-1).detach()
 
-                # # Compute reference styles
-                # ref = None
-                # if multispeaker and epoch >= diff_epoch:
-                #     ref_ss = model.style_encoder(ref_mels.unsqueeze(1))
-                #     ref_sp = model.predictor_encoder(ref_mels.unsqueeze(1))
-                #     ref = torch.cat([ref_ss, ref_sp], dim=1)
-
                 # Compute reference styles
                 ref = None
                 if multispeaker and epoch >= diff_epoch:
@@ -420,22 +413,6 @@ def main():
                     ref_ss = model.style_encoder(ref_mels_batch)
                     ref_sp = model.predictor_encoder(ref_mels_batch)
                     ref = torch.cat([spk_embs, ref_ss, ref_sp], dim=1)
-
-            # # --- Original code ---
-            # # compute the style of the entire utterance
-            # # this operation cannot be done in batch because of the avgpool layer
-            # # (may need to work on masked avgpool)
-            # ss, gs = [], []
-            # for idx, m in enumerate(mel_input_length):
-            #     mel_length = int(m.item())
-            #     mel = mels[idx, :, :m]
-            #     ss.append(model.predictor_encoder(mel.unsqueeze(0).unsqueeze(1)))
-            #     gs.append(model.style_encoder(mel.unsqueeze(0).unsqueeze(1)))
-
-            # s_dur = torch.stack(ss).squeeze()  # global prosodic styles
-            # gs = torch.stack(gs).squeeze()  # global acoustic styles
-            # s_trg = torch.cat([gs, s_dur], dim=-1).detach()  # ground truth for denoiser
-            # # --- End of Original code ---
 
             # --- Vectorized computation of styles ---
             # The original comment about avgpool preventing batching was incorrect
@@ -519,147 +496,6 @@ def main():
                 loss_sty, loss_diff = 0, 0
 
             d, p = model.predictor(d_en, s_dur, input_lengths, s2s_attn_mono, text_mask)
-
-            # # --- Vectorized Segment Extraction ---
-            # batch_size = mels.size(0)
-            # # device = mels.device
-
-            # # Calculate segment lengths, ensuring they are at least 1
-            # min_mel_input_len_half = int(mel_input_length.min().item() / 2)
-            # mel_len = max(1, min(min_mel_input_len_half - 1, max_len // 2))
-            # mel_len_st = max(1, min_mel_input_len_half - 1)
-
-            # # Calculate maximum possible start indices for each item in the batch
-            # mel_lengths_half = mel_input_length // 2
-            # max_starts1 = torch.clamp(mel_lengths_half - mel_len, min=0)
-            # max_starts2 = torch.clamp(mel_lengths_half - mel_len_st, min=0)
-
-            # # Generate random start indices for the batch (scaled from uniform random numbers)
-            # # Adding a small epsilon to prevent issues with max_starts being 0
-            # rand_starts1_uniform = torch.rand(batch_size, device=device)
-            # random_starts1 = (rand_starts1_uniform * (max_starts1.float() + 1 - 1e-6)).long()
-
-            # rand_starts2_uniform = torch.rand(batch_size, device=device)
-            # random_starts2 = (rand_starts2_uniform * (max_starts2.float() + 1 - 1e-6)).long()
-
-            # # --- Prepare indices for gathering ---
-
-            # # Indices for en (length mel_len) - Keep using asr shape
-            # idx_range_en = torch.arange(mel_len, device=device).unsqueeze(0)  # [1, mel_len]
-            # indices_en_asr = random_starts1.unsqueeze(1) + idx_range_en  # [B, mel_len]
-            # indices_en_expanded_asr = indices_en_asr.unsqueeze(1).expand(
-            #     -1, asr.shape[1], -1
-            # )  # [B, C_asr, mel_len]
-
-            # # Indices for p_en (length mel_len) - Use p shape
-            # # idx_range_en is the same
-            # indices_en_expanded_p = indices_en_asr.unsqueeze(1).expand(  # Reuse indices_en_asr
-            #     -1, p.shape[1], -1
-            # )  # [B, C_p, mel_len]
-
-            # # Indices for gt (length mel_len * 2)
-            # idx_range_gt = torch.arange(mel_len * 2, device=device).unsqueeze(0)  # [1, mel_len * 2]
-            # start_offset_gt = random_starts1 * 2  # [B]
-            # indices_gt = start_offset_gt.unsqueeze(1) + idx_range_gt  # [B, mel_len * 2]
-            # # Expand for mel dimension [B, n_mels, mel_len * 2]
-            # indices_gt_expanded = indices_gt.unsqueeze(1).expand(-1, mels.shape[1], -1)
-
-            # # Indices for st (length mel_len_st * 2) [1, mel_len_st * 2]
-            # idx_range_st = torch.arange(mel_len_st * 2, device=device).unsqueeze(0)
-            # start_offset_st = random_starts2 * 2  # [B]
-            # indices_st = start_offset_st.unsqueeze(1) + idx_range_st  # [B, mel_len_st * 2]
-            # # Expand for mel dimension
-            # indices_st_expanded = indices_st.unsqueeze(1).expand(
-            #     -1, mels.shape[1], -1
-            # )  # [B, n_mels, mel_len_st * 2]
-
-            # # --- Gather segments ---
-            # # Check if dimensions match before gathering
-            # # Ensure indices do not go out of bounds (clamp if necessary, though random generation should handle it)
-            # # Clamping indices just in case of edge issues
-            # indices_en_expanded_asr = torch.clamp(indices_en_expanded_asr, 0, asr.shape[2] - 1)
-            # indices_en_expanded_p = torch.clamp(
-            #     indices_en_expanded_p, 0, p.shape[2] - 1
-            # )  # Clamp based on p length
-            # indices_gt_expanded = torch.clamp(indices_gt_expanded, 0, mels.shape[2] - 1)
-            # indices_st_expanded = torch.clamp(indices_st_expanded, 0, mels.shape[2] - 1)
-
-            # en = torch.gather(asr, 2, indices_en_expanded_asr)  # Use ASR indices
-            # p_en = torch.gather(p, 2, indices_en_expanded_p)  # Use P indices
-            # mel_gt = torch.gather(mels, 2, indices_gt_expanded).detach()
-            # mel_st = torch.gather(mels, 2, indices_st_expanded).detach()
-
-            # # --- Waveform segment extraction (kept as loop due to 'waves' being a list) ---
-            # wav_gt = []
-            # wav_indices_start = random_starts1 * 2 * hop_length
-            # wav_indices_end = (random_starts1 + mel_len) * 2 * hop_length
-            # for idx, w in enumerate(waves):
-            #     start_idx = wav_indices_start[idx].item()
-            #     end_idx = wav_indices_end[idx].item()
-            #     # Ensure indices are within bounds for the specific waveform
-            #     start_idx = max(0, start_idx)
-            #     end_idx = min(len(w), end_idx)
-            #     if start_idx >= end_idx:
-            #         # Handle cases where segment length becomes zero or negative
-            #         # Append a zero tensor of expected type/device or handle differently
-            #         # For simplicity, appending a small zero tensor. Adjust if needed.
-            #         wav_gt.append(torch.zeros(1, dtype=torch.float, device=device))
-            #         logger.warning(
-            #             "Wave segment for index %d has zero or negative length. Appending zero.",
-            #             idx,
-            #         )
-            #     else:
-            #         y = w[start_idx:end_idx].to(device)  # Extract segment
-            #         wav_gt.append(y.to(device).float())
-
-            # # Pad waveform segments to the same length for stacking
-            # # Find max length among extracted segments
-            # max_wav_len = max(w_seg.shape[0] for w_seg in wav_gt)
-            # # Pad and stack
-            # wav_padded = []
-            # for w_seg in wav_gt:
-            #     pad_len = max_wav_len - w_seg.shape[0]
-            #     if pad_len > 0:
-            #         # Pad on the right with zeros
-            #         padded_seg = F.pad(w_seg, (0, pad_len))
-            #         wav_padded.append(padded_seg)
-            #     else:
-            #         wav_padded.append(w_seg)
-
-            # wav_gt = torch.stack(wav_padded).float().detach()  # [B, max_segment_wav_len]
-
-            # # --- End of Vectorized Segment Extraction ---
-
-            # # Original non-vectorized loop (commented out) ---
-            # # Set up maximum lengths based on `max_len` from config
-            # # TODO: Use max and pad shorter segments?
-            # mel_len = min(int(mel_input_length.min().item() / 2 - 1), max_len // 2)
-            # mel_len_st = int(mel_input_length.min().item() / 2 - 1)
-            # en, mel_gt, mel_st, p_en, wav_gt = [], [], [], [], []
-
-            # # Pick random segments from the batch
-            # for idx, (m, w) in enumerate(zip(mel_input_length, waves)):
-            #     mel_length = int(m.item() / 2)
-            #     random_start = np.random.randint(0, mel_length - mel_len)
-            #     en.append(asr[idx, :, random_start : random_start + mel_len])
-            #     p_en.append(p[idx, :, random_start : random_start + mel_len])
-            #     # Random melspetrogram segment up to `max_len`
-            #     mel_gt.append(mels[idx, :, (random_start * 2) : ((random_start + mel_len) * 2)])
-            #     # Random waveform segment up to `max_len` (300 is hop size)
-            #     y = w[(random_start * 2) * hop_length : ((random_start + mel_len) * 2) * hop_length]
-            #     # wav_gt.append(torch.from_numpy(y).to(device))
-            #     wav_gt.append(y.to(device).float())
-            #     # style reference (better to be different from the GT)
-            #     random_start = np.random.randint(0, mel_length - mel_len_st)
-            #     mel_st.append(mels[idx, :, (random_start * 2) : ((random_start + mel_len_st) * 2)])
-
-            # wav_gt = torch.stack(wav_gt).float().detach()
-            # en = torch.stack(en)
-            # p_en = torch.stack(p_en)
-            # mel_gt = torch.stack(mel_gt).detach()
-            # mel_st = torch.stack(mel_st).detach()
-
-            # --- End of Original non-vectorized loop ---
 
             # --- Pre-allocated Segment Extraction ---
 
@@ -1060,14 +896,6 @@ def main():
                     # s_trg = torch.cat([s, gs], dim=-1).detach()
                     # --- End of Vectorized style computation ---
 
-                    # Original non-vectorized style computation (commented out)
-                    # ss, gs = [], []
-                    # for idx, m in enumerate(mel_input_length):
-                    #     mel_length = int(m.item())
-                    #     mel = mels[idx, :, :m]
-                    #     ss.append(model.predictor_encoder(mel.unsqueeze(0).unsqueeze(1)))
-                    #     gs.append(model.style_encoder(mel.unsqueeze(0).unsqueeze(1)))
-
                     # # JMa: Fix: remove explicitly 2nd dimension
                     # # otherwise all dimensions of size 1 are removed
                     # # (resulting in error when current batch size is 1)
@@ -1083,114 +911,6 @@ def main():
 
                     # Predict duration and pitch [B, 256, T]
                     d, p = model.predictor(d_en, s, input_lengths, s2s_attn_mono, text_mask)
-
-                    # # --- Vectorized Segment Extraction for Validation ---
-                    # batch_size = mels.size(0)
-
-                    # # Calculate segment length, ensuring it's at least 1
-                    # # Use min over the batch to ensure validity for all items
-                    # min_mel_input_len_half = int(mel_input_length.min().item() / 2)
-                    # # Ensure mel_len is at least 1 and not larger than the smallest possible sequence halved
-                    # mel_len_gt = max(1, min_mel_input_len_half - 1)
-
-                    # # Calculate maximum possible start indices for each item in the batch
-                    # mel_lengths_half = mel_input_length // 2
-                    # max_starts = torch.clamp(mel_lengths_half - mel_len_gt, min=0)
-
-                    # # Generate random start indices for the batch
-                    # rand_starts_uniform = torch.rand(batch_size, device=device)
-                    # random_starts = (rand_starts_uniform * (max_starts.float() + 1 - 1e-6)).long()
-
-                    # # --- Prepare indices for gathering ---
-
-                    # # Indices for en, p_en (length mel_len)
-                    # idx_range_en = torch.arange(mel_len_gt, device=device).unsqueeze(
-                    #     0
-                    # )  # [1, mel_len]
-                    # indices_en = random_starts.unsqueeze(1) + idx_range_en  # [B, mel_len]
-                    # # Expand for channel dimension of asr/p
-                    # indices_en_expanded = indices_en.unsqueeze(1).expand(
-                    #     -1, asr.shape[1], -1
-                    # )  # [B, C, mel_len]
-
-                    # # Indices for mel_gt (length mel_len * 2)
-                    # idx_range_gt = torch.arange(mel_len_gt * 2, device=device).unsqueeze(
-                    #     0
-                    # )  # [1, mel_len * 2]
-                    # start_offset_gt = random_starts * 2  # [B]
-                    # indices_gt = start_offset_gt.unsqueeze(1) + idx_range_gt  # [B, mel_len * 2]
-                    # # Expand for mel dimension
-                    # indices_gt_expanded = indices_gt.unsqueeze(1).expand(
-                    #     -1, mels.shape[1], -1
-                    # )  # [B, n_mels, mel_len * 2]
-
-                    # # --- Gather segments ---
-                    # # Clamp indices just in case of edge issues
-                    # indices_en_expanded = torch.clamp(indices_en_expanded, 0, asr.shape[2] - 1)
-                    # indices_gt_expanded = torch.clamp(indices_gt_expanded, 0, mels.shape[2] - 1)
-
-                    # en = torch.gather(asr, 2, indices_en_expanded)
-                    # p_en = torch.gather(p, 2, indices_en_expanded)
-                    # mel_gt = torch.gather(mels, 2, indices_gt_expanded).detach()
-
-                    # # --- Waveform segment extraction (kept as loop due to 'waves' being a list) ---
-                    # wav_gt_list = []
-                    # wav_indices_start = random_starts * 2 * hop_length
-                    # wav_indices_end = (random_starts + mel_len_gt) * 2 * hop_length
-                    # for idx, w in enumerate(waves):
-                    #     start_idx = wav_indices_start[idx].item()
-                    #     end_idx = wav_indices_end[idx].item()
-                    #     # Ensure indices are within bounds for the specific waveform
-                    #     start_idx = max(0, start_idx)
-                    #     end_idx = min(len(w), end_idx)
-                    #     if start_idx >= end_idx:
-                    #         wav_gt_list.append(torch.zeros(1, dtype=torch.float, device=device))
-                    #         logger.warning(
-                    #             "Validation wave segment for index %d has zero or negative length. Appending zero.",
-                    #             idx,
-                    #         )
-                    #     else:
-                    #         y = w[start_idx:end_idx].to(device)  # Extract segment
-                    #         wav_gt_list.append(y.float())  # Ensure float
-
-                    # # Pad waveform segments to the same length for stacking
-                    # max_wav_len = max(w_seg.shape[0] for w_seg in wav_gt_list)
-                    # wav_padded = []
-                    # for w_seg in wav_gt_list:
-                    #     pad_len = max_wav_len - w_seg.shape[0]
-                    #     if pad_len > 0:
-                    #         padded_seg = F.pad(w_seg, (0, pad_len))
-                    #         wav_padded.append(padded_seg)
-                    #     else:
-                    #         wav_padded.append(w_seg)
-
-                    # wav_gt = torch.stack(wav_padded).float().detach()  # [B, max_segment_wav_len]
-
-                    # # --- End of Vectorized Segment Extraction ---
-
-                    # # Original non-vectorized loop (commented out)
-                    # # Get clips
-                    # mel_len = int(mel_input_length.min().item() / 2 - 1)
-
-                    # en, mel_gt, p_en, wav_gt = [], [], [], []
-                    # for idx, (m, w) in enumerate(zip(mel_input_length, waves)):
-                    #     mel_length = int(m.item() / 2)
-
-                    #     random_start = np.random.randint(0, mel_length - mel_len)
-                    #     en.append(asr[idx, :, random_start : random_start + mel_len])
-                    #     p_en.append(p[idx, :, random_start : random_start + mel_len])
-
-                    #     mel_gt.append(
-                    #         mels[idx, :, (random_start * 2) : ((random_start + mel_len) * 2)]
-                    #     )
-                    #     y = w[(random_start * 2) * 300 : ((random_start + mel_len) * 2) * 300]
-                    #     wav_gt.append(torch.from_numpy(y).to(device))
-
-                    # wav_gt = torch.stack(wav_gt).float().detach()  # [B, T]
-
-                    # en = torch.stack(en)  # [B, 256, T]
-                    # p_en = torch.stack(p_en)  # [B, 256, T]
-                    # mel_gt = torch.stack(mel_gt).detach()
 
                     # --- Pre-allocated Segment Extraction ---
                     # Get clips
@@ -1300,16 +1020,6 @@ def main():
                 for idx in range(n_val_samples):
                     mel_length = int(mel_input_length[idx].item())
 
-                    # # Reconstruct audio from ground-truth mel spectrogram and
-                    # # phoneme-audio alignment
-                    # wav = pts.reconstruct(mel_gt, en_gt, spk_emb=spk_embs[idx].unsqueeze(0))
-
-                    # # Write and save val audio
-                    # writer.add_audio(f"eval/y{idx}", wav, epoch, sample_rate=sr)
-                    # if save_val_audio and epoch % saving_epoch == 0:
-                    #     outfile = f"epoch_2nd_{epoch:0>5}_val-rec-{idx}.wav"
-                    #     pts.save_wav(wav, os.path.join(test_audio_dir, outfile))
-
                     # Reconstruct audio from ground-truth mel spectrogram,
                     # and extracted and predicted phoneme-audio alignment encoding
                     # TODO: Enable reconstruction from multiple tensors
@@ -1341,13 +1051,8 @@ def main():
             # Generating sampled speech from text directly
             with torch.no_grad():
                 ref_s = None
-                # # Compute reference styles from ground truth mel spectrogram
-                # if multispeaker and epoch >= diff_epoch:
-                #     ref_ss = model.style_encoder(ref_mels.unsqueeze(1))  # Timbre style
-                #     ref_sp = model.predictor_encoder(ref_mels.unsqueeze(1))  # Prosody style
-                #     ref_s = torch.cat([ref_ss, ref_sp], dim=1)  # Combined style [B, 256, T]
 
-                # --- Vectorized style computation ---
+                # --- Vectorized reference style computation ---
                 if multispeaker and epoch >= diff_epoch:
                     # Take only the first `n_val_samples` samples
                     # Add channel dimension
@@ -1429,7 +1134,8 @@ def main():
                 with open(cfg_path, "w", encoding="utf-8") as outfile:
                     yaml.dump(config, outfile, default_flow_style=False)
 
-            # Synthesize test audios to evaluate the model's performance after diffusion training has started.
+            # Synthesize test audios to evaluate the model's performance
+            # after diffusion training has started.
             if save_test_audio and epoch >= diff_epoch:
                 # Set up number of speakers to test if multispeaker is enabled
                 n_speakers = min(3, len(ref_s)) if multispeaker else 1
