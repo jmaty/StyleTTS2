@@ -184,6 +184,19 @@ class ResBlk(nn.Module):
 
 
 class StyleEncoder(nn.Module):
+    def __init__(self, dim_in=512, style_dim=256, activation=None):
+        super().__init__()
+        self.project = nn.Linear(dim_in, style_dim)
+        self.activation = activation
+
+    def forward(self, x):
+        x = self.project(x)
+        if self.activation:
+            x = self.activation(x)
+        return x
+
+
+class ProsodyEncoder(nn.Module):
     def __init__(self, dim_in=48, style_dim=48, max_conv_dim=384):
         super().__init__()
         blocks = [spectral_norm(nn.Conv2d(1, dim_in, 3, 1, 1))]
@@ -206,7 +219,6 @@ class StyleEncoder(nn.Module):
         h = self.shared(x)
         h = h.view(h.size(0), -1)
         s = self.unshared(h)
-
         return s
 
 
@@ -865,8 +877,9 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     if args.decoder.type == "istftnet":
         decoder = ISTFTDecoder(
             dim_in=args.hidden_dim,
-            style_dim=args.style_dim + 512,  # TODO: 512 is the size of speaker embedding
-            # dim_out=args.n_mels,
+            # TODO: 2x means both acoustic and prosodic styles are computed
+            # (originally only acoustic)
+            style_dim=args.style_dim * 2,
             resblock_kernel_sizes=args.decoder.resblock_kernel_sizes,
             upsample_rates=args.decoder.upsample_rates,
             upsample_initial_channel=args.decoder.upsample_initial_channel,
@@ -878,8 +891,9 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     else:
         decoder = HifiDecoder(
             dim_in=args.hidden_dim,
-            style_dim=args.style_dim + 512,  # TODO: 512 is the size of speaker embedding
-            # dim_out=args.n_mels,
+            # TODO: 2x means both acoustic and prosodic styles are computed
+            # (originally only acoustic)
+            style_dim=args.style_dim * 2,
             resblock_kernel_sizes=args.decoder.resblock_kernel_sizes,
             upsample_rates=args.decoder.upsample_rates,
             upsample_initial_channel=args.decoder.upsample_initial_channel,
@@ -888,7 +902,10 @@ def build_model(args, text_aligner, pitch_extractor, bert):
         )
 
     text_encoder = TextEncoder(
-        channels=args.hidden_dim, kernel_size=5, depth=args.n_layer, n_symbols=args.n_token
+        channels=args.hidden_dim,
+        kernel_size=5,
+        depth=args.n_layer,
+        n_symbols=args.n_token,
     )
 
     predictor = ProsodyPredictor(
@@ -900,16 +917,15 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     )
 
     # Acoustic style encoder
-    style_encoder = StyleEncoder(
-        dim_in=args.dim_in,
+    acoustic_style_encoder = StyleEncoder(
+        dim_in=512,
         style_dim=args.style_dim,
-        max_conv_dim=args.hidden_dim,
     )
     # Prosodic style encoder
-    predictor_encoder = StyleEncoder(
+    prosodic_style_encoder = ProsodyEncoder(
         dim_in=args.dim_in,
         style_dim=args.style_dim,
-        max_conv_dim=args.hidden_dim,
+        max_conv_dim=args.max_conv_dim,
     )
 
     # define diffusion model
@@ -953,8 +969,8 @@ def build_model(args, text_aligner, pitch_extractor, bert):
         predictor=predictor,
         decoder=decoder,
         text_encoder=text_encoder,
-        predictor_encoder=predictor_encoder,
-        style_encoder=style_encoder,
+        prosodic_style_encoder=prosodic_style_encoder,
+        acoustic_style_encoder=acoustic_style_encoder,
         diffusion=diffusion,
         text_aligner=text_aligner,
         pitch_extractor=pitch_extractor,

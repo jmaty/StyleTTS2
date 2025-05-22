@@ -155,7 +155,8 @@ def main():
     dataset_config = {
         "sr": sr,
         "min_length": data_params["min_length"],
-        "max_length": bert_size,  # limit max length of the input sequence to the max length of the BERT model
+        # limit max length of the input sequence to the max length of the BERT model
+        "max_length": bert_size,
         "silence_beg": config["preprocess_params"].get("silence_beg", 4800),
         "silence_end": config["preprocess_params"].get("silence_end", 4800),
         "n_mels": config["model_params"].get("n_mels", 80),
@@ -420,12 +421,15 @@ def main():
             # Style encoding:
             # - if not multispeaker, use the ground truth mel spectrogram
             # - if multispeaker, use other (style reference) mel spectrogram
-            s = model.style_encoder(mel_st.unsqueeze(1) if multispeaker else mel_gt.unsqueeze(1))
-            s = torch.cat([spk_embs, s], dim=1)
+            acoust_style = model.acoustic_style_encoder(spk_embs)
+            pros_style = model.prosodic_style_encoder(
+                mel_st.unsqueeze(1) if multispeaker else mel_gt.unsqueeze(1)
+            )
+            style = torch.cat([acoust_style, pros_style], dim=1)
 
-            # Recontruct the audio from the text-audio aligned encoded features, predicted style,
+            # Reconstruct the audio from the text-audio aligned encoded features, predicted style,
             # and ground truth pitch and norm
-            y_rec = model.decoder(en, f0_real, real_norm, s)
+            y_rec = model.decoder(en, f0_real, real_norm, style)
 
             # --- Discriminator loss ---
             if epoch >= tma_epoch:
@@ -494,7 +498,8 @@ def main():
             # JMa: Compute gradients only for generator
             inputs = (
                 list(model.decoder.parameters())
-                + list(model.style_encoder.parameters())
+                + list(model.acoustic_style_encoder.parameters())
+                + list(model.prosodic_style_encoder.parameters())
                 + list(model.text_encoder.parameters())
             )
             if epoch >= tma_epoch:
@@ -513,11 +518,9 @@ def main():
                     ]
 
                 optimizer.step("text_encoder")
-                optimizer.step("style_encoder")
+                optimizer.step("acoustic_style_encoder")
+                optimizer.step("prosodic_style_encoder")
                 optimizer.step("decoder")
-                # optimizer.zero_grad('text_encoder')
-                # optimizer.zero_grad('style_encoder')
-                # optimizer.zero_grad('decoder')
 
                 if epoch >= tma_epoch:
                     optimizer.step("text_aligner")
@@ -667,11 +670,12 @@ def main():
 
                 f0_real, _, _ = model.pitch_extractor(mel_gt.unsqueeze(1))
 
-                s = model.style_encoder(mel_gt.unsqueeze(1))
-                s = torch.cat([spk_embs, s], dim=1)
+                acoust_style = model.acoustic_style_encoder(spk_embs)
+                pros_style = model.prosodic_style_encoder(mel_gt.unsqueeze(1))
+                style = torch.cat([acoust_style, pros_style], dim=1)
 
                 real_norm = log_norm(mel_gt.unsqueeze(1)).squeeze(1)
-                y_rec = model.decoder(en, f0_real, real_norm, s)
+                y_rec = model.decoder(en, f0_real, real_norm, style)
 
                 loss_mel = stft_loss(y_rec.squeeze(), wav_gt.detach())
 

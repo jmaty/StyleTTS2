@@ -561,27 +561,28 @@ class Decoder(nn.Module):
 
         logger.info("Initializing HiFiGAN Decoder: style_dim=%d", style_dim)
 
-        # self.encode = AdainResBlk1d(dim_in + 2, 1024, style_dim)
-        self.encode = AdainResBlk1d(dim_in + 2, 2048, style_dim)
+        self.encode = AdainResBlk1d(dim_in + 2, 1024, style_dim)
+        # self.encode = AdainResBlk1d(dim_in + 2, 2048, style_dim)
 
         self.decode = nn.ModuleList()
-        # self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim))
-        # self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim))
-        # self.decode.append(AdainResBlk1d(1024 + 2 + 64, 1024, style_dim))
-        # self.decode.append(AdainResBlk1d(1024 + 2 + 64, 512, style_dim, upsample=True))
-        decode_input_dim = 2048 + 2 + 128
-        self.decode.append(AdainResBlk1d(decode_input_dim, 2048, style_dim))
-        self.decode.append(AdainResBlk1d(decode_input_dim, 2048, style_dim))
-        self.decode.append(AdainResBlk1d(decode_input_dim, 2048, style_dim))
-        self.decode.append(AdainResBlk1d(decode_input_dim, 1024, style_dim, upsample=True))
+        decode_input_dim = 1024 + 2 + 64
+        self.decode.append(AdainResBlk1d(decode_input_dim, 1024, style_dim))
+        self.decode.append(AdainResBlk1d(decode_input_dim, 1024, style_dim))
+        self.decode.append(AdainResBlk1d(decode_input_dim, 1024, style_dim))
+        self.decode.append(AdainResBlk1d(decode_input_dim, 512, style_dim, upsample=True))
+        # decode_input_dim = 2048 + 2 + 128
+        # self.decode.append(AdainResBlk1d(decode_input_dim, 2048, style_dim))
+        # self.decode.append(AdainResBlk1d(decode_input_dim, 2048, style_dim))
+        # self.decode.append(AdainResBlk1d(decode_input_dim, 2048, style_dim))
+        # self.decode.append(AdainResBlk1d(decode_input_dim, 1024, style_dim, upsample=True))
 
         self.f0_conv = weight_norm(nn.Conv1d(1, 1, kernel_size=3, stride=2, groups=1, padding=1))
 
         self.n_conv = weight_norm(nn.Conv1d(1, 1, kernel_size=3, stride=2, groups=1, padding=1))
 
         self.asr_res = nn.Sequential(
-            # weight_norm(nn.Conv1d(512, 64, kernel_size=1)),
-            weight_norm(nn.Conv1d(512, 128, kernel_size=1)),
+            weight_norm(nn.Conv1d(512, 64, kernel_size=1)),
+            # weight_norm(nn.Conv1d(512, 128, kernel_size=1)),
         )
 
         self.generator = Generator(
