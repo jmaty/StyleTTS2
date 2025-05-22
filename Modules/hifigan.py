@@ -556,6 +556,8 @@ class Decoder(nn.Module):
     ):
         super().__init__()
 
+        logger.info("Initializing HiFiGAN Decoder: style_dim=%d", style_dim)
+
         self.decode = nn.ModuleList()
 
         self.encode = AdainResBlk1d(dim_in + 2, 1024, style_dim)
