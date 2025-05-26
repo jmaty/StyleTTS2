@@ -357,6 +357,18 @@ def main():
 
             mel_input_length_all = accelerator.gather(mel_input_length)  # for balanced load
             mel_len_gt = min([int(mel_input_length_all.min().item() / 2 - 1), max_len // 2])
+            # Early check for segment length:
+            # - mel_len_gt * 2 is the length of the original mel spectrogram
+            # - multiplication by 2 is due to the downsampling factor between mel and text aligner
+            if mel_len_gt * 2 < 80:
+                logger.warning(
+                    "Segment is too short (%d frames, %d samples)=> skipping batch %d.",
+                    mel_len_gt * 2,
+                    (mel_len_gt * 2) * hop_length,
+                    i,
+                )
+                continue
+
             mel_len_st = int(mel_input_length.min().item() / 2 - 1)
 
             bsize = mel_input_length.shape[0]  # Use current batch size
@@ -403,15 +415,6 @@ def main():
             wav_gt = wav_gt.detach()
 
             # --- End of Pre-allocated tensors ---
-
-            # Segment too short to be used by the style encoder => skipping
-            if mel_gt.shape[-1] < 80:
-                logger.warning(
-                    "GT mel spectrogram is too short => skipping batch %d in epoch %d",
-                    i,
-                    epoch,
-                )
-                continue
 
             with torch.no_grad():
                 # Get the pitch and norm of the ground truth samples
