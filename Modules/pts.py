@@ -452,7 +452,7 @@ class PTS:
             if ref_s is None:
                 # No reference speaker style embedding, typically for a single speaker model
                 logger.debug("No reference speaker style embedding provided")
-                s_pred = self._sampler(
+                pred_style = self._sampler(
                     self.generate_noise() if noise is None else noise,  # noise for diffusion
                     embedding=bert_en[0].unsqueeze(0),
                     embedding_scale=self.embedding_scale,
@@ -460,7 +460,7 @@ class PTS:
                 ).squeeze(0)
             else:
                 logger.debug("Reference speaker style embedding provided: %s", ref_s.shape)
-                s_pred = self._sampler(
+                pred_style = self._sampler(
                     self.generate_noise() if noise is None else noise,  # noise for diffusion
                     embedding=bert_en[0].unsqueeze(0),
                     embedding_scale=self.embedding_scale,
@@ -472,10 +472,10 @@ class PTS:
             if s_prev is not None:
                 logger.debug("Combining styles with previous style embedding")
                 # convex combination of previous and current styles
-                s_pred = self.t * s_pred + (1 - self.t) * s_prev
+                pred_style = self.t * pred_style + (1 - self.t) * s_prev
 
-            s = s_pred[:, 128:]  # prosodic features: 128 (style) + 512 (speaker embedding)
-            ref = s_pred[:, :128]  # timbre features
+            pros_style = pred_style[:, 128:]  # prosodic features
+            acoust_style = pred_style[:, :128]  # acoustics/timbre features
 
             # If reference speaker style embedding  `ref_s` is provided,
             # combine it with the generated style
@@ -487,13 +487,13 @@ class PTS:
             #   lower = more similar to the reference style)
             if ref_s is not None:
                 logger.debug("Combining styles with reference speaker style embedding")
-                ref = self.alpha * ref + (1 - self.alpha) * ref_s[:, :128]
-                s = self.beta * s + (1 - self.beta) * ref_s[:, 128:]
-                s_pred = torch.cat([ref, s], dim=-1)
+                acoust_style = self.alpha * acoust_style + (1 - self.alpha) * ref_s[:, :128]
+                pros_style = self.beta * pros_style + (1 - self.beta) * ref_s[:, 128:]
+                pred_style = torch.cat([acoust_style, pros_style], dim=-1)
 
             # Style-conditioned phonetic features
             # - enriches linguistic features with style information
-            d = self.model.predictor.text_encoder(d_en, s, input_lengths, text_mask)
+            d = self.model.predictor.text_encoder(d_en, pros_style, input_lengths, text_mask)
 
             # xLSTM processed phonetic features
             x = self.model.predictor.lstm(d)
@@ -527,7 +527,7 @@ class PTS:
                 en = en_new
 
             # Predict F0 and normalization (loudness)
-            f0_pred, n_pred = self.model.predictor.F0Ntrain(en, s)
+            f0_pred, n_pred = self.model.predictor.F0Ntrain(en, pros_style)
             asr = t_en @ pred_aln_trg.unsqueeze(0).to(self.device)
             if self.model.decoder.type == "hifigan":
                 asr_new = torch.zeros_like(asr)
@@ -540,11 +540,11 @@ class PTS:
             # - `f0_pred` is the predicted F0 (pitch) features aligned with the audio frames
             # - `n_pred` is the predicted normalization (loudness) features aligned with the audio frames
             # - `ref` is the style embedding (timbre) aligned with the audio frames
-            out = self.model.decoder(asr, f0_pred, n_pred, ref.squeeze().unsqueeze(0))
+            out = self.model.decoder(asr, f0_pred, n_pred, acoust_style.squeeze().unsqueeze(0))
 
             # Weird pulse at the end of the model, need to be fixed later
             # (without silence forced in training)
-            return out.squeeze().cpu().numpy()[self.offset_beg : -self.offset_end], s_pred
+            return out.squeeze().cpu().numpy()[self.offset_beg : -self.offset_end], pred_style
             # return out.squeeze().cpu().numpy()[..., :-50], s_pred
 
     def reconstruct(self, mel_gt, en, spk_emb, p_en=None):
