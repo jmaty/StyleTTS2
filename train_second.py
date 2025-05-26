@@ -218,7 +218,6 @@ def main():
                     "bert",
                     "bert_encoder",
                     "predictor",
-                    "predictor_encoder",
                     "msd",
                     "mpd",
                     "wd",
@@ -230,7 +229,8 @@ def main():
             diff_epoch += start_epoch
             joint_epoch += start_epoch
             epochs += start_epoch
-            model.predictor_encoder = copy.deepcopy(model.style_encoder)
+            # Prosodic encoder is now trained during the first stage
+            # model.prosodic_style_encoder = copy.deepcopy(model.style_encoder)
         else:
             raise ValueError("You need to specify the path to the first stage model.")
 
@@ -259,7 +259,8 @@ def main():
     scheduler_params_dict = {key: scheduler_params.copy() for key in model}
     scheduler_params_dict["bert"]["max_lr"] = optimizer_params.bert_lr * 2
     scheduler_params_dict["decoder"]["max_lr"] = optimizer_params.ft_lr * 2
-    scheduler_params_dict["style_encoder"]["max_lr"] = optimizer_params.ft_lr * 2
+    scheduler_params_dict["acoustic_style_encoder"]["max_lr"] = optimizer_params.ft_lr * 2
+    scheduler_params_dict["prosodic_style_encoder"]["max_lr"] = optimizer_params.ft_lr * 2
 
     optimizer = build_optimizer(
         {key: model[key].parameters() for key in model},
@@ -276,7 +277,7 @@ def main():
         g["weight_decay"] = 0.01
 
     # adjust acoustic module learning rate
-    for module in ["decoder", "style_encoder"]:
+    for module in ["decoder", "acoustic_style_encoder", "prosodic_style_encoder"]:
         for g in optimizer.optimizers[module].param_groups:
             g["betas"] = (0.0, 0.99)
             g["lr"] = optimizer_params.ft_lr
@@ -406,13 +407,13 @@ def main():
                 d_gt = s2s_attn_mono.sum(axis=-1).detach()
 
                 # Compute reference styles
-                ref = None
+                ref_style = None
                 if multispeaker and epoch >= diff_epoch:
                     # Vectorized computation for reference styles
                     ref_mels_batch = ref_mels.unsqueeze(1)  # Shape: [B, 1, n_mels, max_ref_len]
-                    ref_ss = model.style_encoder(ref_mels_batch)
-                    ref_sp = model.predictor_encoder(ref_mels_batch)
-                    ref = torch.cat([spk_embs, ref_ss, ref_sp], dim=1)
+                    ref_acoust_style = model.acoustic_style_encoder(spk_embs)
+                    ref_pros_style = model.prosodic_style_encoder(ref_mels_batch)
+                    ref_style = torch.cat([ref_acoust_style, ref_pros_style], dim=1)
 
             # --- Vectorized computation of styles ---
             # The original comment about avgpool preventing batching was incorrect
@@ -424,11 +425,11 @@ def main():
             # Call encoders with the entire batch
             # No mask needed due to AdaptiveAvgPool2d in the encoders
             # Global prosodic style [B, style_dim]
-            s_dur = model.predictor_encoder(ref_mels_batch)
+            pros_style = model.prosodic_style_encoder(ref_mels_batch)
             # Global acoustic style [B, style_dim]
-            gs = model.style_encoder(ref_mels_batch)
+            acoust_style = model.acoustic_style_encoder(spk_embs)
             # Set ground truth style for denoiser
-            s_trg = torch.cat([spk_embs, gs, s_dur], dim=-1).detach()
+            target_style = torch.cat([spk_embs, acoust_style, pros_style], dim=-1).detach()
             # --- End of Vectorized computation of styles ---
 
             try:
@@ -448,7 +449,9 @@ def main():
 
                 if model_params.diffusion.dist.estimate_sigma_data:
                     # Batch-wise std estimation
-                    model.diffusion.module.diffusion.sigma_data = s_trg.std(axis=-1).mean().item()
+                    model.diffusion.module.diffusion.sigma_data = (
+                        target_style.std(axis=-1).mean().item()
+                    )
                     running_std.append(model.diffusion.module.diffusion.sigma_data)
 
                     # # Sigma data estimation from running values
@@ -462,23 +465,25 @@ def main():
                     # sigma_count += 1  # increment count
 
                 if multispeaker:
-                    s_preds = sampler(
-                        noise=torch.randn_like(s_trg).unsqueeze(1).to(device),
+                    pred_style = sampler(
+                        noise=torch.randn_like(target_style).unsqueeze(1).to(device),
                         embedding=bert_dur,
                         embedding_scale=1,
-                        features=ref,  # reference from the same speaker as the embedding
+                        features=ref_style,  # reference from the same speaker as the embedding
                         embedding_mask_proba=0.1,
                         num_steps=num_steps,
                     ).squeeze(1)
                     # EDM loss
                     loss_diff = model.diffusion(
-                        s_trg.unsqueeze(1), embedding=bert_dur, features=ref
+                        target_style.unsqueeze(1),
+                        embedding=bert_dur,
+                        features=ref_style,
                     ).mean()
                     # style reconstruction loss
-                    loss_sty = F.l1_loss(s_preds, s_trg.detach())
+                    loss_sty = F.l1_loss(pred_style, target_style.detach())
                 else:  # single speaker
-                    s_preds = sampler(
-                        noise=torch.randn_like(s_trg).unsqueeze(1).to(device),
+                    pred_style = sampler(
+                        noise=torch.randn_like(target_style).unsqueeze(1).to(device),
                         embedding=bert_dur,
                         embedding_scale=1,
                         embedding_mask_proba=0.1,
@@ -487,21 +492,32 @@ def main():
                     # EDM loss
                     loss_diff = model.diffusion.module.diffusion(
                         # loss_diff = model.diffusion.diffusion(
-                        s_trg.unsqueeze(1),
+                        target_style.unsqueeze(1),
                         embedding=bert_dur,
                     ).mean()
                     # style reconstruction loss
-                    loss_sty = F.l1_loss(s_preds, s_trg.detach())
+                    loss_sty = F.l1_loss(pred_style, target_style.detach())
             else:
                 loss_sty, loss_diff = 0, 0
 
-            d, p = model.predictor(d_en, s_dur, input_lengths, s2s_attn_mono, text_mask)
+            d, p = model.predictor(d_en, pros_style, input_lengths, s2s_attn_mono, text_mask)
 
             # --- Pre-allocated Segment Extraction ---
 
             # Set up maximum lengths based on `max_len` from config
             # TODO: Use max and pad shorter segments?
             mel_len_gt = min(int(mel_input_length.min().item() / 2 - 1), max_len // 2)
+            # Early check for segment length:
+            # - mel_len_gt * 2 is the length of the original mel spectrogram
+            # - multiplication by 2 is due to the downsampling factor between mel and text aligner
+            if mel_len_gt * 2 < 80:
+                logger.warning(
+                    "Segment is too short (%d frames, %d samples)=> skipping batch %d.",
+                    mel_len_gt * 2,
+                    (mel_len_gt * 2) * hop_length,
+                    batch_idx,
+                )
+                continue
             mel_len_st = int(mel_input_length.min().item() / 2 - 1)
 
             bsize = mel_input_length.shape[0]  # Use current batch size
@@ -551,25 +567,14 @@ def main():
 
             # --- End of Pre-allocated Segment Extraction ---
 
-            # Check if extracted tensors are too short or empty
-            if mel_gt.size(-1) < 80:
-                logger.warning(
-                    "Segment is too short => skipping batch %d (gt: %d, wav: %d).",
-                    batch_idx,
-                    mel_gt.size(-1),
-                    wav_gt.size(-1),
-                )
-                continue
-
             # Recompute styles based on the extracted segments
             # Use mel_gt for single speaker, mel_st for multispeaker reference
             style_input_mel = mel_st if multispeaker else mel_gt
             # Add channel dim for encoders
             style_input_mel_batch = style_input_mel.unsqueeze(1)
             # Compute styles for the extracted segments
-            s_dur = model.predictor_encoder(style_input_mel_batch)
-            s = model.style_encoder(style_input_mel_batch)
-            s = torch.cat([spk_embs, s], dim=1)
+            pros_style = model.prosodic_style_encoder(style_input_mel_batch)
+            acoust_style = model.acoustic_style_encoder(spk_embs)
 
             with torch.no_grad():
                 # Extract F0 and normalization from the ground truth segment [B, 1, n_mels, mel_len * 2]
@@ -580,15 +585,15 @@ def main():
 
                 # Ground truth waveform segment is already in 'wav_gt'
                 y_rec_gt = wav_gt.unsqueeze(1)
-                y_rec_gt_pred = model.decoder(en, f0_real, n_real, s)
+                y_rec_gt_pred = model.decoder(en, f0_real, n_real, acoust_style)
 
                 # Use recording if decoder is tuned (joint training), otherwise use reconstruction
                 wav_gt = y_rec_gt if epoch >= joint_epoch else y_rec_gt_pred
 
             # Predict F0 and Norm using predicted components
-            f0_fake, n_fake = model.predictor.F0Ntrain(p_en, s_dur)
+            f0_fake, n_fake = model.predictor.F0Ntrain(p_en, pros_style)
             # Reconstruct waveform using predicted F0/Norm
-            y_rec = model.decoder(en, f0_fake, n_fake, s)
+            y_rec = model.decoder(en, f0_fake, n_fake, acoust_style)
 
             # Calculate losses using the extracted/generated segments
             loss_f0_rec = (F.smooth_l1_loss(f0_real, f0_fake)) / 10
@@ -655,14 +660,14 @@ def main():
                 nn.utils.clip_grad_norm_(model.bert_encoder.parameters(), grad_clip)
                 nn.utils.clip_grad_norm_(model.bert.parameters(), grad_clip)
                 nn.utils.clip_grad_norm_(model.predictor.parameters(), grad_clip)
-                nn.utils.clip_grad_norm_(model.predictor_encoder.parameters(), grad_clip)
+                nn.utils.clip_grad_norm_(model.prosodic_style_encoder.parameters(), grad_clip)
             if torch.isnan(g_loss):
                 set_trace()
 
             optimizer.step("bert_encoder")
             optimizer.step("bert")
             optimizer.step("predictor")
-            optimizer.step("predictor_encoder")
+            optimizer.step("prosodic_style_encoder")
 
             if epoch >= diff_epoch:
                 if grad_clip:
@@ -671,9 +676,11 @@ def main():
 
             if epoch >= joint_epoch:
                 if grad_clip:
-                    nn.utils.clip_grad_norm_(model.style_encoder.parameters(), grad_clip)
+                    nn.utils.clip_grad_norm_(model.acoustic_style_encoder.parameters(), grad_clip)
+                    nn.utils.clip_grad_norm_(model.prosodic_style_encoder.parameters(), grad_clip)
                     nn.utils.clip_grad_norm_(model.decoder.parameters(), grad_clip)
-                optimizer.step("style_encoder")
+                optimizer.step("acoustic_style_encoder")
+                optimizer.step("prosodic_style_encoder")
                 optimizer.step("decoder")
 
                 if slmadv is not None:  # None means no SLM discriminator training
@@ -695,8 +702,8 @@ def main():
                         ref_texts,
                         ref_lengths,
                         use_ind,
-                        s_trg.detach(),
-                        ref if multispeaker else None,
+                        target_style.detach(),
+                        ref_style if multispeaker else None,
                     )
 
                     if slm_out is None:
@@ -705,7 +712,7 @@ def main():
                             batch_idx,
                         )
                         # Clean up memory
-                        del slm_out, y_rec_gt, y_rec_gt_pred, s_trg
+                        del slm_out, y_rec_gt, y_rec_gt_pred, target_style
                         torch.cuda.empty_cache()
                         continue
 
@@ -888,29 +895,32 @@ def main():
                     ref_mels_batch = mels.unsqueeze(1)  # Shape: [B, 1, n_mels, max_len]
                     # Call encoders with the entire batch
                     # No mask needed due to AdaptiveAvgPool2d in the encoders
-                    s = model.predictor_encoder(ref_mels_batch)  # Shape: [B, style_dim]
-                    # gs = model.style_encoder(mels_batch)      # Shape: [B, style_dim]
+                    # Shape: [B, style_dim]
+                    pros_style = model.prosodic_style_encoder(ref_mels_batch)
+                    # acoust_style = model.style_encoder(spk_embs)      # Shape: [B, style_dim]
                     # --- End of vectorized style computation ---
 
                     # TODO: not used anymore!?
-                    # s_trg = torch.cat([s, gs], dim=-1).detach()
+                    # target_style = torch.cat([acoust_style, pros_style, gs], dim=-1).detach()
                     # --- End of Vectorized style computation ---
 
                     # # JMa: Fix: remove explicitly 2nd dimension
                     # # otherwise all dimensions of size 1 are removed
                     # # (resulting in error when current batch size is 1)
-                    # # s = torch.stack(ss).squeeze()
-                    # # s = torch.stack(ss).squeeze(dim=-1) # - not working
-                    # s = torch.stack(ss).squeeze(dim=1)
-                    # # # gs = torch.stack(gs).squeeze()              # !!! JMa: not used anymore?
-                    # # gs = torch.stack(gs).squeeze(dim=1)        # !!! JMa: not used anymore?
-                    # # s_trg = torch.cat([s, gs], dim=-1).detach() # !!! JMa: not used anymore?
+                    # # pros_style = torch.stack(ss).squeeze()
+                    # # pros_style = torch.stack(ss).squeeze(dim=-1) # - not working
+                    # pros_style = torch.stack(ss).squeeze(dim=1)
+                    # # # acoust_style = torch.stack(gs).squeeze()              # !!! JMa: not used anymore?
+                    # # acoust_style = torch.stack(gs).squeeze(dim=1)        # !!! JMa: not used anymore?
+                    # # target_style = torch.cat([acoust_style, pros_style], dim=-1).detach() # !!! JMa: not used anymore?
 
                     bert_dur = model.bert(texts, attention_mask=(~text_mask).int())  # [B, T, 768]
                     d_en = model.bert_encoder(bert_dur).transpose(-1, -2)  # [B, 256, T]
 
                     # Predict duration and pitch [B, 256, T]
-                    d, p = model.predictor(d_en, s, input_lengths, s2s_attn_mono, text_mask)
+                    d, p = model.predictor(
+                        d_en, pros_style, input_lengths, s2s_attn_mono, text_mask
+                    )
 
                     # --- Pre-allocated Segment Extraction ---
                     # Get clips
@@ -958,10 +968,10 @@ def main():
                     # --- End of Pre-allocated Segment Extraction ---
 
                     # Recompute style using style_encoder for decoder input
-                    s = model.predictor_encoder(mel_gt.unsqueeze(1))
+                    pros_style = model.prosodic_style_encoder(mel_gt.unsqueeze(1))
 
                     # Predict F0 and Norm using predicted components
-                    f0_fake, n_fake = model.predictor.F0Ntrain(p_en, s)
+                    f0_fake, n_fake = model.predictor.F0Ntrain(p_en, pros_style)
 
                     loss_dur = 0
                     for _s2s_pred, _text_input, _text_length in zip(d, (d_gt), input_lengths):
@@ -977,10 +987,9 @@ def main():
                     loss_dur /= texts.size(0)
 
                     # Recompute style using style_encoder for decoder input
-                    s = model.style_encoder(mel_gt.unsqueeze(1))
-                    s = torch.cat([spk_embs, s], dim=1)
+                    acoust_style = model.acoustic_style_encoder(spk_embs)
 
-                    y_rec = model.decoder(en, f0_fake, n_fake, s)
+                    y_rec = model.decoder(en, f0_fake, n_fake, acoust_style)
                     loss_mel = stft_loss(y_rec.squeeze(), wav_gt.detach())
                     f0_real, _, _ = model.pitch_extractor(mel_gt.unsqueeze(1))
                     loss_f0 = F.l1_loss(f0_real, f0_fake) / 10
@@ -1061,11 +1070,13 @@ def main():
                     spk_embs_val = spk_embs[:n_val_samples]
 
                     # Call encoders with the entire batch
-                    ref_ss = model.style_encoder(ref_mels_val)  # Shape: [ref_mels_val, style_dim]
+                    ref_ss = model.acoustic_style_encoder(
+                        spk_embs_val
+                    )  # Shape: [ref_mels_val, style_dim]
                     # Shape: [ref_mels_val, style_dim]
-                    ref_sp = model.predictor_encoder(ref_mels_val)
+                    ref_sp = model.prosodic_style_encoder(ref_mels_val)
                     # Combined style [B, 256+512, T]
-                    ref_s = torch.cat([spk_embs_val, ref_ss, ref_sp], dim=1)
+                    ref_s = torch.cat([ref_ss, ref_sp], dim=1)
                 # --- End of Vectorized style computation ---
 
                 # Iterate over the defined number of validation samples
@@ -1207,8 +1218,8 @@ def main():
             del model["text_aligner"]
             del model["pitch_extractor"]
             if not multispeaker:
-                del model["style_encoder"]
-                del model["predictor_encoder"]
+                del model["acoustic_style_encoder"]
+                del model["prosodic_style_encoder"]
             # Save the reduced model
             state_dict = {key: model[key].state_dict() for key in model}
             filepath = osp.join(log_dir, "model4tts.pth")
