@@ -474,8 +474,8 @@ class PTS:
                 # convex combination of previous and current styles
                 s_pred = self.t * s_pred + (1 - self.t) * s_prev
 
-            s = s_pred[:, 640:]  # prosodic features: 128 (style) + 512 (speaker embedding)
-            ref = s_pred[:, :640]  # timbre features
+            s = s_pred[:, 128:]  # prosodic features: 128 (style) + 512 (speaker embedding)
+            ref = s_pred[:, :128]  # timbre features
 
             # If reference speaker style embedding  `ref_s` is provided,
             # combine it with the generated style
@@ -487,8 +487,8 @@ class PTS:
             #   lower = more similar to the reference style)
             if ref_s is not None:
                 logger.debug("Combining styles with reference speaker style embedding")
-                ref = self.alpha * ref + (1 - self.alpha) * ref_s[:, :640]
-                s = self.beta * s + (1 - self.beta) * ref_s[:, 640:]
+                ref = self.alpha * ref + (1 - self.alpha) * ref_s[:, :128]
+                s = self.beta * s + (1 - self.beta) * ref_s[:, 128:]
                 s_pred = torch.cat([ref, s], dim=-1)
 
             # Style-conditioned phonetic features
@@ -572,10 +572,11 @@ class PTS:
                 n = log_norm(mel_gt.unsqueeze(1)).squeeze(1)
 
             # Encode style from ground truth mel spectrogram
-            s = self.model.style_encoder(mel_gt.unsqueeze(1))
-            s = torch.cat([spk_emb, s], dim=1)
+            acoust_style = self.model.acoustic_style_encoder(spk_emb)
+            pros_style = self.model.prosodic_style_encoder(mel_gt.unsqueeze(1))
+            style = torch.cat([acoust_style, pros_style], dim=1)
             # Decode
-            y_pred = self.model.decoder(en, f0, n, s)
+            y_pred = self.model.decoder(en, f0, n, style)
 
         # Return the waveform without silence at the beginning and end
         return y_pred.cpu().numpy().squeeze()[self.offset_beg : -self.offset_end]
@@ -612,14 +613,16 @@ class PTS:
             wave_tensor = torch.from_numpy(wav).float()
             mel_tensor = self.audio_processor(wave_tensor).to(self.device)
 
-            # Compute style embedding
-            ref_s = self.model.style_encoder(mel_tensor.unsqueeze(1))  # style = timbre
-            ref_p = self.model.predictor_encoder(mel_tensor.unsqueeze(1))  # style = prosody
-
             # Load speaker embedding
             spk_emb = torch.load(spk_emb_path)
 
-        return torch.cat([spk_emb, ref_s, ref_p], dim=1)
+            # Compute style embedding
+            ref_acoust_style = self.model.acoustic_style_encoder(spk_emb)  # style = timbre
+            ref_pros_style = self.model.prosodic_style_encoder(
+                mel_tensor.unsqueeze(1)
+            )  # style = prosody
+
+        return torch.cat([ref_acoust_style, ref_pros_style], dim=1)
 
     def save_wav(self, wav, path):
         """Save wavs to a single wav file.
