@@ -879,7 +879,7 @@ def build_model(args, text_aligner, pitch_extractor, bert):
             dim_in=args.hidden_dim,
             # TODO: 2x means both acoustic and prosodic styles are computed
             # (originally only acoustic)
-            style_dim=args.style_dim * 2,
+            style_dim=args.style_dim,
             resblock_kernel_sizes=args.decoder.resblock_kernel_sizes,
             upsample_rates=args.decoder.upsample_rates,
             upsample_initial_channel=args.decoder.upsample_initial_channel,
@@ -893,7 +893,7 @@ def build_model(args, text_aligner, pitch_extractor, bert):
             dim_in=args.hidden_dim,
             # TODO: 2x means both acoustic and prosodic styles are computed
             # (originally only acoustic)
-            style_dim=args.style_dim * 2,
+            style_dim=args.style_dim,
             resblock_kernel_sizes=args.decoder.resblock_kernel_sizes,
             upsample_rates=args.decoder.upsample_rates,
             upsample_initial_channel=args.decoder.upsample_initial_channel,
