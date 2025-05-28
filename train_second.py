@@ -1146,8 +1146,8 @@ def main():
                     yaml.dump(config, outfile, default_flow_style=False)
 
             # Synthesize test audios to evaluate the model's performance
-            # after diffusion training has started.
-            if save_test_audio and epoch >= diff_epoch:
+            # after joint training has started.
+            if save_test_audio and epoch >= joint_epoch:
                 # Set up number of speakers to test if multispeaker is enabled
                 n_speakers = min(3, len(ref_s)) if multispeaker else 1
                 # Iterate over the defined number of validation test speakers
