@@ -56,8 +56,7 @@ class LearnedDownSample(nn.Module):
             )
         else:
             raise RuntimeError(
-                "Got unexpected donwsampletype %s, expected is [none, timepreserve, half]"
-                % self.layer_type
+                f"Got unexpected donwsampletype {self.layer_type}, expected is [none, timepreserve, half]"
             )
 
     def forward(self, x):
@@ -116,8 +115,7 @@ class DownSample(nn.Module):
             return F.avg_pool2d(x, 2)
         else:
             raise RuntimeError(
-                "Got unexpected donwsampletype %s, expected is [none, timepreserve, half]"
-                % self.layer_type
+                f"Got unexpected donwsampletype {self.layer_type}, expected is [none, timepreserve, half]"
             )
 
 
@@ -135,8 +133,7 @@ class UpSample(nn.Module):
             return F.interpolate(x, scale_factor=2, mode="nearest")
         else:
             raise RuntimeError(
-                "Got unexpected upsampletype %s, expected is [none, timepreserve, half]"
-                % self.layer_type
+                f"Got unexpected upsampletype {self.layer_type}, expected is [none, timepreserve, half]"
             )
 
 
@@ -190,6 +187,7 @@ class AcousticStyleEncoder(nn.Module):
         dim_spk_emb=512,
         style_dim=128,
         max_conv_dim=384,
+        init_fusion_weight=0.01,
         activation=None,
     ):
         """Initialize the Acoustic Style Encoder.
@@ -197,6 +195,7 @@ class AcousticStyleEncoder(nn.Module):
             dim_in (int, optional): Input dimension for the projection layer. Defaults to 48.
             dim_spk_emb (int, optional): Dimension of the external speaker embedding. Defaults to 512.
             style_dim (int, optional): Output dimension for the projection layer, representing the style embedding dimension. Defaults to 128.
+            initial_fusion_weight (float, optional): Initial value for the trainable fusion weight. Defaults to 0.01.
             activation (torch.nn.Module, optional): Activation function to apply after the projection. Defaults to None.
         """
         super().__init__()
@@ -207,6 +206,8 @@ class AcousticStyleEncoder(nn.Module):
             style_dim=style_dim,
             max_conv_dim=max_conv_dim,
         )
+        # Initialize the fusion weight as a trainable parameter
+        self.fusion_weight = nn.Parameter(torch.tensor(init_fusion_weight))
 
     def forward(self, x, spk_emb):
         """
@@ -221,7 +222,7 @@ class AcousticStyleEncoder(nn.Module):
         if self.activation:
             spk_emb = self.activation(spk_emb)
 
-        return self.style_encoder(x) + spk_emb
+        return self.style_encoder(x) + self.fusion_weight * spk_emb
 
 
 class StyleEncoder(nn.Module):
@@ -939,7 +940,7 @@ def build_model(args, text_aligner, pitch_extractor, bert):
         n_symbols=args.n_token,
     )
 
-    predictor = ProsodyPredictor(
+    prosodic_predictor = ProsodyPredictor(
         style_dim=args.style_dim,
         d_hid=args.hidden_dim,
         nlayers=args.n_layer,
@@ -953,7 +954,11 @@ def build_model(args, text_aligner, pitch_extractor, bert):
         dim_spk_emb=512,
         style_dim=args.style_dim,
         max_conv_dim=args.max_conv_dim,
+        init_fusion_weight=0.01,  # Initial fusion weight
+        # No activation function for external speaker embedding reduction
+        activation=None,
     )
+
     # Prosodic style encoder
     prosodic_style_encoder = StyleEncoder(
         dim_in=args.dim_in,
@@ -980,7 +985,8 @@ def build_model(args, text_aligner, pitch_extractor, bert):
         in_channels=1,
         embedding_max_length=bert.config.max_position_embeddings,
         embedding_features=bert.config.hidden_size,
-        embedding_mask_proba=args.diffusion.embedding_mask_proba,  # Conditional dropout of batch elements,
+        # Conditional dropout of batch elements
+        embedding_mask_proba=args.diffusion.embedding_mask_proba,
         channels=args.style_dim * 2,
         context_features=args.style_dim * 2,
     )
@@ -990,7 +996,8 @@ def build_model(args, text_aligner, pitch_extractor, bert):
         sigma_distribution=LogNormalDistribution(
             mean=args.diffusion.dist.mean, std=args.diffusion.dist.std
         ),
-        sigma_data=args.diffusion.dist.sigma_data,  # a placeholder, will be changed dynamically when start training diffusion model
+        # a placeholder, will be changed dynamically when start training diffusion model
+        sigma_data=args.diffusion.dist.sigma_data,
         dynamic_threshold=0.0,
     )
     diffusion.diffusion.net = transformer
@@ -999,7 +1006,7 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     nets = Munch(
         bert=bert,
         bert_encoder=nn.Linear(bert.config.hidden_size, args.hidden_dim),
-        predictor=predictor,
+        prosodic_predictor=prosodic_predictor,
         decoder=decoder,
         text_encoder=text_encoder,
         prosodic_style_encoder=prosodic_style_encoder,
