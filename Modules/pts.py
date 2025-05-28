@@ -493,14 +493,16 @@ class PTS:
 
             # Style-conditioned phonetic features
             # - enriches linguistic features with style information
-            d = self.model.predictor.text_encoder(d_en, pros_style, input_lengths, text_mask)
+            d = self.model.prosodic_predictor.text_encoder(
+                d_en, pros_style, input_lengths, text_mask
+            )
 
             # xLSTM processed phonetic features
-            x = self.model.predictor.lstm(d)
-            x_mod = self.model.predictor.prepare_projection(x)  # 640 -> 512
+            x = self.model.prosodic_predictor.lstm(d)
+            x_mod = self.model.prosodic_predictor.prepare_projection(x)  # 640 -> 512
 
             # Duration prediction: number of frames for each phoneme
-            duration = self.model.predictor.duration_proj(x_mod)
+            duration = self.model.prosodic_predictor.duration_proj(x_mod)
             duration = torch.sigmoid(duration).sum(axis=-1) / self.speech_rate
             pred_dur = torch.round(duration.squeeze()).clamp(min=1)
 
@@ -527,7 +529,7 @@ class PTS:
                 en = en_new
 
             # Predict F0 and normalization (loudness)
-            f0_pred, n_pred = self.model.predictor.F0Ntrain(en, pros_style)
+            f0_pred, n_pred = self.model.prosodic_predictor.F0Ntrain(en, pros_style)
             asr = t_en @ pred_aln_trg.unsqueeze(0).to(self.device)
             if self.model.decoder.type == "hifigan":
                 asr_new = torch.zeros_like(asr)
@@ -561,9 +563,9 @@ class PTS:
         with torch.no_grad():
             if p_en is not None:
                 # Predict duration-related features from ground truth mel spectrogram
-                pros_style = self.model.predictor_encoder(mel_gt.unsqueeze(1))
+                pros_style = self.model.prosodic_style_encoder(mel_gt.unsqueeze(1))
                 # Predict F0 and norm
-                f0, n = self.model.predictor.F0Ntrain(p_en, pros_style)
+                f0, n = self.model.prosodic_predictor.F0Ntrain(p_en, pros_style)
             else:
                 # Extract real F0
                 f0, _, _ = self.model.pitch_extractor(mel_gt.unsqueeze(1))

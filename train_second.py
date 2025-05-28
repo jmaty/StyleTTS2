@@ -217,7 +217,7 @@ def main():
                 ignore_modules=[
                     "bert",
                     "bert_encoder",
-                    "predictor",
+                    "prosodic_predictor",
                     "msd",
                     "mpd",
                     "wd",
@@ -364,7 +364,7 @@ def main():
         _ = [model[key].eval() for key in model]
 
         # Set following models to train mode
-        model.predictor.train()
+        model.prosodic_predictor.train()
         model.bert_encoder.train()
         model.bert.train()
         model.msd.train()
@@ -500,7 +500,9 @@ def main():
             else:
                 loss_sty, loss_diff = 0, 0
 
-            d, p = model.predictor(d_en, pros_style, input_lengths, s2s_attn_mono, text_mask)
+            d, p = model.prosodic_predictor(
+                d_en, pros_style, input_lengths, s2s_attn_mono, text_mask
+            )
 
             # --- Pre-allocated Segment Extraction ---
 
@@ -591,7 +593,7 @@ def main():
                 wav_gt = y_rec_gt if epoch >= joint_epoch else y_rec_gt_pred
 
             # Predict F0 and Norm using predicted components
-            f0_fake, n_fake = model.predictor.F0Ntrain(p_en, pros_style)
+            f0_fake, n_fake = model.prosodic_predictor.F0Ntrain(p_en, pros_style)
             # Reconstruct waveform using predicted F0/Norm
             y_rec = model.decoder(en, f0_fake, n_fake, acoust_style)
 
@@ -659,14 +661,14 @@ def main():
                 # _ = [nn.utils.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
                 nn.utils.clip_grad_norm_(model.bert_encoder.parameters(), grad_clip)
                 nn.utils.clip_grad_norm_(model.bert.parameters(), grad_clip)
-                nn.utils.clip_grad_norm_(model.predictor.parameters(), grad_clip)
+                nn.utils.clip_grad_norm_(model.prosodic_predictor.parameters(), grad_clip)
                 nn.utils.clip_grad_norm_(model.prosodic_style_encoder.parameters(), grad_clip)
             if torch.isnan(g_loss):
                 set_trace()
 
             optimizer.step("bert_encoder")
             optimizer.step("bert")
-            optimizer.step("predictor")
+            optimizer.step("prosodic_predictor")
             optimizer.step("prosodic_style_encoder")
 
             if epoch >= diff_epoch:
@@ -726,7 +728,7 @@ def main():
                         # _ = [nn.utils.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
                         nn.utils.clip_grad_norm_(model.bert_encoder.parameters(), grad_clip)
                         nn.utils.clip_grad_norm_(model.bert.parameters(), grad_clip)
-                        nn.utils.clip_grad_norm_(model.predictor.parameters(), grad_clip)
+                        nn.utils.clip_grad_norm_(model.prosodic_predictor.parameters(), grad_clip)
                         nn.utils.clip_grad_norm_(model.diffusion.parameters(), grad_clip)
 
                     # compute the gradient norm
@@ -744,17 +746,17 @@ def main():
                         total_norm[key] = total_norm[key] ** 0.5
 
                     # gradient scaling
-                    if total_norm["predictor"] > slmadv_params.thresh:
+                    if total_norm["prosodic_predictor"] > slmadv_params.thresh:
                         for key in model.keys():
                             for p in model[key].parameters():
                                 if p.grad is not None:
-                                    p.grad *= 1 / total_norm["predictor"]
+                                    p.grad *= 1 / total_norm["prosodic_predictor"]
 
-                    for p in model.predictor.duration_proj.parameters():
+                    for p in model.prosodic_predictor.duration_proj.parameters():
                         if p.grad is not None:
                             p.grad *= slmadv_params.scale
 
-                    for p in model.predictor.lstm.parameters():
+                    for p in model.prosodic_predictor.lstm.parameters():
                         if p.grad is not None:
                             p.grad *= slmadv_params.scale
 
@@ -764,7 +766,7 @@ def main():
 
                     optimizer.step("bert_encoder")
                     optimizer.step("bert")
-                    optimizer.step("predictor")
+                    optimizer.step("prosodic_predictor")
                     optimizer.step("diffusion")
 
                     # SLM discriminator loss
@@ -918,8 +920,12 @@ def main():
                     d_en = model.bert_encoder(bert_dur).transpose(-1, -2)  # [B, 256, T]
 
                     # Predict duration and pitch [B, 256, T]
-                    d, p = model.predictor(
-                        d_en, pros_style, input_lengths, s2s_attn_mono, text_mask
+                    d, p = model.prosodic_predictor(
+                        d_en,
+                        pros_style,
+                        input_lengths,
+                        s2s_attn_mono,
+                        text_mask,
                     )
 
                     # --- Pre-allocated Segment Extraction ---
@@ -971,7 +977,7 @@ def main():
                     pros_style = model.prosodic_style_encoder(mel_gt.unsqueeze(1))
 
                     # Predict F0 and Norm using predicted components
-                    f0_fake, n_fake = model.predictor.F0Ntrain(p_en, pros_style)
+                    f0_fake, n_fake = model.prosodic_predictor.F0Ntrain(p_en, pros_style)
 
                     loss_dur = 0
                     for _s2s_pred, _text_input, _text_length in zip(d, (d_gt), input_lengths):

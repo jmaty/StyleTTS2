@@ -129,7 +129,7 @@ class SLMAdversarialLoss(torch.nn.Module):
         # s = s_preds[:, :128]
 
         # Predict durations
-        d, _ = self.model.predictor(
+        d, _ = self.model.prosodic_predictor(
             d_en,
             s_dur,
             ref_lengths,
@@ -179,7 +179,7 @@ class SLMAdversarialLoss(torch.nn.Module):
         asr_pred = t_en @ s2s_attn
 
         # Predict aligned pitch features
-        _, p_pred = self.model.predictor(d_en, s_dur, ref_lengths, s2s_attn, text_mask)
+        _, p_pred = self.model.prosodic_predictor(d_en, s_dur, ref_lengths, s2s_attn, text_mask)
 
         mel_len = max(int(min(output_lengths) / 2 - 1), self.min_len // 2)
         mel_len = min(mel_len, self.max_len // 2)
@@ -224,7 +224,7 @@ class SLMAdversarialLoss(torch.nn.Module):
             wav_gt[bidx] = waves[bidx][beg_idx:end_idx]
         # --- End of Pre-allocate Segment Extraction ---
 
-        f0_fake, n_fake = self.model.predictor.F0Ntrain(p_en, sp[:, 128:])
+        f0_fake, n_fake = self.model.prosodic_predictor.F0Ntrain(p_en, sp[:, 128:])
         y_pred = self.model.decoder(en, f0_fake, n_fake, sp[:, :128])
 
         # discriminator loss
