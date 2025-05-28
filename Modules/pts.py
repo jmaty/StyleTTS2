@@ -561,9 +561,9 @@ class PTS:
         with torch.no_grad():
             if p_en is not None:
                 # Predict duration-related features from ground truth mel spectrogram
-                s_dur = self.model.predictor_encoder(mel_gt.unsqueeze(1))
+                pros_style = self.model.predictor_encoder(mel_gt.unsqueeze(1))
                 # Predict F0 and norm
-                f0, n = self.model.predictor.F0Ntrain(p_en, s_dur)
+                f0, n = self.model.predictor.F0Ntrain(p_en, pros_style)
             else:
                 # Extract real F0
                 f0, _, _ = self.model.pitch_extractor(mel_gt.unsqueeze(1))
@@ -573,10 +573,10 @@ class PTS:
 
             # Encode style from ground truth mel spectrogram
             acoust_style = self.model.acoustic_style_encoder(spk_emb)
-            pros_style = self.model.prosodic_style_encoder(mel_gt.unsqueeze(1))
-            style = torch.cat([acoust_style, pros_style], dim=1)
+            # pros_style = self.model.prosodic_style_encoder(mel_gt.unsqueeze(1))
+            # style = torch.cat([acoust_style, pros_style], dim=1)
             # Decode
-            y_pred = self.model.decoder(en, f0, n, style)
+            y_pred = self.model.decoder(en, f0, n, acoust_style)
 
         # Return the waveform without silence at the beginning and end
         return y_pred.cpu().numpy().squeeze()[self.offset_beg : -self.offset_end]
