@@ -183,20 +183,48 @@ class ResBlk(nn.Module):
         return x / math.sqrt(2)  # unit variance
 
 
-class StyleEncoder(nn.Module):
-    def __init__(self, dim_in=512, style_dim=256, activation=None):
+class AcousticStyleEncoder(nn.Module):
+    def __init__(
+        self,
+        dim_in=48,
+        dim_spk_emb=512,
+        style_dim=128,
+        max_conv_dim=384,
+        activation=None,
+    ):
+        """Initialize the Acoustic Style Encoder.
+        Args:
+            dim_in (int, optional): Input dimension for the projection layer. Defaults to 48.
+            dim_spk_emb (int, optional): Dimension of the external speaker embedding. Defaults to 512.
+            style_dim (int, optional): Output dimension for the projection layer, representing the style embedding dimension. Defaults to 128.
+            activation (torch.nn.Module, optional): Activation function to apply after the projection. Defaults to None.
+        """
         super().__init__()
-        self.project = nn.Linear(dim_in, style_dim)
+        self.project = nn.Linear(dim_spk_emb, style_dim)
         self.activation = activation
+        self.style_encoder = StyleEncoder(
+            dim_in=dim_in,
+            style_dim=style_dim,
+            max_conv_dim=max_conv_dim,
+        )
 
-    def forward(self, x):
-        x = self.project(x)
+    def forward(self, x, spk_emb):
+        """
+        Forward pass of the module.
+        Args:
+            x (torch.Tensor): External speaker embedding.
+            s (torch.Tensor): Style embedding.
+        Returns:
+            torch.Tensor: The output tensor after projection, optional activation, and addition of `s`.
+        """
+        spk_emb = self.project(spk_emb)
         if self.activation:
-            x = self.activation(x)
-        return x
+            spk_emb = self.activation(spk_emb)
+
+        return self.style_encoder(x) + spk_emb
 
 
-class ProsodyEncoder(nn.Module):
+class StyleEncoder(nn.Module):
     def __init__(self, dim_in=48, style_dim=48, max_conv_dim=384):
         super().__init__()
         blocks = [spectral_norm(nn.Conv2d(1, dim_in, 3, 1, 1))]
@@ -573,7 +601,10 @@ class ProsodyPredictor(nn.Module):
         # if you want to use hopfield, just comment out the block above, then hash the "self.shared below"
 
         self.text_encoder = DurationEncoder(
-            sty_dim=style_dim, d_model=d_hid, nlayers=nlayers, dropout=dropout
+            sty_dim=style_dim,
+            d_model=d_hid,
+            nlayers=nlayers,
+            dropout=dropout,
         )
 
         self.lstm = xLSTMBlockStack(self.cfg)
@@ -917,12 +948,14 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     )
 
     # Acoustic style encoder
-    acoustic_style_encoder = StyleEncoder(
-        dim_in=512,
+    acoustic_style_encoder = AcousticStyleEncoder(
+        dim_in=args.dim_in,
+        dim_spk_emb=512,
         style_dim=args.style_dim,
+        max_conv_dim=args.max_conv_dim,
     )
     # Prosodic style encoder
-    prosodic_style_encoder = ProsodyEncoder(
+    prosodic_style_encoder = StyleEncoder(
         dim_in=args.dim_in,
         style_dim=args.style_dim,
         max_conv_dim=args.max_conv_dim,
