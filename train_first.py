@@ -314,63 +314,61 @@ def main():
             # Keep individual batch tensors
             (
                 spk_embs,  # Speaker embeddings [B, 512]
-                texts,  # Padded input phoneme IDs [B, T_text]
-                input_lengths,  # Input phoneme lengths [B]
+                phonemes,  # Padded input phoneme IDs [B, T_text]
+                ph_inp_lengths,  # Input phoneme lengths [B]
                 _,
                 _,
                 mels,  # Padded mel spectrograms [B, n_mels, T_mel]
-                mel_input_length,  # Mel spectrogram lengths [B]
+                mel_inp_len,  # Mel spectrogram lengths [B]
                 _,
             ) = batch
 
             # Generate masks for text and mel spectrograms
             with torch.no_grad():
                 # `2**n_down` scaling ensures the mask aligns with the downsampled feature dimension
-                mel_mask = length_to_mask(mel_input_length // (2**n_down)).to(
-                    mel_input_length.device
-                )
-                text_mask = length_to_mask(input_lengths).to(texts.device)
+                mel_mask = length_to_mask(mel_inp_len // (2**n_down)).to(mel_inp_len.device)
+                ph_mask = length_to_mask(ph_inp_lengths).to(phonemes.device)
 
             # Align text and audio (mel)
-            _, s2s_pred, s2s_attn = model.text_aligner(mels, mel_mask, texts)
+            _, s2s_pred, d_algn = model.text_aligner(mels, mel_mask, phonemes)
             # Refine attention matrix
-            s2s_attn = s2s_attn.transpose(-1, -2)
-            s2s_attn = s2s_attn[..., 1:]
-            s2s_attn = s2s_attn.transpose(-1, -2)
+            d_algn = d_algn.transpose(-1, -2)
+            d_algn = d_algn[..., 1:]
+            d_algn = d_algn.transpose(-1, -2)
 
             # Create attention mask
             with torch.no_grad():
                 attn_mask = (
                     (~mel_mask)
                     .unsqueeze(-1)
-                    .expand(mel_mask.shape[0], mel_mask.shape[1], text_mask.shape[-1])
+                    .expand(mel_mask.shape[0], mel_mask.shape[1], ph_mask.shape[-1])
                     .float()
                     .transpose(-1, -2)
                 )
                 attn_mask = (
                     attn_mask.float()
-                    * (~text_mask)
+                    * (~ph_mask)
                     .unsqueeze(-1)
-                    .expand(text_mask.shape[0], text_mask.shape[1], mel_mask.shape[-1])
+                    .expand(ph_mask.shape[0], ph_mask.shape[1], mel_mask.shape[-1])
                     .float()
                 )
                 attn_mask = attn_mask < 1  # Convert to boolean tensor
 
-            s2s_attn.masked_fill_(attn_mask, 0.0)  # Apply attention mask to the attention matrix
+            d_algn.masked_fill_(attn_mask, 0.0)  # Apply attention mask to the attention matrix
 
             with torch.no_grad():
                 # Create monotonic attention
-                mask_st = mask_from_lens(s2s_attn, input_lengths, mel_input_length // (2**n_down))
-                s2s_attn_mono = maximum_path(s2s_attn, mask_st)
+                mask_st = mask_from_lens(d_algn, ph_inp_lengths, mel_inp_len // (2**n_down))
+                d_algn_mono = maximum_path(d_algn, mask_st)
 
             # Encode
-            t_en = model.text_encoder(texts, input_lengths, text_mask)
+            h_ph = model.text_encoder(phonemes, ph_inp_lengths, ph_mask)
 
             # 50% of chance of using monotonic version
             if bool(random.getrandbits(1)):
-                asr = t_en @ s2s_attn
+                h_algn = h_ph @ d_algn
             else:
-                asr = t_en @ s2s_attn_mono
+                h_algn = h_ph @ d_algn_mono
 
             # Get clips
             # TODO: not to divide by 2?
@@ -378,8 +376,8 @@ def main():
 
             # --- Pre-allocate tensors ---
 
-            mel_input_length_all = accelerator.gather(mel_input_length)  # for balanced load
-            mel_len_gt = min([int(mel_input_length_all.min().item() / 2 - 1), max_len // 2])
+            mel_inp_len_all = accelerator.gather(mel_inp_len)  # for balanced load
+            mel_len_gt = min([int(mel_inp_len_all.min().item() / 2 - 1), max_len // 2])
             # Early check for segment length:
             # - mel_len_gt * 2 is the length of the original mel spectrogram
             # - multiplication by 2 is due to the downsampling factor between mel and text aligner
@@ -392,13 +390,15 @@ def main():
                 )
                 continue
 
-            mel_len_st = int(mel_input_length.min().item() / 2 - 1)
+            mel_len_st = int(mel_inp_len.min().item() / 2 - 1)
 
-            bsize = mel_input_length.shape[0]  # Use current batch size
+            bsize = mel_inp_len.shape[0]  # Use current batch size
             wav_len = (mel_len_gt * 2) * hop_length  # Calculate fixed waveform segment length
 
             # Pre-allocate tensors with the calculated fixed length
-            en = torch.empty(bsize, asr.shape[1], mel_len_gt, device=device, dtype=asr.dtype)
+            ph_algn = torch.empty(
+                bsize, h_algn.shape[1], mel_len_gt, device=device, dtype=h_algn.dtype
+            )
             mel_gt = torch.empty(
                 bsize, mels.shape[1], mel_len_gt * 2, device=device, dtype=mels.dtype
             )
@@ -410,14 +410,14 @@ def main():
             # Iterate through the batch samples
             for bidx in range(bsize):
                 # Mel-spectrogram length (dividing by 2 due to a downsampling factor?)
-                mel_length = int(mel_input_length[bidx].item() / 2)
+                mel_len = int(mel_inp_len[bidx].item() / 2)
 
                 # --- Segment for en, mel_gt, wav_gt ---
                 # Randomly select a start point for the mel spectrogram within valid range
-                beg_gt = np.random.randint(0, mel_length - mel_len_gt)
+                beg_gt = np.random.randint(0, mel_len - mel_len_gt)
 
                 # Extract text-audio aligned encoded features and assign to tensor
-                en[bidx] = asr[bidx, :, beg_gt : beg_gt + mel_len_gt]
+                ph_algn[bidx] = h_algn[bidx, :, beg_gt : beg_gt + mel_len_gt]
                 # Extract ground-truth mel spectrogram and assign to tensor
                 mel_gt[bidx] = mels[bidx, :, (beg_gt * 2) : ((beg_gt + mel_len_gt) * 2)]
                 # Extract corresponding ground-truth audio and assign to tensor
@@ -427,12 +427,12 @@ def main():
 
                 # --- Segment for mel_st ---
                 # Style reference (better to be different from the GT)
-                beg_st = np.random.randint(0, mel_length - mel_len_st)
+                beg_st = np.random.randint(0, mel_len - mel_len_st)
                 # Extract style reference mel spectrogram for style conditioning and assign to tensor
                 mel_st[bidx] = mels[bidx, :, (beg_st * 2) : ((beg_st + mel_len_st) * 2)]
 
             # Detach tensors to avoid unnecessary gradient tracking
-            # `en` is not detached as it is used for gradient computation
+            # `h_algn_seg` is not detached as it is used for gradient computation
             mel_gt = mel_gt.detach()
             mel_st = mel_st.detach()
             wav_gt = wav_gt.detach()
@@ -441,7 +441,7 @@ def main():
 
             with torch.no_grad():
                 # Get the pitch and norm of the ground truth samples
-                real_norm = log_norm(mel_gt.unsqueeze(1)).squeeze(1).detach()
+                norm_real = log_norm(mel_gt.unsqueeze(1)).squeeze(1).detach()
                 f0_real, _, _ = model.pitch_extractor(mel_gt.unsqueeze(1))
 
             # Style encoding:
@@ -453,16 +453,16 @@ def main():
 
             # Reconstruct the audio from the text-audio aligned encoded features, predicted style,
             # and ground truth pitch and norm
-            y_rec = model.decoder(en, f0_real, real_norm, style)
+            y_rec = model.decoder(ph_algn, f0_real, norm_real, style)
 
             # --- Discriminator loss ---
             if epoch >= tma_epoch:
                 # Compute decoder's discriminator loss
-                d_loss = dl(wav_gt.detach().unsqueeze(1).float(), y_rec.detach()).mean()
-                d_loss = d_loss / grad_accum_steps  # JMa: normalize loss
+                loss_disc = dl(wav_gt.detach().unsqueeze(1).float(), y_rec.detach()).mean()
+                loss_disc = loss_disc / grad_accum_steps  # JMa: normalize loss
                 # JMa: Compute gradients only for discriminators
                 accelerator.backward(
-                    d_loss, inputs=list(model.mpd.parameters()) + list(model.msd.parameters())
+                    loss_disc, inputs=list(model.mpd.parameters()) + list(model.msd.parameters())
                 )
                 # JMa: Gradient accumulation
                 if (batch_idx + 1) % grad_accum_steps == 0:
@@ -477,7 +477,7 @@ def main():
                     optimizer.zero_grad("msd")
                     optimizer.zero_grad("mpd")
             else:
-                d_loss = 0
+                loss_disc = 0
 
             # --- Generator loss ---
             loss_mel = stft_loss(y_rec.squeeze(), wav_gt.detach())
@@ -486,15 +486,15 @@ def main():
                 # Seq2seq loss measures the difference between the predicted and
                 # ground truth text tokens
                 loss_s2s = 0
-                for _s2s_pred, _text_input, _text_length in zip(s2s_pred, texts, input_lengths):
+                for _s2s_pred, _text_input, _text_length in zip(s2s_pred, phonemes, ph_inp_lengths):
                     loss_s2s += F.cross_entropy(
                         _s2s_pred[:_text_length], _text_input[:_text_length]
                     )
-                loss_s2s /= texts.size(0)
+                loss_s2s /= phonemes.size(0)
 
                 # Monotonic attention loss measures the difference between the
                 # predicted and ground truth attention weights
-                loss_mono = F.l1_loss(s2s_attn, s2s_attn_mono) * 10
+                loss_mono = F.l1_loss(d_algn, d_algn_mono) * 10
 
                 # Generator loss measures the difference between the
                 # predicted and ground truth waveforms
@@ -567,7 +567,7 @@ def main():
                     steps_this_epoch,  # tot_num_steps,
                     mel_loss,
                     loss_gen_all,
-                    d_loss,
+                    loss_disc,
                     loss_mono,
                     loss_s2s,
                     loss_slm,
@@ -595,7 +595,7 @@ def main():
                     {
                         "train/mel_loss": mel_loss,
                         "train/gen_loss": loss_gen_all,
-                        "train/d_loss": d_loss,
+                        "train/d_loss": loss_disc,
                         "train/mono_loss": loss_mono,
                         "train/s2s_loss": loss_s2s,
                         "train/slm_loss": loss_slm,
@@ -633,59 +633,61 @@ def main():
                 batch = [b.to(device) for b in batch[1:]]
                 (
                     spk_embs,  # Speaker embeddings [B, 512]
-                    texts,  # Padded input phoneme IDs [B, T_text]
-                    input_lengths,  # Input phoneme lengths [B]
+                    phonemes,  # Padded input phoneme IDs [B, T_text]
+                    ph_inp_lengths,  # Input phoneme lengths [B]
                     _,
                     _,
                     mels,  # Padded mel spectrograms [B, n_mels, T_mel]
-                    mel_input_length,  # Mel spectrogram lengths [B]
+                    mel_inp_len,  # Mel spectrogram lengths [B]
                     _,
                 ) = batch
 
                 with torch.no_grad():
-                    mel_mask = length_to_mask(mel_input_length // (2**n_down)).to("cuda")
-                    _, s2s_pred, s2s_attn = model.text_aligner(mels, mel_mask, texts)
+                    mel_mask = length_to_mask(mel_inp_len // (2**n_down)).to("cuda")
+                    _, s2s_pred, d_algn = model.text_aligner(mels, mel_mask, phonemes)
 
-                    s2s_attn = s2s_attn.transpose(-1, -2)
-                    s2s_attn = s2s_attn[..., 1:]
-                    s2s_attn = s2s_attn.transpose(-1, -2)
+                    d_algn = d_algn.transpose(-1, -2)
+                    d_algn = d_algn[..., 1:]
+                    d_algn = d_algn.transpose(-1, -2)
 
-                    text_mask = length_to_mask(input_lengths).to(texts.device)
+                    ph_mask = length_to_mask(ph_inp_lengths).to(phonemes.device)
                     attn_mask = (
                         (~mel_mask)
                         .unsqueeze(-1)
-                        .expand(mel_mask.shape[0], mel_mask.shape[1], text_mask.shape[-1])
+                        .expand(mel_mask.shape[0], mel_mask.shape[1], ph_mask.shape[-1])
                         .float()
                         .transpose(-1, -2)
                     )
                     attn_mask = (
                         attn_mask.float()
-                        * (~text_mask)
+                        * (~ph_mask)
                         .unsqueeze(-1)
-                        .expand(text_mask.shape[0], text_mask.shape[1], mel_mask.shape[-1])
+                        .expand(ph_mask.shape[0], ph_mask.shape[1], mel_mask.shape[-1])
                         .float()
                     )
                     attn_mask = attn_mask < 1
-                    s2s_attn.masked_fill_(attn_mask, 0.0)
+                    d_algn.masked_fill_(attn_mask, 0.0)
 
                 # encode
-                t_en = model.text_encoder(texts, input_lengths, text_mask)
+                h_ph = model.text_encoder(phonemes, ph_inp_lengths, ph_mask)
 
-                asr = t_en @ s2s_attn
+                h_algn = h_ph @ d_algn
 
                 # Get clips
                 # Note: Validation uses local min length, not gathered length like training
                 # mel_input_length_all = accelerator.gather(mel_input_length)  # for balanced load
-                mel_len_gt = min([int(mel_input_length.min().item() / 2 - 1), max_len // 2])
+                mel_len_gt = min([int(mel_inp_len.min().item() / 2 - 1), max_len // 2])
 
                 # --- Pre-allocate tensors ---
 
-                bsize = mel_input_length.shape[0]  # Use current batch size
+                bsize = mel_inp_len.shape[0]  # Use current batch size
                 wav_len = (mel_len_gt * 2) * hop_length  # Calculate fixed waveform segment length
 
                 # Pre-allocate tensors with the calculated fixed length
                 # Note: Style tensor `mel_st` is not used in validation
-                en = torch.empty(bsize, asr.shape[1], mel_len_gt, device=device, dtype=asr.dtype)
+                ph_algn = torch.empty(
+                    bsize, h_algn.shape[1], mel_len_gt, device=device, dtype=h_algn.dtype
+                )
                 mel_gt = torch.empty(
                     bsize, mels.shape[1], mel_len_gt * 2, device=device, dtype=mels.dtype
                 )
@@ -694,13 +696,13 @@ def main():
                 # Iterate through the batch samples
                 for bidx in range(bsize):
                     # Mel-spectrogram length (dividing by 2 due to a downsampling factor?)
-                    mel_length = int(mel_input_length[bidx].item() / 2)
+                    mel_len = int(mel_inp_len[bidx].item() / 2)
 
                     # Randomly select a start point for the mel spectrogram within valid range
-                    beg_gt = np.random.randint(0, mel_length - mel_len_gt)
+                    beg_gt = np.random.randint(0, mel_len - mel_len_gt)
 
                     # Extract text-audio aligned encoded features and assign to tensor
-                    en[bidx] = asr[bidx, :, beg_gt : beg_gt + mel_len_gt]
+                    ph_algn[bidx] = h_algn[bidx, :, beg_gt : beg_gt + mel_len_gt]
                     # Extract ground-truth mel spectrogram and assign to tensor
                     mel_gt[bidx] = mels[bidx, :, (beg_gt * 2) : ((beg_gt + mel_len_gt) * 2)]
                     # Extract corresponding ground-truth audio and assign to tensor
@@ -718,8 +720,8 @@ def main():
 
                 style = model.acoustic_style_encoder(mel_gt.unsqueeze(1), spk_embs)
 
-                real_norm = log_norm(mel_gt.unsqueeze(1)).squeeze(1)
-                y_rec = model.decoder(en, f0_real, real_norm, style)
+                norm_real = log_norm(mel_gt.unsqueeze(1)).squeeze(1)
+                y_rec = model.decoder(ph_algn, f0_real, norm_real, style)
 
                 loss_mel = stft_loss(y_rec.squeeze(), wav_gt.detach())
 
@@ -744,13 +746,13 @@ def main():
             with torch.no_grad():
                 # Iterate over the defined number of validation samples
                 for idx in range(min(n_val_audios, bsize)):
-                    mel_length = int(mel_input_length[idx].item())
+                    mel_len = int(mel_inp_len[idx].item())
                     # Reconstruct audio from ground-truth mel spectrogram and
                     # phoneme-audio alignment
                     wav = pts.reconstruct(
-                        mels[idx, :, :mel_length].unsqueeze(0),  # Ground-truth mel spectrogram
+                        mels[idx, :, :mel_len].unsqueeze(0),  # Ground-truth mel spectrogram
                         # Ground-truth phoneme-audio alignment
-                        asr[idx, :, : mel_length // 2].unsqueeze(0),
+                        h_algn[idx, :, : mel_len // 2].unsqueeze(0),
                         spk_embs[idx].unsqueeze(0),
                     )
 
@@ -758,7 +760,7 @@ def main():
                     # writer.add_audio(f"eval/y{idx}", wav, epoch, sample_rate=sr)
                     if save_val_audio and epoch % saving_epoch == 0:
                         outfile = f"epoch_1st_{epoch:0>5}_val-rec-{idx}.wav"
-                        pts.save_wav(wav, os.path.join(test_audio_dir, outfile))
+                        pts.save_wav(wav, osp.join(test_audio_dir, outfile))
 
                     # Save ground truth
                     if epoch == 0:
