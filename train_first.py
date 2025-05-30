@@ -60,7 +60,7 @@ def main():
 
     # Set up logging
     log_dir = config["log_dir"]
-    exp_label = config.get("label", "") # Experiment label
+    exp_label = config.get("label", "")  # Experiment label
     formatter_file = logging.Formatter(
         fmt="%(levelname)s:%(asctime)s: %(message)s",
         datefmt="%y%m%d-%H:%M:%S",
@@ -571,7 +571,7 @@ def main():
                     loss_mono,
                     loss_s2s,
                     loss_slm,
-                    model.acoustic_style_encoder.fusion_weight.item()
+                    model.acoustic_style_encoder.fusion_weight.item(),
                 )
                 # writer.add_scalar("train/mel_loss", mel_loss, iters)
                 # writer.add_scalar("train/gen_loss", loss_gen_all, iters)
@@ -728,11 +728,10 @@ def main():
 
         if accelerator.is_main_process:
             logger.info(
-                "Epoch [%3d/%d]: validation loss: %.3f, fusion weight: %.6f",
+                "Epoch [%3d/%d]: validation loss: %.3f",
                 epoch + 1,
                 epochs,
                 loss_test / iters_test,
-                model.acoustic_style_encoder.fusion_weight.item(),
             )
             # writer.add_scalar("eval/mel_loss", loss_test / iters_test, epoch)
             # attn_image = get_image(s2s_attn[0].cpu().numpy().squeeze())
