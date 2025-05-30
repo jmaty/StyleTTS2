@@ -57,6 +57,7 @@ def main():
     config_out["max_len"] = settings["start1"]["max_len"]
     config_out["data_params"]["train_data"] = settings["start1"]["train_data"]
     config_out["second_stage_load_pretrained"] = False
+    config_out["label"] = settings["start1"]["label"]
     out_file = osp.join(out_dir, f"{cfg_name}{settings['start1']['label']}{cfg_ext}")
     save_config(config_out, out_file)
 
@@ -70,6 +71,7 @@ def main():
     pretrained_model = osp.join(out_dir, f"epoch_1st_{config['epochs']['tma']-1:05}.pth")
     config_out["pretrained_model"] = pretrained_model
     config_out["second_stage_load_pretrained"] = False
+    config_out["label"] = settings["tma"]["label"]
     out_file = osp.join(out_dir, f"{cfg_name}{settings['tma']['label']}{cfg_ext}")
     save_config(config_out, out_file)
 
@@ -82,6 +84,7 @@ def main():
     config_out["max_len"] = settings["start2"]["max_len"]
     config_out["data_params"]["train_data"] = settings["start2"]["train_data"]
     config_out["second_stage_load_pretrained"] = True
+    config_out["label"] = settings["start2"]["label"]
     out_file = osp.join(out_dir, f"{cfg_name}{settings['start2']['label']}{cfg_ext}")
     save_config(config_out, out_file)
 
@@ -95,6 +98,7 @@ def main():
     pretrained_model = osp.join(out_dir, f"epoch_2nd_{config['epochs']['diff']-1:05}.pth")
     config_out["pretrained_model"] = pretrained_model
     config_out["second_stage_load_pretrained"] = True
+    config_out["label"] = settings["diff"]["label"]
     out_file = osp.join(out_dir, f"{cfg_name}{settings['diff']['label']}{cfg_ext}")
     save_config(config_out, out_file)
 
@@ -107,6 +111,7 @@ def main():
     pretrained_model = osp.join(out_dir, f"epoch_2nd_{config['epochs']['joint']-1:05}.pth")
     config_out["pretrained_model"] = pretrained_model
     config_out["second_stage_load_pretrained"] = True
+    config_out["label"] = settings["joint"]["label"]
     out_file = osp.join(out_dir, f"{cfg_name}{settings['joint']['label']}{cfg_ext}")
     save_config(config_out, out_file)
 
