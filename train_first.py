@@ -5,18 +5,20 @@ import os.path as osp
 import random
 import time
 import warnings
-import numpy as np
 
+import numpy as np
 import nvidia_smi
 import torch
 import torch.nn.functional as F
+import wandb
 import yaml
 from accelerate import Accelerator, DistributedDataParallelKwargs
 
 # from accelerate.logging import get_logger
 from monotonic_align import mask_from_lens
 from munch import Munch
-from torch.utils.tensorboard import SummaryWriter
+
+# from torch.utils.tensorboard import SummaryWriter
 
 from logger import get_logger, setup_logging
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, create_slm_loss
@@ -27,7 +29,7 @@ from optimizers import build_optimizer
 from text_utils import TextCleaner
 from utils import (
     get_data_path_list,
-    get_image,
+    # get_image,
     length_to_mask,
     log_norm,
     maximum_path,
@@ -53,10 +55,12 @@ def main():
     with open(args.config_path, encoding="utf-8") as fr:
         config = yaml.safe_load(fr)
 
-    writer = None
+    # writer = None
+    wb_logger = None  # WandB logger
 
     # Set up logging
     log_dir = config["log_dir"]
+    exp_label = config.get("label", "") # Experiment label
     formatter_file = logging.Formatter(
         fmt="%(levelname)s:%(asctime)s: %(message)s",
         datefmt="%y%m%d-%H:%M:%S",
@@ -69,11 +73,25 @@ def main():
     )
     logger = get_logger(__name__)  # Get a logger
 
-    # Distrinuted computing
+    # Distributed computing
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(project_dir=log_dir, split_batches=True, kwargs_handlers=[ddp_kwargs])
+
     if accelerator.is_main_process:
-        writer = SummaryWriter(osp.join(log_dir, "tensorboard"))
+        # writer = SummaryWriter(osp.join(log_dir, "tensorboard"))
+        # Initialize the wandb logger and name wandb project and run
+        wb_logger = wandb.init(
+            # Set the wandb entity where your project will be logged (generally your team name).
+            # entity="my-awesome-team-name",
+            # Set the wandb project where this run will be logged.
+            project="StyleTTS2-spkenc",
+            # Set run name
+            name=f"{osp.basename(log_dir)}_{exp_label}",
+            # Track hyperparameters and run metadata.
+            config=config,
+            dir=log_dir,
+            # mode="disabled" if INTERACTIVE_MODE else "online",
+        )
 
     # Set up device
     device = accelerator.device
@@ -81,6 +99,11 @@ def main():
     # Init NVLM
     nvidia_smi.nvmlInit()
     n_gpus = nvidia_smi.nvmlDeviceGetCount()
+    max_vram = 0  # Track maximum VRAM usage
+    # Get total VRAM of the first GPU
+    total_vram = (
+        nvidia_smi.nvmlDeviceGetMemoryInfo(nvidia_smi.nvmlDeviceGetHandleByIndex(0)).total >> 30
+    )
     if accelerator.is_main_process:
         logger.info("NVLM initialized")
 
@@ -284,7 +307,7 @@ def main():
         optimizer.zero_grad()
 
         # Train loop for each epoch
-        for i, batch in enumerate(train_dataloader):
+        for batch_idx, batch in enumerate(train_dataloader):
             waves = batch[0]  # Keep ground truth audio
             # Move other batch tensors to device
             batch = [b.to(device) for b in batch[1:]]
@@ -365,7 +388,7 @@ def main():
                     "Segment is too short (%d frames, %d samples)=> skipping batch %d.",
                     mel_len_gt * 2,
                     (mel_len_gt * 2) * hop_length,
-                    i,
+                    batch_idx,
                 )
                 continue
 
@@ -424,11 +447,9 @@ def main():
             # Style encoding:
             # - if not multispeaker, use the ground truth mel spectrogram
             # - if multispeaker, use other (style reference) mel spectrogram
-            acoust_style = model.acoustic_style_encoder(spk_embs)
-            pros_style = model.prosodic_style_encoder(
-                mel_st.unsqueeze(1) if multispeaker else mel_gt.unsqueeze(1)
-            )
-            style = torch.cat([acoust_style, pros_style], dim=1)
+            mel4style = mel_st.unsqueeze(1) if multispeaker else mel_gt.unsqueeze(1)
+            # Only (acoustic) style encoder is trained within 1st stage training
+            style = model.acoustic_style_encoder(mel4style, spk_embs)
 
             # Reconstruct the audio from the text-audio aligned encoded features, predicted style,
             # and ground truth pitch and norm
@@ -444,7 +465,7 @@ def main():
                     d_loss, inputs=list(model.mpd.parameters()) + list(model.msd.parameters())
                 )
                 # JMa: Gradient accumulation
-                if (i + 1) % grad_accum_steps == 0:
+                if (batch_idx + 1) % grad_accum_steps == 0:
                     # JMa: gradient clipping
                     if grad_clip:
                         _ = [
@@ -502,7 +523,6 @@ def main():
             inputs = (
                 list(model.decoder.parameters())
                 + list(model.acoustic_style_encoder.parameters())
-                + list(model.prosodic_style_encoder.parameters())
                 + list(model.text_encoder.parameters())
             )
             if epoch >= tma_epoch:
@@ -513,7 +533,7 @@ def main():
             running_loss += accelerator.gather(loss_mel).mean().item()
 
             # JMa: Gradient accumulation
-            if (i + 1) % grad_accum_steps == 0:
+            if (batch_idx + 1) % grad_accum_steps == 0:
                 # JMa: gradient clipping
                 if grad_clip:
                     _ = [
@@ -522,7 +542,6 @@ def main():
 
                 optimizer.step("text_encoder")
                 optimizer.step("acoustic_style_encoder")
-                optimizer.step("prosodic_style_encoder")
                 optimizer.step("decoder")
 
                 if epoch >= tma_epoch:
@@ -538,13 +557,13 @@ def main():
             iters += 1
 
             # Log training progress
-            if (i + 1) % log_interval == 0 and accelerator.is_main_process:
+            if (batch_idx + 1) % log_interval == 0 and accelerator.is_main_process:
                 mel_loss = running_loss / log_interval
                 logger.info(
-                    "Epoch [%3d/%d], Step [%4d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f",
+                    "Epoch [%3d/%d], Step [%4d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f, Fusion Weight: %.5f",
                     epoch + 1,
                     epochs,
-                    i + 1,
+                    batch_idx + 1,
                     steps_this_epoch,  # tot_num_steps,
                     mel_loss,
                     loss_gen_all,
@@ -552,24 +571,48 @@ def main():
                     loss_mono,
                     loss_s2s,
                     loss_slm,
+                    model.acoustic_style_encoder.fusion_weight.item()
                 )
-                writer.add_scalar("train/mel_loss", mel_loss, iters)
-                writer.add_scalar("train/gen_loss", loss_gen_all, iters)
-                writer.add_scalar("train/d_loss", d_loss, iters)
-                writer.add_scalar("train/mono_loss", loss_mono, iters)
-                writer.add_scalar("train/s2s_loss", loss_s2s, iters)
-                writer.add_scalar("train/slm_loss", loss_slm, iters)
+                # writer.add_scalar("train/mel_loss", mel_loss, iters)
+                # writer.add_scalar("train/gen_loss", loss_gen_all, iters)
+                # writer.add_scalar("train/d_loss", d_loss, iters)
+                # writer.add_scalar("train/mono_loss", loss_mono, iters)
+                # writer.add_scalar("train/s2s_loss", loss_s2s, iters)
+                # writer.add_scalar("train/slm_loss", loss_slm, iters)
 
-                for device_idx in range(n_gpus):
-                    handle = nvidia_smi.nvmlDeviceGetHandleByIndex(device_idx)
-                    info = nvidia_smi.nvmlDeviceGetMemoryInfo(handle)
-                    logger.info(
-                        "Device %d VRAM usage: %d/%d GB (%.2f%%)",
-                        device_idx,
-                        info.used >> 30,
-                        info.total >> 30,
-                        info.used / info.total * 100,
-                    )
+                # Check current VRAM usage
+                curr_vrams = [
+                    nvidia_smi.nvmlDeviceGetMemoryInfo(
+                        nvidia_smi.nvmlDeviceGetHandleByIndex(device_idx)
+                    ).used
+                    for device_idx in range(n_gpus)
+                ]
+                # Update max VRAM usage
+                curr_vram = max(curr_vrams) >> 30  # Convert bytes to GB
+                max_vram = max(max_vram, curr_vram)
+
+                wb_logger.log(
+                    {
+                        "train/mel_loss": mel_loss,
+                        "train/gen_loss": loss_gen_all,
+                        "train/d_loss": d_loss,
+                        "train/mono_loss": loss_mono,
+                        "train/s2s_loss": loss_s2s,
+                        "train/slm_loss": loss_slm,
+                        "train/fusion_weight": model.acoustic_style_encoder.fusion_weight.item(),
+                        "train/curr_vram": curr_vram,
+                        "train/max_vram": max_vram,
+                        "train/epoch": epoch,
+                    },
+                    step=iters,
+                )
+
+                logger.info(
+                    "Max VRAM usage: %d/%d GB (%.2f%%)",
+                    max_vram,
+                    total_vram,
+                    max_vram / total_vram * 100,
+                )
                 logger.info("Time elapsed: %.2f seconds", time.time() - start_time)
 
                 running_loss = 0  # Reset running loss for next log interval
@@ -673,9 +716,7 @@ def main():
 
                 f0_real, _, _ = model.pitch_extractor(mel_gt.unsqueeze(1))
 
-                acoust_style = model.acoustic_style_encoder(spk_embs)
-                pros_style = model.prosodic_style_encoder(mel_gt.unsqueeze(1))
-                style = torch.cat([acoust_style, pros_style], dim=1)
+                style = model.acoustic_style_encoder(mel_gt.unsqueeze(1), spk_embs)
 
                 real_norm = log_norm(mel_gt.unsqueeze(1)).squeeze(1)
                 y_rec = model.decoder(en, f0_real, real_norm, style)
@@ -687,14 +728,19 @@ def main():
 
         if accelerator.is_main_process:
             logger.info(
-                "Epoch [%3d/%d]: validation loss: %.3f",
+                "Epoch [%3d/%d]: validation loss: %.3f, fusion weight: %.6f",
                 epoch + 1,
                 epochs,
                 loss_test / iters_test,
+                model.acoustic_style_encoder.fusion_weight.item(),
             )
-            writer.add_scalar("eval/mel_loss", loss_test / iters_test, epoch)
-            attn_image = get_image(s2s_attn[0].cpu().numpy().squeeze())
-            writer.add_figure("eval/attn", attn_image, epoch)
+            # writer.add_scalar("eval/mel_loss", loss_test / iters_test, epoch)
+            # attn_image = get_image(s2s_attn[0].cpu().numpy().squeeze())
+            # writer.add_figure("eval/attn", attn_image, epoch)
+            wb_logger.log(
+                {"eval/mel_loss": loss_test / iters_test},
+                step=iters,
+            )
 
             with torch.no_grad():
                 # Iterate over the defined number of validation samples
@@ -710,7 +756,7 @@ def main():
                     )
 
                     # Write and save val audio
-                    writer.add_audio(f"eval/y{idx}", wav, epoch, sample_rate=sr)
+                    # writer.add_audio(f"eval/y{idx}", wav, epoch, sample_rate=sr)
                     if save_val_audio and epoch % saving_epoch == 0:
                         outfile = f"epoch_1st_{epoch:0>5}_val-rec-{idx}.wav"
                         pts.save_wav(wav, os.path.join(test_audio_dir, outfile))
@@ -721,7 +767,7 @@ def main():
                         if save_val_audio:
                             outfile = f"epoch_1st_{epoch:0>5}_gt-{idx}.wav"
                             pts.save_wav(wav_gt, os.path.join(test_audio_dir, outfile))
-                        writer.add_audio(f"gt/y{idx}", wav_gt, epoch, sample_rate=sr)
+                        # writer.add_audio(f"gt/y{idx}", wav_gt, epoch, sample_rate=sr)
 
             if epoch % saving_epoch == 0:
                 curr_loss = loss_test / iters_test
@@ -777,7 +823,16 @@ def main():
 
         # Ending work with NVIDIA NVLM
         nvidia_smi.nvmlShutdown()
+        logger.info(
+            "Max VRAM usage: %d/%d GB (%.2f%%)",
+            max_vram,
+            total_vram,
+            max_vram / total_vram * 100,
+        )
         logger.info("NVLM shutdown")
+
+        # End logging
+        wandb.finish()
 
 
 if __name__ == "__main__":
