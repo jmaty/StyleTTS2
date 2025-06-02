@@ -56,8 +56,7 @@ class LearnedDownSample(nn.Module):
             )
         else:
             raise RuntimeError(
-                "Got unexpected donwsampletype %s, expected is [none, timepreserve, half]"
-                % self.layer_type
+                f"Got unexpected donwsampletype {self.layer_type}, expected is [none, timepreserve, half]"
             )
 
     def forward(self, x):
@@ -116,8 +115,7 @@ class DownSample(nn.Module):
             return F.avg_pool2d(x, 2)
         else:
             raise RuntimeError(
-                "Got unexpected donwsampletype %s, expected is [none, timepreserve, half]"
-                % self.layer_type
+                f"Got unexpected donwsampletype {self.layer_type}, expected is [none, timepreserve, half]"
             )
 
 
@@ -135,8 +133,7 @@ class UpSample(nn.Module):
             return F.interpolate(x, scale_factor=2, mode="nearest")
         else:
             raise RuntimeError(
-                "Got unexpected upsampletype %s, expected is [none, timepreserve, half]"
-                % self.layer_type
+                f"Got unexpected upsampletype {self.layer_type}, expected is [none, timepreserve, half]"
             )
 
 
@@ -186,28 +183,26 @@ class ResBlk(nn.Module):
 class StyleEncoder(nn.Module):
     def __init__(self, dim_in=48, style_dim=48, max_conv_dim=384):
         super().__init__()
-        blocks = []
-        blocks += [spectral_norm(nn.Conv2d(1, dim_in, 3, 1, 1))]
+        blocks = [spectral_norm(nn.Conv2d(1, dim_in, 3, 1, 1))]
 
         repeat_num = 4
         for _ in range(repeat_num):
             dim_out = min(dim_in * 2, max_conv_dim)
-            blocks += [ResBlk(dim_in, dim_out, downsample="half")]
+            blocks.append(ResBlk(dim_in, dim_out, downsample="half"))
             dim_in = dim_out
 
-        blocks += [nn.LeakyReLU(0.2)]
-        blocks += [spectral_norm(nn.Conv2d(dim_out, dim_out, 5, 1, 0))]
-        blocks += [nn.AdaptiveAvgPool2d(1)]
-        blocks += [nn.LeakyReLU(0.2)]
-        self.shared = nn.Sequential(*blocks)
+        blocks.append(nn.LeakyReLU(0.2))
+        blocks.append(spectral_norm(nn.Conv2d(dim_out, dim_out, 5, 1, 0)))
+        blocks.append(nn.AdaptiveAvgPool2d(1))
+        blocks.append(nn.LeakyReLU(0.2))
 
+        self.shared = nn.Sequential(*blocks)
         self.unshared = nn.Linear(dim_out, style_dim)
 
     def forward(self, x):
         h = self.shared(x)
         h = h.view(h.size(0), -1)
         s = self.unshared(h)
-
         return s
 
 
@@ -562,7 +557,10 @@ class ProsodyPredictor(nn.Module):
         # if you want to use hopfield, just comment out the block above, then hash the "self.shared below"
 
         self.text_encoder = DurationEncoder(
-            sty_dim=style_dim, d_model=d_hid, nlayers=nlayers, dropout=dropout
+            sty_dim=style_dim,
+            d_model=d_hid,
+            nlayers=nlayers,
+            dropout=dropout,
         )
 
         self.lstm = xLSTMBlockStack(self.cfg)
@@ -889,10 +887,13 @@ def build_model(args, text_aligner, pitch_extractor, bert):
         )
 
     text_encoder = TextEncoder(
-        channels=args.hidden_dim, kernel_size=5, depth=args.n_layer, n_symbols=args.n_token
+        channels=args.hidden_dim,
+        kernel_size=5,
+        depth=args.n_layer,
+        n_symbols=args.n_token,
     )
 
-    predictor = ProsodyPredictor(
+    prosodic_predictor = ProsodyPredictor(
         style_dim=args.style_dim,
         d_hid=args.hidden_dim,
         nlayers=args.n_layer,
@@ -900,12 +901,20 @@ def build_model(args, text_aligner, pitch_extractor, bert):
         dropout=args.dropout,
     )
 
-    style_encoder = StyleEncoder(
-        dim_in=args.dim_in, style_dim=args.style_dim, max_conv_dim=args.hidden_dim
-    )  # acoustic style encoder
-    predictor_encoder = StyleEncoder(
-        dim_in=args.dim_in, style_dim=args.style_dim, max_conv_dim=args.hidden_dim
-    )  # prosodic style encoder
+    # Acoustic style encoder
+    acoustic_style_encoder = StyleEncoder(
+        dim_in=args.dim_in,
+        dim_spk_emb=512,
+        style_dim=args.style_dim,
+        max_conv_dim=args.max_conv_dim,
+    )
+
+    # Prosodic style encoder
+    prosodic_style_encoder = StyleEncoder(
+        dim_in=args.dim_in,
+        style_dim=args.style_dim,
+        max_conv_dim=args.max_conv_dim,
+    )
 
     # define diffusion model
     if args.multispeaker:
@@ -926,7 +935,8 @@ def build_model(args, text_aligner, pitch_extractor, bert):
         in_channels=1,
         embedding_max_length=bert.config.max_position_embeddings,
         embedding_features=bert.config.hidden_size,
-        embedding_mask_proba=args.diffusion.embedding_mask_proba,  # Conditional dropout of batch elements,
+        # Conditional dropout of batch elements
+        embedding_mask_proba=args.diffusion.embedding_mask_proba,
         channels=args.style_dim * 2,
         context_features=args.style_dim * 2,
     )
@@ -936,7 +946,8 @@ def build_model(args, text_aligner, pitch_extractor, bert):
         sigma_distribution=LogNormalDistribution(
             mean=args.diffusion.dist.mean, std=args.diffusion.dist.std
         ),
-        sigma_data=args.diffusion.dist.sigma_data,  # a placeholder, will be changed dynamically when start training diffusion model
+        # a placeholder, will be changed dynamically when start training diffusion model
+        sigma_data=args.diffusion.dist.sigma_data,
         dynamic_threshold=0.0,
     )
     diffusion.diffusion.net = transformer
@@ -945,11 +956,11 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     nets = Munch(
         bert=bert,
         bert_encoder=nn.Linear(bert.config.hidden_size, args.hidden_dim),
-        predictor=predictor,
+        prosodic_predictor=prosodic_predictor,
         decoder=decoder,
         text_encoder=text_encoder,
-        predictor_encoder=predictor_encoder,
-        style_encoder=style_encoder,
+        prosodic_style_encoder=prosodic_style_encoder,
+        acoustic_style_encoder=acoustic_style_encoder,
         diffusion=diffusion,
         text_aligner=text_aligner,
         pitch_extractor=pitch_extractor,
