@@ -865,7 +865,6 @@ def build_model(args, text_aligner, pitch_extractor, bert):
         decoder = ISTFTDecoder(
             dim_in=args.hidden_dim,
             style_dim=args.style_dim,
-            dim_out=args.n_mels,
             resblock_kernel_sizes=args.decoder.resblock_kernel_sizes,
             upsample_rates=args.decoder.upsample_rates,
             upsample_initial_channel=args.decoder.upsample_initial_channel,
@@ -878,7 +877,6 @@ def build_model(args, text_aligner, pitch_extractor, bert):
         decoder = HifiDecoder(
             dim_in=args.hidden_dim,
             style_dim=args.style_dim,
-            dim_out=args.n_mels,
             resblock_kernel_sizes=args.decoder.resblock_kernel_sizes,
             upsample_rates=args.decoder.upsample_rates,
             upsample_initial_channel=args.decoder.upsample_initial_channel,
@@ -904,7 +902,6 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     # Acoustic style encoder
     acoustic_style_encoder = StyleEncoder(
         dim_in=args.dim_in,
-        dim_spk_emb=512,
         style_dim=args.style_dim,
         max_conv_dim=args.max_conv_dim,
     )
