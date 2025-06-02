@@ -53,7 +53,7 @@ if [[ -z $JOBID ]]; then
      # No deps at the beginning
      DEPS=""
 else
-     DEPS="-W depend=afterany:$JOBID"
+     DEPS="-W depend=afterok:$JOBID"
 fi
 
 # Check run specification and set queue and cluster to run on
@@ -88,10 +88,13 @@ SELECT="-l select=1:ncpus=$NCPUS:mem=$MEM:$SCRATCH_TYPE=$LSCRATCH:ngpus=$NGPUS$C
 # Walltime argument
 WALLTIME="-l walltime=$HOURS:00:00"
 
-# Extract name of the experiment
-EXP="$(basename $EXPDIR)_stage1"
+# Prepare name of the run: config1a.yml -> 1a
+BASENAME_CFG=$(basename "$CFG")
+TEMP_RUN="${BASENAME_CFG#config}"  # Remove 'config' prefix
+RUN="${TEMP_RUN%.*}"               # Remove file extension
+EXP=$(basename $EXPDIR)_$RUN  # Set name of the experiment
 
-# # Timestep to differentiate among runs with the same run name
+# Timestep to differentiate among runs with the same run name
 TIMESTEP=$(date +"%y%m%d-%H%M%S")
 
 SINGULARITY=/storage/plzen4-ntis/projects/singularity/papermill_24.12-r8.sh
@@ -103,8 +106,8 @@ sed -i "/^log_dir:/c\log_dir: $EXPDIR" $CFG
 # -----------------------------------------------------------------------------
 # RUN TRAINING
 # -----------------------------------------------------------------------------
-OLOG=$EXPDIR/stage1.$TIMESTEP.log
-ONTB=$EXPDIR/$(basename "$INTB" .ipynb).processed.$TIMESTEP.ipynb
+OLOG=$EXPDIR/stage$RUN.$TIMESTEP.log
+ONTB=$EXPDIR/stage$RUN.$TIMESTEP.ipynb
 
 # Run PBS script
 JOBID=$(qsub -N "$EXP" \

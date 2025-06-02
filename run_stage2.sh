@@ -53,7 +53,7 @@ if [[ -z $JOBID ]]; then
      # No deps at the beginning
      DEPS=""
 else
-     DEPS="-W depend=afterany:$JOBID"
+     DEPS="-W depend=afterok:$JOBID"
 fi
 
 # Check run specification and set queue and cluster to run on
@@ -88,8 +88,8 @@ SELECT="-l select=1:ncpus=$NCPUS:mem=$MEM:$SCRATCH_TYPE=$LSCRATCH:ngpus=$NGPUS$C
 # Walltime argument
 WALLTIME="-l walltime=$HOURS:00:00"
 
-# Extract name of the experiment
-EXP="$(basename $EXPDIR)_stage2"
+RUN=$(basename $CFG .yml)  # Extract name of the run (= config file)
+EXP=$(basename $EXPDIR)_$RUN  # Set name of the experiment
 
 # Timestep to differentiate among runs with the same run name
 TIMESTEP=$(date +"%y%m%d-%H%M%S")
@@ -110,11 +110,11 @@ fi
 # -----------------------------------------------------------------------------
 # RUN TRAINING
 # -----------------------------------------------------------------------------
-OLOG=$EXPDIR/stage2.$TIMESTEP.log
-ONTB=$EXPDIR/$(basename "$INTB" .ipynb).processed.$TIMESTEP.ipynb
+OLOG=$EXPDIR/$RUN.$TIMESTEP.log
+ONTB=$EXPDIR/$(basename "$INTB" .ipynb).$RUN.processed.$TIMESTEP.ipynb
 
 # Run PBS script
-JOBID=$(qsub -N "$EXP" \
+JOBID=$(qsub -N $EXP \
      $QUEUE \
      -j oe \
      -o $OLOG \
