@@ -51,7 +51,7 @@ def main():
 
     # Stage 1: epochs = 0 - TMA
     config_out = copy.deepcopy(config)
-    config_out["epochs"]["stage1"] = config["epochs"]["tma"]  # Set TMA epoch as the last epoch
+    config_out["epochs"]["stage1"] = settings["start1"]["epochs"]  # Set TMA epoch as the last epoch
     config_out["batch_size"] = settings["start1"]["batch_size"]
     config_out["grad_accum_steps"] = settings["start1"]["grad_accum_steps"]
     config_out["max_len"] = settings["start1"]["max_len"]
@@ -63,7 +63,7 @@ def main():
 
     # Stage 1: epochs = TMA - end
     config_out = copy.deepcopy(config)
-    config_out["epochs"]["stage1"] = config["epochs"]["stage1"]  # Set TMA epoch as the last epoch
+    config_out["epochs"]["stage1"] = settings["tma"]["epochs"]  # Set TMA epoch as the last epoch
     config_out["batch_size"] = settings["tma"]["batch_size"]
     config_out["grad_accum_steps"] = settings["tma"]["grad_accum_steps"]
     config_out["max_len"] = settings["tma"]["max_len"]
@@ -77,8 +77,8 @@ def main():
 
     # Stage 2: epochs = 0 - diffusion
     config_out = copy.deepcopy(config)
-    config_out["epochs"]["stage2"] = config["epochs"][
-        "diff"
+    config_out["epochs"]["stage2"] = settings["start2"][
+        "epochs"
     ]  # Set diffusion epoch as the last epoch
     config_out["batch_size"] = settings["start2"]["batch_size"]
     config_out["max_len"] = settings["start2"]["max_len"]
@@ -90,7 +90,7 @@ def main():
 
     # Stage 2: epochs = diffusion - joint training
     config_out = copy.deepcopy(config)
-    config_out["epochs"]["stage2"] = config["epochs"]["joint"]  # Set joint epoch as the last epoch
+    config_out["epochs"]["stage2"] = settings["diff"]["epochs"]  # Set joint epoch as the last epoch
     config_out["batch_size"] = settings["diff"]["batch_size"]
     config_out["max_len"] = settings["diff"]["max_len"]
     config_out["data_params"]["train_data"] = settings["diff"]["train_data"]
@@ -104,7 +104,7 @@ def main():
 
     # Stage 2: epochs =  joint training - end
     config_out = copy.deepcopy(config)
-    config_out["epochs"]["stage2"] = config["epochs"]["stage2"]  # Set joint epoch as the last epoch
+    config_out["epochs"]["stage2"] = settings["joint"]["epochs"]  # Set joint epoch = last epoch
     config_out["batch_size"] = settings["joint"]["batch_size"]
     config_out["max_len"] = settings["joint"]["max_len"]
     config_out["data_params"]["train_data"] = settings["joint"]["train_data"]

@@ -90,7 +90,8 @@ WALLTIME="-l walltime=$HOURS:00:00"
 
 # Prepare name of the run: config1a.yml -> 1a
 BASENAME_CFG=$(basename "$CFG")
-RUN="${BASENAME_CFG#config}%.*}"  # Remove 'config' prefix and file extension
+TEMP_RUN="${BASENAME_CFG#config}"  # Remove 'config' prefix
+RUN="${TEMP_RUN%.*}"               # Remove file extension
 EXP=$(basename $EXPDIR)_$RUN  # Set name of the experiment
 
 # Timestep to differentiate among runs with the same run name
