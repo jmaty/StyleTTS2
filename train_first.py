@@ -81,8 +81,6 @@ def main():
         # writer = SummaryWriter(osp.join(log_dir, "tensorboard"))
         # Initialize the wandb logger and name wandb project and run
         wb_logger = wandb.init(
-            # Set the wandb entity where your project will be logged (generally your team name).
-            # entity="my-awesome-team-name",
             # Set the wandb project where this run will be logged.
             project="StyleTTS2-spkenc",
             # Set run name
@@ -282,7 +280,7 @@ def main():
     # # Total number of steps given the batch size
     # tot_num_steps = len(train_list) // batch_size
     # Number of steps per epoch for the current process
-    steps_this_epoch = len(train_dataloader)
+    steps_per_epoch = len(train_dataloader)
 
     best_loss = float("inf")  # best test loss
 
@@ -290,7 +288,7 @@ def main():
         logger.info(" > Start training cycles:")
         logger.info(" | > Starting epoch:   %d", start_epoch)
         logger.info(" | > Total epochs:     %d", epochs)
-        logger.info(" | > Steps per epoch:  %d", steps_this_epoch)
+        logger.info(" | > Steps per epoch:  %d", steps_per_epoch)
         logger.info(" | > Input iterations: %d\n", iters)
 
     # === Start of training loop ==============================================
@@ -315,7 +313,7 @@ def main():
             (
                 spk_embs,  # Speaker embeddings [B, 512]
                 phonemes,  # Padded input phoneme IDs [B, T_text]
-                ph_inp_lengths,  # Input phoneme lengths [B]
+                ph_inp_lens,  # Input phoneme lengths [B]
                 _,
                 _,
                 mels,  # Padded mel spectrograms [B, n_mels, T_mel]
@@ -327,7 +325,7 @@ def main():
             with torch.no_grad():
                 # `2**n_down` scaling ensures the mask aligns with the downsampled feature dimension
                 mel_mask = length_to_mask(mel_inp_len // (2**n_down)).to(mel_inp_len.device)
-                ph_mask = length_to_mask(ph_inp_lengths).to(phonemes.device)
+                ph_mask = length_to_mask(ph_inp_lens).to(phonemes.device)
 
             # Align text and audio (mel)
             _, s2s_pred, d_algn = model.text_aligner(mels, mel_mask, phonemes)
@@ -358,11 +356,11 @@ def main():
 
             with torch.no_grad():
                 # Create monotonic attention
-                mask_st = mask_from_lens(d_algn, ph_inp_lengths, mel_inp_len // (2**n_down))
+                mask_st = mask_from_lens(d_algn, ph_inp_lens, mel_inp_len // (2**n_down))
                 d_algn_mono = maximum_path(d_algn, mask_st)
 
             # Encode
-            h_ph = model.text_encoder(phonemes, ph_inp_lengths, ph_mask)
+            h_ph = model.text_encoder(phonemes, ph_inp_lens, ph_mask)
 
             # 50% of chance of using monotonic version
             if bool(random.getrandbits(1)):
@@ -486,7 +484,7 @@ def main():
                 # Seq2seq loss measures the difference between the predicted and
                 # ground truth text tokens
                 loss_s2s = 0
-                for _s2s_pred, _text_input, _text_length in zip(s2s_pred, phonemes, ph_inp_lengths):
+                for _s2s_pred, _text_input, _text_length in zip(s2s_pred, phonemes, ph_inp_lens):
                     loss_s2s += F.cross_entropy(
                         _s2s_pred[:_text_length], _text_input[:_text_length]
                     )
@@ -564,14 +562,14 @@ def main():
                     epoch + 1,
                     epochs,
                     batch_idx + 1,
-                    steps_this_epoch,  # tot_num_steps,
+                    steps_per_epoch,  # tot_num_steps,
                     mel_loss,
                     loss_gen_all,
                     loss_disc,
                     loss_mono,
                     loss_s2s,
                     loss_slm,
-                    model.acoustic_style_encoder.fusion_weight.item(),
+                    accelerator.unwrap_model(model.acoustic_style_encoder).fusion_weight.item(),
                 )
                 # writer.add_scalar("train/mel_loss", mel_loss, iters)
                 # writer.add_scalar("train/gen_loss", loss_gen_all, iters)
@@ -595,11 +593,13 @@ def main():
                     {
                         "train/mel_loss": mel_loss,
                         "train/gen_loss": loss_gen_all,
-                        "train/d_loss": loss_disc,
+                        "train/disc_loss": loss_disc,
                         "train/mono_loss": loss_mono,
                         "train/s2s_loss": loss_s2s,
                         "train/slm_loss": loss_slm,
-                        "train/fusion_weight": model.acoustic_style_encoder.fusion_weight.item(),
+                        "train/fusion_weight": accelerator.unwrap_model(
+                            model.acoustic_style_encoder
+                        ).fusion_weight.item(),
                         "train/curr_vram": curr_vram,
                         "train/max_vram": max_vram,
                         "train/epoch": epoch,
@@ -634,7 +634,7 @@ def main():
                 (
                     spk_embs,  # Speaker embeddings [B, 512]
                     phonemes,  # Padded input phoneme IDs [B, T_text]
-                    ph_inp_lengths,  # Input phoneme lengths [B]
+                    ph_inp_lens,  # Input phoneme lengths [B]
                     _,
                     _,
                     mels,  # Padded mel spectrograms [B, n_mels, T_mel]
@@ -650,7 +650,7 @@ def main():
                     d_algn = d_algn[..., 1:]
                     d_algn = d_algn.transpose(-1, -2)
 
-                    ph_mask = length_to_mask(ph_inp_lengths).to(phonemes.device)
+                    ph_mask = length_to_mask(ph_inp_lens).to(phonemes.device)
                     attn_mask = (
                         (~mel_mask)
                         .unsqueeze(-1)
@@ -669,7 +669,7 @@ def main():
                     d_algn.masked_fill_(attn_mask, 0.0)
 
                 # encode
-                h_ph = model.text_encoder(phonemes, ph_inp_lengths, ph_mask)
+                h_ph = model.text_encoder(phonemes, ph_inp_lens, ph_mask)
 
                 h_algn = h_ph @ d_algn
 
@@ -730,7 +730,7 @@ def main():
 
         if accelerator.is_main_process:
             logger.info(
-                "Epoch [%3d/%d]: validation loss: %.3f",
+                "Epoch [%3d/%d]: Validation loss: %.3f",
                 epoch + 1,
                 epochs,
                 loss_test / iters_test,
