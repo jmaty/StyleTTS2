@@ -629,60 +629,138 @@ class ProsodyPredictor(nn.Module):
         self.f0_proj = nn.Conv1d(d_hid // 2, 1, 1, 1, 0)
         self.n_proj = nn.Conv1d(d_hid // 2, 1, 1, 1, 0)
 
-    def forward(self, texts, style, text_lengths=None, alignment=None, m=None, f0=None):
-        if f0:
-            x, s = texts, style
-            # x  = self.prepare_projection(x.transpose(-1, -2))
-            # x = self.shared(x)
+    # def forward(self, texts, style, text_lengths=None, alignment=None, m=None, f0=None):
+    #     if f0:
+    #         x, s = texts, style
+    #         # x  = self.prepare_projection(x.transpose(-1, -2))
+    #         # x = self.shared(x)
 
-            x = self.shared(x.transpose(-1, -2))
-            x = self.prepare_projection(x)
+    #         x = self.shared(x.transpose(-1, -2))
+    #         x = self.prepare_projection(x)
 
-            f0o = x.transpose(-1, -2)
-            for block in self.F0:
-                f0o = block(f0o, s)
-            f0o = self.f0_proj(f0o)
+    #         f0o = x.transpose(-1, -2)
+    #         for block in self.f0:
+    #             f0o = block(f0o, s)
+    #         f0o = self.f0_proj(f0o)
 
-            n = x.transpose(-1, -2)
-            for block in self.n:
-                n = block(n, s)
-            n = self.N_proj(n)
+    #         n = x.transpose(-1, -2)
+    #         for block in self.n:
+    #             n = block(n, s)
+    #         n = self.n_proj(n)
 
-            return f0o.squeeze(1), n.squeeze(1)
-        else:
-            # Problem is here
-            d = self.text_encoder(texts, style, text_lengths, m)
+    #         return f0o.squeeze(1), n.squeeze(1)
+    #     else:
+    #         # Problem is here
+    #         d = self.text_encoder(texts, style, text_lengths, m)
 
-            # batch_size = d.shape[0]
-            # text_size = d.shape[1]
+    #         # batch_size = d.shape[0]
+    #         # text_size = d.shape[1]
 
-            # # predict duration
-            # input_lengths = text_lengths.cpu().numpy()
+    #         # # predict duration
+    #         # input_lengths = text_lengths.cpu().numpy()
 
-            # x = nn.utils.rnn.pack_padded_sequence(
-            #     d, input_lengths, batch_first=True, enforce_sorted=False)
-            x = d  # this dude can handle variable seq len so no need for padding
-            m = m.to(text_lengths.device).unsqueeze(1)
+    #         # x = nn.utils.rnn.pack_padded_sequence(
+    #         #     d, input_lengths, batch_first=True, enforce_sorted=False)
+    #         x = d  # this dude can handle variable seq len so no need for padding
+    #         m = m.to(text_lengths.device).unsqueeze(1)
 
-            x = self.lstm(x)  # no longer using lstm
-            x = self.prepare_projection(x)
+    #         x = self.lstm(x)  # no longer using lstm
+    #         x = self.prepare_projection(x)
 
-            # x, _ = nn.utils.rnn.pad_packed_sequence(
-            #     x, batch_first=True)
+    #         # x, _ = nn.utils.rnn.pad_packed_sequence(
+    #         #     x, batch_first=True)
 
-            # x_pad = torch.zeros([x.shape[0], m.shape[-1], x.shape[-1]])
+    #         # x_pad = torch.zeros([x.shape[0], m.shape[-1], x.shape[-1]])
 
-            # x_pad[:, :x.shape[1], :] = x
-            # x = x_pad.to(x.device)
+    #         # x_pad[:, :x.shape[1], :] = x
+    #         # x = x_pad.to(x.device)
 
-            x = x.transpose(-1, -2)
-            x = x.permute(0, 2, 1)
-            duration = self.duration_proj(nn.functional.dropout(x, 0.5, training=self.training))
+    #         x = x.transpose(-1, -2)
+    #         x = x.permute(0, 2, 1)
+    #         duration = self.duration_proj(nn.functional.dropout(x, 0.5, training=self.training))
 
-            en = d.transpose(-1, -2) @ alignment
+    #         en = d.transpose(-1, -2) @ alignment
 
-            return duration.squeeze(-1), en
+    #         return duration.squeeze(-1), en
 
+    def forward(self, texts, style, text_lengths=None, alignment=None, mask=None, compute_f0=False):
+        """Forward pass of the model.
+        This method performs one of two main operations based on the `compute_f0` flag:
+        1.  If `compute_f0` is True: It predicts F0 (fundamental frequency) and
+            normalized energy using `self.F0Ntrain(texts, style)` and returns these
+            predictions.
+        2.  If `compute_f0` is False: It predicts token durations and an aligned
+            encoded representation. This involves:
+            - Encoding input `texts` and `style` via `self.text_encoder`, potentially
+              using `text_lengths` and `mask`.
+            - Processing the encoded output (`d`) through `self.lstm` and
+              `self.prepare_projection`. The mask is also utilized here.
+            - Predicting durations using `self.duration_proj` on the processed tensor
+              after transposing and permuting it. Dropout is applied during training.
+            - Calculating an aligned encoded representation `en` by matrix multiplying
+              the transposed encoded text (`d`) with the provided `alignment`.
+        Args:
+            texts (torch.Tensor): Input text sequences.
+            style (torch.Tensor): Style embedding or information.
+            text_lengths (torch.Tensor, optional): Lengths of the input text sequences.
+                Used by `self.text_encoder`. Defaults to None.
+            alignment (torch.Tensor, optional): Pre-computed alignment matrix, used for
+                calculating `en` if `compute_f0` is False. Defaults to None.
+            mask (torch.Tensor, optional): Mask for the input text sequences.
+                Used by `self.text_encoder` and for subsequent processing steps if
+                `compute_f0` is False. Defaults to None.
+            compute_f0 (bool, optional): If True, computes and returns F0 and
+                normalized energy. Otherwise, predicts duration and `en`.
+                Defaults to False.
+        Returns:
+            torch.Tensor or tuple[torch.Tensor, torch.Tensor]:
+            - If `compute_f0` is True: The output of `self.F0Ntrain(texts, style)`.
+            - If `compute_f0` is False: A tuple `(duration, en)` where:
+                - `duration` (torch.Tensor): Predicted durations for each token,
+                  with the last dimension squeezed. Shape: (batch_size, text_seq_len).
+                - `en` (torch.Tensor): Encoded representation weighted by `alignment`.
+                  Shape depends on `d` and `alignment`.
+        """
+        if compute_f0:
+            # Predict F0 and norm energy and return
+            return self.F0Ntrain(texts, style)
+
+        # Predict duration and alignment
+
+        # Problem is here
+        d = self.text_encoder(texts, style, text_lengths, mask)
+
+        # batch_size = d.shape[0]
+        # text_size = d.shape[1]
+
+        # # predict duration
+        # input_lengths = text_lengths.cpu().numpy()
+
+        # x = nn.utils.rnn.pack_padded_sequence(
+        #     d, input_lengths, batch_first=True, enforce_sorted=False)
+        x = d  # this dude can handle variable seq len so no need for padding
+        mask = mask.to(text_lengths.device).unsqueeze(1)
+
+        x = self.lstm(x)  # no longer using lstm
+        x = self.prepare_projection(x)
+
+        # x, _ = nn.utils.rnn.pad_packed_sequence(
+        #     x, batch_first=True)
+
+        # x_pad = torch.zeros([x.shape[0], m.shape[-1], x.shape[-1]])
+
+        # x_pad[:, :x.shape[1], :] = x
+        # x = x_pad.to(x.device)
+
+        x = x.transpose(-1, -2)
+        x = x.permute(0, 2, 1)
+        duration = self.duration_proj(nn.functional.dropout(x, 0.5, training=self.training))
+
+        en = d.transpose(-1, -2) @ alignment
+
+        return duration.squeeze(-1), en
+
+    # Train F0 and norm energy
     def F0Ntrain(self, x, s):
         x = self.shared(x.transpose(-1, -2))
         x = self.prepare_projection(x)
