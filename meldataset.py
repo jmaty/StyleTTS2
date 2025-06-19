@@ -253,6 +253,10 @@ class FilePathDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.data_list)
 
+    def number_ood_texts(self):
+        """Returns the number of out-of-distribution (OOD) texts."""
+        return len(self.ptexts)
+
     def __getitem__(self, idx):
         """
         Retrieves a data sample for the given index.
