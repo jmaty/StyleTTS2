@@ -216,6 +216,12 @@ def main():
         device=device,
         dataset_config=dataset_config,
     )
+    if accelerator.is_main_process:  # Přidat tuto podmínku
+        wb_logger.summary["n_train_samples"] = len(train_dataloader.dataset)
+        wb_logger.summary["n_valid_samples"] = len(val_dataloader.dataset)
+        wb_logger.summary["n_ood_texts"] = train_dataloader.dataset.number_ood_texts()
+
+    # Prepare dataloaders for accelerated training
     train_dataloader, val_dataloader = accelerator.prepare(train_dataloader, val_dataloader)
 
     scheduler_params = {

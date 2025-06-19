@@ -207,6 +207,9 @@ def main():
         device=device,
         dataset_config=dataset_config,
     )
+    wb_logger.summary["n_train_samples"] = len(train_dataloader.dataset)
+    wb_logger.summary["n_valid_samples"] = len(val_dataloader.dataset)
+    wb_logger.summary["n_ood_texts"] = train_dataloader.dataset.number_ood_texts()
 
     # Move models to device (cuda)
     _ = [model[key].to(device) for key in model]
@@ -996,13 +999,25 @@ def main():
                     # Pre-allocate tensors with the calculated fixed length
                     # Note: Style tensor `mel_st` is not used in validation
                     ph_algn = torch.empty(
-                        bsize, h_algn.shape[1], mel_len_gt, device=device, dtype=h_algn.dtype
+                        bsize,
+                        h_algn.shape[1],
+                        mel_len_gt,
+                        device=device,
+                        dtype=h_algn.dtype,
                     )
                     pros_algn = torch.empty(
-                        bsize, p_algn.shape[1], mel_len_gt, device=device, dtype=h_algn.dtype
+                        bsize,
+                        p_algn.shape[1],
+                        mel_len_gt,
+                        device=device,
+                        dtype=h_algn.dtype,
                     )
                     mel_gt = torch.empty(
-                        bsize, mels.shape[1], mel_len_gt * 2, device=device, dtype=mels.dtype
+                        bsize,
+                        mels.shape[1],
+                        mel_len_gt * 2,
+                        device=device,
+                        dtype=mels.dtype,
                     )
                     wav_gt = torch.empty(bsize, wav_len, device=device, dtype=torch.float)
 
@@ -1035,7 +1050,11 @@ def main():
 
                     # Predict F0 and Norm using predicted components
                     # f0_fake, n_fake = model.prosodic_predictor.F0Ntrain(pros_algn, pros_style)
-                    f0_fake, n_fake = model.prosodic_predictor(pros_algn, pros_style, compute_f0=True)
+                    f0_fake, n_fake = model.prosodic_predictor(
+                        pros_algn,
+                        pros_style,
+                        compute_f0=True,
+                    )
 
                     loss_dur = 0
                     for _s2s_pred, _text_input, _text_length in zip(d, (d_gt), ph_inp_lens):
