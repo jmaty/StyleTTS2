@@ -29,7 +29,7 @@ from Modules.pts import PTS
 from Modules.slmadv import SLMAdversarialLoss
 from optimizers import build_optimizer
 from text_utils import TextCleaner
-from utils import get_data_path_list, length_to_mask, log_norm, maximum_path  # , recursive_munch
+from utils import get_data_path_list, length_to_mask, log_norm, maximum_path
 from Utils.PLBERT.util import load_plbert
 
 warnings.simplefilter("ignore")
@@ -75,7 +75,6 @@ def main():
         level_file=args.log_level,
     )
     logger = get_logger(__name__)  # Get a logger
-    # writer = SummaryWriter(osp.join(log_dir, "tensorboard"))
     wb_logger = wandb.init(
         # Set the wandb project where this run will be logged.
         project="StyleTTS2-spkenc",
@@ -84,7 +83,6 @@ def main():
         # Track hyperparameters and run metadata.
         config=config,
         dir=log_dir,
-        # mode="disabled" if INTERACTIVE_MODE else "online",
     )
 
     # Init NVLM
@@ -326,7 +324,6 @@ def main():
     best_loss = float("inf")  # best test loss
     # iters = 0  # !!! Should it be resetting?
 
-    # criterion = nn.L1Loss() # F0 loss (regression)
     torch.cuda.empty_cache()
 
     stft_loss = MultiResolutionSTFTLoss().to(device)
@@ -479,16 +476,6 @@ def main():
                         target_style.std(axis=-1).mean().item()
                     )
                     running_std.append(model.diffusion.module.diffusion.sigma_data)
-
-                    # # Sigma data estimation from running values
-                    # new_sigma_value = s_trg.std(axis=-1).mean().item()
-                    # new_sigma_data = (sigma_data * sigma_count + new_sigma_value) / (
-                    #     sigma_count + 1
-                    # )
-                    # # Update sigma data
-                    # model.diffusion.module.diffusion.sigma_data = new_sigma_data
-                    # sigma_data = new_sigma_data  # update sigma_data
-                    # sigma_count += 1  # increment count
 
                 if multispeaker:
                     pred_style = sampler(
@@ -689,7 +676,6 @@ def main():
             loss_gen.backward()
             # JMa: gradient clipping
             if grad_clip:
-                # _ = [nn.utils.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
                 nn.utils.clip_grad_norm_(model.bert_encoder.parameters(), grad_clip)
                 nn.utils.clip_grad_norm_(model.bert.parameters(), grad_clip)
                 nn.utils.clip_grad_norm_(model.prosodic_predictor.parameters(), grad_clip)
@@ -756,7 +742,6 @@ def main():
                     loss_gen_lm.backward()
                     # JMa: gradient clipping
                     if grad_clip:
-                        # _ = [nn.utils.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
                         nn.utils.clip_grad_norm_(model.bert_encoder.parameters(), grad_clip)
                         nn.utils.clip_grad_norm_(model.bert.parameters(), grad_clip)
                         nn.utils.clip_grad_norm_(model.prosodic_predictor.parameters(), grad_clip)
@@ -854,18 +839,6 @@ def main():
                     loss_gen_lm,
                     model.acoustic_style_encoder.fusion_weight.item(),
                 )
-                # writer.add_scalar("train/mel_loss", mel_loss, iters)
-                # writer.add_scalar("train/gen_loss", loss_gen_all, iters)
-                # writer.add_scalar("train/d_loss", d_loss, iters)
-                # writer.add_scalar("train/ce_loss", loss_ce, iters)
-                # writer.add_scalar("train/dur_loss", loss_dur, iters)
-                # writer.add_scalar("train/slm_loss", loss_lm, iters)
-                # writer.add_scalar("train/norm_loss", loss_norm_rec, iters)
-                # writer.add_scalar("train/F0_loss", loss_f0_rec, iters)
-                # writer.add_scalar("train/sty_loss", loss_sty, iters)
-                # writer.add_scalar("train/diff_loss", loss_diff, iters)
-                # writer.add_scalar("train/d_loss_slm", d_loss_slm, iters)
-                # writer.add_scalar("train/gen_loss_slm", loss_gen_lm, iters)
 
                 # Check current VRAM usage
                 curr_vrams = [
@@ -1100,10 +1073,6 @@ def main():
             avg_loss_align,
             avg_loss_f,
         )
-        # print('\n\n\n')
-        # writer.add_scalar("eval/mel_loss", avg_loss_test, epoch + 1)
-        # writer.add_scalar("eval/dur_loss", avg_dur_loss, epoch + 1)
-        # writer.add_scalar("eval/F0_loss", avg_f_loss, epoch + 1)
         wb_logger.log(
             {
                 "eval/mel_loss": avg_loss_test,
@@ -1186,7 +1155,6 @@ def main():
                     )
 
                     # Write and save val audio
-                    # writer.add_audio(f"pred/y{idx}", wav_pred, epoch, sample_rate=sr)
                     if save_val_audio and epoch % saving_epoch == 0:
                         outfile = f"epoch_2nd_{epoch:0>5}_val-pred-{idx}.wav"
                         pts.save_wav(wav_pred, os.path.join(test_audio_dir, outfile))
@@ -1197,7 +1165,6 @@ def main():
                         if save_val_audio and epoch % saving_epoch == 0:
                             outfile = f"epoch_2nd_{epoch:0>5}_gt-{idx}.wav"
                             pts.save_wav(wav_gt, os.path.join(test_audio_dir, outfile))
-                        # writer.add_audio(f"gt/y{idx}", wav_gt, epoch, sample_rate=sr)
 
         # --- End of validation part ------------------------------------------
 
@@ -1229,9 +1196,6 @@ def main():
                 logger.info(
                     "Estimated sigma: %f", config["model_params"]["diffusion"]["dist"]["sigma_data"]
                 )
-
-                #     config["model_params"]["diffusion"]["dist"]["sigma_data"] = float(np.mean(running_std))
-                #     config["model_params"]["diffusion"]["dist"]["sigma_data"] = sigma_data
 
                 # Save config file updated with estimated sigma
                 cfg_path = osp.join(log_dir, f"{cfg_name}.processed{cfg_ext}")
@@ -1327,13 +1291,6 @@ def main():
         )
     except Exception as e:
         logger.error("Error when reducing model: %s", e)
-    # # if estimate sigma, save the estimated sigma
-    # if epoch >= diff_epoch and model_params.diffusion.dist.estimate_sigma_data:
-    #     # config["model_params"]["diffusion"]["dist"]["sigma_data"] = float(np.mean(running_std))
-    #     config["model_params"]["diffusion"]["dist"]["sigma_data"] = sigma_data
-    #     logger.info(
-    #         "Estimated sigma: %f", config["model_params"]["diffusion"]["dist"]["sigma_data"]
-    #     )
 
     # if estimate sigma, save the estimated sigma to the config file
     if epoch >= diff_epoch and model_params.diffusion.dist.estimate_sigma_data:

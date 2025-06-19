@@ -88,7 +88,6 @@ def main():
             # Track hyperparameters and run metadata.
             config=config,
             dir=log_dir,
-            # mode="disabled" if INTERACTIVE_MODE else "online",
         )
 
     # Set up device
@@ -283,8 +282,6 @@ def main():
     # - use global noise for speed
     pts = PTS(config, model, use_glob_noise=True)
 
-    # # Total number of steps given the batch size
-    # tot_num_steps = len(train_list) // batch_size
     # Number of steps per epoch for the current process
     steps_per_epoch = len(train_dataloader)
 
@@ -401,13 +398,25 @@ def main():
 
             # Pre-allocate tensors with the calculated fixed length
             ph_algn = torch.empty(
-                bsize, h_algn.shape[1], mel_len_gt, device=device, dtype=h_algn.dtype
+                bsize,
+                h_algn.shape[1],
+                mel_len_gt,
+                device=device,
+                dtype=h_algn.dtype,
             )
             mel_gt = torch.empty(
-                bsize, mels.shape[1], mel_len_gt * 2, device=device, dtype=mels.dtype
+                bsize,
+                mels.shape[1],
+                mel_len_gt * 2,
+                device=device,
+                dtype=mels.dtype,
             )
             mel_st = torch.empty(
-                bsize, mels.shape[1], mel_len_st * 2, device=device, dtype=mels.dtype
+                bsize,
+                mels.shape[1],
+                mel_len_st * 2,
+                device=device,
+                dtype=mels.dtype,
             )
             wav_gt = torch.empty(bsize, wav_len, device=device, dtype=torch.float)
 
@@ -553,7 +562,6 @@ def main():
                     # JMa: pitch extractor should not be updated, see:
                     # https://github.com/yl4579/StyleTTS2/issues/10#issuecomment-1783701686
                     # optimizer.step('pitch_extractor')
-                    # optimizer.zero_grad('text_aligner')
 
                 # Zero all gradients
                 optimizer.zero_grad()
@@ -568,7 +576,7 @@ def main():
                     epoch + 1,
                     epochs,
                     batch_idx + 1,
-                    steps_per_epoch,  # tot_num_steps,
+                    steps_per_epoch,
                     mel_loss,
                     loss_gen_all,
                     loss_disc,
@@ -577,12 +585,6 @@ def main():
                     loss_slm,
                     accelerator.unwrap_model(model.acoustic_style_encoder).fusion_weight.item(),
                 )
-                # writer.add_scalar("train/mel_loss", mel_loss, iters)
-                # writer.add_scalar("train/gen_loss", loss_gen_all, iters)
-                # writer.add_scalar("train/d_loss", d_loss, iters)
-                # writer.add_scalar("train/mono_loss", loss_mono, iters)
-                # writer.add_scalar("train/s2s_loss", loss_s2s, iters)
-                # writer.add_scalar("train/slm_loss", loss_slm, iters)
 
                 # Check current VRAM usage
                 curr_vrams = [
@@ -674,7 +676,7 @@ def main():
                     attn_mask = attn_mask < 1
                     d_algn.masked_fill_(attn_mask, 0.0)
 
-                # encode
+                # Encode phonemes
                 h_ph = model.text_encoder(phonemes, ph_inp_lens, ph_mask)
 
                 h_algn = h_ph @ d_algn
@@ -741,9 +743,7 @@ def main():
                 epochs,
                 loss_test / iters_test,
             )
-            # writer.add_scalar("eval/mel_loss", loss_test / iters_test, epoch)
             # attn_image = get_image(s2s_attn[0].cpu().numpy().squeeze())
-            # writer.add_figure("eval/attn", attn_image, epoch)
             wb_logger.log(
                 {"eval/mel_loss": loss_test / iters_test},
                 step=iters,
@@ -763,7 +763,6 @@ def main():
                     )
 
                     # Write and save val audio
-                    # writer.add_audio(f"eval/y{idx}", wav, epoch, sample_rate=sr)
                     if save_val_audio and epoch % saving_epoch == 0:
                         outfile = f"epoch_1st_{epoch:0>5}_val-rec-{idx}.wav"
                         pts.save_wav(wav, osp.join(test_audio_dir, outfile))
@@ -774,7 +773,6 @@ def main():
                         if save_val_audio:
                             outfile = f"epoch_1st_{epoch:0>5}_gt-{idx}.wav"
                             pts.save_wav(wav_gt, os.path.join(test_audio_dir, outfile))
-                        # writer.add_audio(f"gt/y{idx}", wav_gt, epoch, sample_rate=sr)
 
             if epoch % saving_epoch == 0:
                 curr_loss = loss_test / iters_test
