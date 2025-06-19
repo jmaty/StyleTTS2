@@ -1029,10 +1029,11 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     # Acoustic style encoder
     acoustic_style_encoder = AcousticStyleEncoder(
         dim_in=args.dim_in,
-        dim_spk_emb=512,
+        dim_spk_emb=args.dim_spk_emb,
         style_dim=args.style_dim,
         max_conv_dim=args.max_conv_dim,
-        init_fusion_weight=0.01,  # Initial fusion weight
+        # Initial external/internal speaker embedding fusion weight
+        init_fusion_weight=args.init_fusion_weight,
         # No activation function for external speaker embedding reduction
         activation=None,
     )
