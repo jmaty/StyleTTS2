@@ -72,6 +72,7 @@ def main():
     # Distributed computing
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(project_dir=log_dir, split_batches=True, kwargs_handlers=[ddp_kwargs])
+
     if accelerator.is_main_process:
         # Initialize the wandb logger and name wandb project and run
         wb_logger = wandb.init(
@@ -139,10 +140,12 @@ def main():
     text_cleaner = TextCleaner(data_params["symbol_dict_path"], pad=data_params["pad"])
     if accelerator.is_main_process:
         logger.debug("Number of symbols: %d", len(text_cleaner))
-    assert len(text_cleaner) == 81, f"Number of symbols must be 81 but it is {len(text_cleaner)}"
-    assert (
-        model_params.n_token == 81
-    ), f"Number of tokens must be 81 but it is {model_params.n_token}"
+        assert (
+            len(text_cleaner) == 81
+        ), f"Number of symbols must be 81 but it is {len(text_cleaner)}"
+        assert (
+            model_params.n_token == 81
+        ), f"Number of tokens must be 81 but it is {model_params.n_token}"
 
     # Load utility models
     with accelerator.main_process_first():
@@ -212,6 +215,11 @@ def main():
         device=device,
         dataset_config=dataset_config,
     )
+    if accelerator.is_main_process:
+        wb_logger.summary["n_train_samples"] = len(train_dataloader.dataset)
+        wb_logger.summary["n_valid_samples"] = len(val_dataloader.dataset)
+
+    # Prepare dataloaders for accelerated training
     train_dataloader, val_dataloader = accelerator.prepare(train_dataloader, val_dataloader)
 
     scheduler_params = {
@@ -274,7 +282,7 @@ def main():
     pts = PTS(config, model, use_glob_noise=True)
 
     # Number of steps per epoch for the current process
-    steps_this_epoch = len(train_dataloader)
+    steps_per_epoch = len(train_dataloader)
 
     best_loss = float("inf")  # best test loss
 
@@ -282,7 +290,7 @@ def main():
         logger.info(" > Start training cycles:")
         logger.info(" | > Starting epoch:   %d", start_epoch)
         logger.info(" | > Total epochs:     %d", epochs)
-        logger.info(" | > Steps per epoch:  %d", steps_this_epoch)
+        logger.info(" | > Steps per epoch:  %d", steps_per_epoch)
         logger.info(" | > Input iterations: %d\n", iters)
 
     # === Start of training loop ==============================================
@@ -554,7 +562,7 @@ def main():
                     epoch + 1,
                     epochs,
                     batch_idx + 1,
-                    steps_this_epoch,
+                    steps_per_epoch,
                     mel_loss,
                     loss_gen_all,
                     loss_disc,
