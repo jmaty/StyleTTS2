@@ -29,6 +29,7 @@ from Modules.hifigan import Decoder as HifiDecoder
 from Modules.istftnet import Decoder as ISTFTDecoder
 from Utils.ASR.models import ASRCNN
 from Utils.JDC.model import JDCNet
+from Utils.speaker_encoder.models import HASPSpeakerEncoder
 from logger import get_logger
 
 # Setup logger
@@ -180,49 +181,49 @@ class ResBlk(nn.Module):
         return x / math.sqrt(2)  # unit variance
 
 
-class AcousticStyleEncoder(nn.Module):
-    def __init__(
-        self,
-        dim_in=48,
-        dim_spk_emb=512,
-        style_dim=128,
-        max_conv_dim=384,
-        init_fusion_weight=0.01,
-        activation=None,
-    ):
-        """Initialize the Acoustic Style Encoder.
-        Args:
-            dim_in (int, optional): Input dimension for the projection layer. Defaults to 48.
-            dim_spk_emb (int, optional): Dimension of the external speaker embedding. Defaults to 512.
-            style_dim (int, optional): Output dimension for the projection layer, representing the style embedding dimension. Defaults to 128.
-            initial_fusion_weight (float, optional): Initial value for the trainable fusion weight. Defaults to 0.01.
-            activation (torch.nn.Module, optional): Activation function to apply after the projection. Defaults to None.
-        """
-        super().__init__()
-        self.project = nn.Linear(dim_spk_emb, style_dim)
-        self.activation = activation
-        self.style_encoder = StyleEncoder(
-            dim_in=dim_in,
-            style_dim=style_dim,
-            max_conv_dim=max_conv_dim,
-        )
-        # Initialize the fusion weight as a trainable parameter
-        self.fusion_weight = nn.Parameter(torch.tensor(init_fusion_weight))
+# class AcousticStyleEncoder(nn.Module):
+#     def __init__(
+#         self,
+#         dim_in=48,
+#         dim_spk_emb=512,
+#         style_dim=128,
+#         max_conv_dim=384,
+#         init_fusion_weight=0.01,
+#         activation=None,
+#     ):
+#         """Initialize the Acoustic Style Encoder.
+#         Args:
+#             dim_in (int, optional): Input dimension for the projection layer. Defaults to 48.
+#             dim_spk_emb (int, optional): Dimension of the external speaker embedding. Defaults to 512.
+#             style_dim (int, optional): Output dimension for the projection layer, representing the style embedding dimension. Defaults to 128.
+#             initial_fusion_weight (float, optional): Initial value for the trainable fusion weight. Defaults to 0.01.
+#             activation (torch.nn.Module, optional): Activation function to apply after the projection. Defaults to None.
+#         """
+#         super().__init__()
+#         self.project = nn.Linear(dim_spk_emb, style_dim)
+#         self.activation = activation
+#         self.style_encoder = StyleEncoder(
+#             dim_in=dim_in,
+#             style_dim=style_dim,
+#             max_conv_dim=max_conv_dim,
+#         )
+#         # Initialize the fusion weight as a trainable parameter
+#         self.fusion_weight = nn.Parameter(torch.tensor(init_fusion_weight))
 
-    def forward(self, x, spk_emb):
-        """
-        Forward pass of the module.
-        Args:
-            x (torch.Tensor): External speaker embedding.
-            s (torch.Tensor): Style embedding.
-        Returns:
-            torch.Tensor: The output tensor after projection, optional activation, and addition of `s`.
-        """
-        spk_emb = self.project(spk_emb)
-        if self.activation:
-            spk_emb = self.activation(spk_emb)
+#     def forward(self, x, spk_emb):
+#         """
+#         Forward pass of the module.
+#         Args:
+#             x (torch.Tensor): External speaker embedding.
+#             s (torch.Tensor): Style embedding.
+#         Returns:
+#             torch.Tensor: The output tensor after projection, optional activation, and addition of `s`.
+#         """
+#         spk_emb = self.project(spk_emb)
+#         if self.activation:
+#             spk_emb = self.activation(spk_emb)
 
-        return self.style_encoder(x) + self.fusion_weight * spk_emb
+#         return self.style_encoder(x) + self.fusion_weight * spk_emb
 
 
 class StyleEncoder(nn.Module):
@@ -592,15 +593,6 @@ class ProsodyPredictor(nn.Module):
             embedding_dim=d_hid + style_dim,
         )
 
-        # self.shared = Hopfield(input_size=d_hid + style_dim,
-        #                             hidden_size=d_hid // 2,
-        #                             num_heads=32,
-        #                             # scaling=.75,
-        #                             add_zero_association=True,
-        #                             batch_first=True)
-
-        # if you want to use hopfield, just comment out the block above, then hash the "self.shared below"
-
         self.text_encoder = DurationEncoder(
             sty_dim=style_dim,
             d_model=d_hid,
@@ -628,60 +620,6 @@ class ProsodyPredictor(nn.Module):
 
         self.f0_proj = nn.Conv1d(d_hid // 2, 1, 1, 1, 0)
         self.n_proj = nn.Conv1d(d_hid // 2, 1, 1, 1, 0)
-
-    # def forward(self, texts, style, text_lengths=None, alignment=None, m=None, f0=None):
-    #     if f0:
-    #         x, s = texts, style
-    #         # x  = self.prepare_projection(x.transpose(-1, -2))
-    #         # x = self.shared(x)
-
-    #         x = self.shared(x.transpose(-1, -2))
-    #         x = self.prepare_projection(x)
-
-    #         f0o = x.transpose(-1, -2)
-    #         for block in self.f0:
-    #             f0o = block(f0o, s)
-    #         f0o = self.f0_proj(f0o)
-
-    #         n = x.transpose(-1, -2)
-    #         for block in self.n:
-    #             n = block(n, s)
-    #         n = self.n_proj(n)
-
-    #         return f0o.squeeze(1), n.squeeze(1)
-    #     else:
-    #         # Problem is here
-    #         d = self.text_encoder(texts, style, text_lengths, m)
-
-    #         # batch_size = d.shape[0]
-    #         # text_size = d.shape[1]
-
-    #         # # predict duration
-    #         # input_lengths = text_lengths.cpu().numpy()
-
-    #         # x = nn.utils.rnn.pack_padded_sequence(
-    #         #     d, input_lengths, batch_first=True, enforce_sorted=False)
-    #         x = d  # this dude can handle variable seq len so no need for padding
-    #         m = m.to(text_lengths.device).unsqueeze(1)
-
-    #         x = self.lstm(x)  # no longer using lstm
-    #         x = self.prepare_projection(x)
-
-    #         # x, _ = nn.utils.rnn.pad_packed_sequence(
-    #         #     x, batch_first=True)
-
-    #         # x_pad = torch.zeros([x.shape[0], m.shape[-1], x.shape[-1]])
-
-    #         # x_pad[:, :x.shape[1], :] = x
-    #         # x = x_pad.to(x.device)
-
-    #         x = x.transpose(-1, -2)
-    #         x = x.permute(0, 2, 1)
-    #         duration = self.duration_proj(nn.functional.dropout(x, 0.5, training=self.training))
-
-    #         en = d.transpose(-1, -2) @ alignment
-
-    #         return duration.squeeze(-1), en
 
     def forward(self, texts, style, text_lengths=None, alignment=None, mask=None, compute_f0=False):
         """Forward pass of the model.
@@ -786,6 +724,21 @@ class ProsodyPredictor(nn.Module):
 
 
 class DurationEncoder(nn.Module):
+    """Encoder for predicting phoneme durations.
+    This module processes text embeddings along with a style vector to produce
+    an output that can be used for duration prediction in a text-to-speech system.
+    The architecture consists of a stack of bidirectional LSTMs interleaved with
+    AdaLayerNorm layers. The style vector is concatenated to the input and also
+    conditions the normalization layers.
+    The `inference` method appears to be non-functional as it references
+    attributes not defined in the class `__init__` and is therefore not documented here.
+    Args:
+        sty_dim (int): The dimension of the style vector.
+        d_model (int): The main hidden dimension of the model.
+        nlayers (int): The number of LSTM layers to stack.
+        dropout (float, optional): The dropout rate applied after each LSTM layer.
+            Defaults to 0.1.
+    """
 
     def __init__(self, sty_dim, d_model, nlayers, dropout=0.1):
         super().__init__()
@@ -928,7 +881,41 @@ def load_ASR_models(ASR_MODEL_PATH, ASR_MODEL_CONFIG):
     return asr_model
 
 
-def build_model(args, text_aligner, pitch_extractor, bert):
+def load_spkenc_model(model_path):
+    """
+    Load a speaker encoder model from a specified path.
+    This function initializes the speaker encoder model with the given configuration,
+    loads the state dictionary from the checkpoint, and sets the model to training mode.
+    Parameters
+    ----------
+    model_path : str
+        The file path to the saved speaker encoder model checkpoint.
+    Returns
+    -------
+    spkenc_model : SpeakerEncoder
+        The loaded speaker encoder model instance ready for use.
+    """
+    logger.info("Loading speaker encoder model from %s", model_path)
+
+    # Set up speaker encoder
+    model_params = {"input_dim": 64, "proj_dim": 512}
+
+    audio_config = {
+        "fft_size": 512,
+        "win_length": 400,
+        "hop_length": 160,
+        "sample_rate": 16000,
+        "preemphasis": 0.97,
+        "num_mels": 64,
+    }
+
+    model = HASPSpeakerEncoder(**model_params, audio_config=audio_config)
+    model.load_checkpoint(checkpoint_path=model_path)
+
+    return model
+
+
+def build_model(args, text_aligner=None, pitch_extractor=None, bert=None, speaker_encoder=None):
     """
     Builds the StyleTTS2 model components.
     This function constructs and configures all neural network components required for the
@@ -1027,15 +1014,10 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     )
 
     # Acoustic style encoder
-    acoustic_style_encoder = AcousticStyleEncoder(
+    acoustic_style_encoder = StyleEncoder(
         dim_in=args.dim_in,
-        dim_spk_emb=args.dim_spk_emb,
         style_dim=args.style_dim,
         max_conv_dim=args.max_conv_dim,
-        # Initial external/internal speaker embedding fusion weight
-        init_fusion_weight=args.init_fusion_weight,
-        # No activation function for external speaker embedding reduction
-        activation=None,
     )
 
     # Prosodic style encoder
@@ -1045,7 +1027,7 @@ def build_model(args, text_aligner, pitch_extractor, bert):
         max_conv_dim=args.max_conv_dim,
     )
 
-    # define diffusion model
+    # Define diffusion model
     if args.multispeaker:
         transformer = StyleTransformer1d(
             channels=args.style_dim * 2,
@@ -1084,7 +1066,7 @@ def build_model(args, text_aligner, pitch_extractor, bert):
 
     nets = Munch(
         bert=bert,
-        bert_encoder=nn.Linear(bert.config.hidden_size, args.hidden_dim),
+        bert_encoder=nn.Linear(bert.config.hidden_size, args.hidden_dim) if bert else None,
         prosodic_predictor=prosodic_predictor,
         decoder=decoder,
         text_encoder=text_encoder,
@@ -1093,6 +1075,7 @@ def build_model(args, text_aligner, pitch_extractor, bert):
         diffusion=diffusion,
         text_aligner=text_aligner,
         pitch_extractor=pitch_extractor,
+        speaker_encoder=speaker_encoder,
         mpd=MultiPeriodDiscriminator(),
         msd=MultiResSpecDiscriminator(),
         # slm discriminator head
