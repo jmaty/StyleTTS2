@@ -16,25 +16,23 @@ from accelerate import Accelerator, DistributedDataParallelKwargs
 
 # from accelerate.logging import get_logger
 from monotonic_align import mask_from_lens
-from munch import Munch
-
-# from torch.utils.tensorboard import SummaryWriter
+from munch import munchify
 
 from logger import get_logger, setup_logging
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, create_slm_loss
 from meldataset import build_dataloader
-from models import build_model, load_ASR_models, load_checkpoint, load_F0_models, save_checkpoint
+from models import (
+    build_model,
+    load_ASR_models,
+    load_checkpoint,
+    load_F0_models,
+    load_spkenc_model,
+    save_checkpoint,
+)
 from Modules.pts import PTS
 from optimizers import build_optimizer
 from text_utils import TextCleaner
-from utils import (
-    get_data_path_list,
-    # get_image,
-    length_to_mask,
-    log_norm,
-    maximum_path,
-    recursive_munch,
-)
+from utils import get_data_path_list, length_to_mask, log_norm, maximum_path  # get_image,
 from Utils.PLBERT.util import load_plbert
 
 warnings.simplefilter("ignore")
@@ -54,6 +52,7 @@ def main():
     # Load config
     with open(args.config_path, encoding="utf-8") as fr:
         config = yaml.safe_load(fr)
+    config = munchify(config)  # Convert to Munch for easier access
 
     # writer = None
     wb_logger = None  # WandB logger
@@ -134,35 +133,41 @@ def main():
         config["data_params"].get("test_audio_dir", "test_audios"),
     )
 
-    model_params = recursive_munch(config["model_params"])
+    # Shortcuts to access parameters
+    model_params = config.model_params
     multispeaker = model_params.multispeaker
-    loss_params = Munch(config["loss_params"])
+    loss_params = config.loss_params
+    spkenc_params = config.spkenc_params
 
     # Set up text cleaner and pre-processing function
     text_cleaner = TextCleaner(data_params["symbol_dict_path"], pad=data_params["pad"])
     if accelerator.is_main_process:
         logger.debug("Number of symbols: %d", len(text_cleaner))
-    assert len(text_cleaner) == 81, f"Number of symbols must be 81 but it is {len(text_cleaner)}"
-    assert (
-        model_params.n_token == 81
-    ), f"Number of tokens must be 81 but it is {model_params.n_token}"
+        assert (
+            len(text_cleaner) == 81
+        ), f"Number of symbols must be 81 but it is {len(text_cleaner)}"
+        assert (
+            model_params.n_token == 81
+        ), f"Number of tokens must be 81 but it is {model_params.n_token}"
 
     # Load utility models
     with accelerator.main_process_first():
-        # load pretrained ASR model
+        # Load pretrained ASR model
         asr_config = config.get("ASR_config", False)
         asr_path = config.get("ASR_path", False)
         text_aligner = load_ASR_models(asr_path, asr_config)
 
-        # load pretrained F0 model
+        # Load pretrained F0 model
         f0_path = config.get("F0_path", False)
         pitch_extractor = load_F0_models(f0_path)
 
-        # load BERT model
-        bert_path = config.get("PLBERT_dir", False)
-        plbert = load_plbert(bert_path)
+        # PL-BERT not used in 1st stage training
+        plbert = load_plbert(config.get("PLBERT_dir", False))
 
-    model = build_model(model_params, text_aligner, pitch_extractor, plbert)
+        # Load speaker encoder model
+        speaker_encoder = load_spkenc_model(spkenc_params.model)
+
+    model = build_model(model_params, text_aligner, pitch_extractor, plbert, speaker_encoder)
     bert_size = model.bert.config.max_position_embeddings  # ALBERT config
 
     for k in model:
@@ -190,6 +195,13 @@ def main():
         ),
         "use_ref_mel": False,
     }
+    collate_config = munchify(
+        {
+            "sr": sr,
+            "spkenc_sr": spkenc_params.get("sr", 16000),
+            "max_wave4spkenc_length": spkenc_params.get("max_wave_length", 3.0),
+        }
+    )
 
     # Prepare dataloaders
     logger.info("Building training dataloader...")
@@ -202,6 +214,7 @@ def main():
         num_workers=args.num_workers,
         device=device,
         dataset_config=dataset_config,
+        collate_config=collate_config,
     )
     logger.info("Building validation dataloader...")
     val_dataloader = build_dataloader(
@@ -214,6 +227,7 @@ def main():
         num_workers=0,
         device=device,
         dataset_config=dataset_config,
+        collate_config=collate_config,
     )
     if accelerator.is_main_process:  # Přidat tuto podmínku
         wb_logger.summary["n_train_samples"] = len(train_dataloader.dataset)
@@ -314,7 +328,6 @@ def main():
             batch = [b.to(device) for b in batch[1:]]
             # Keep individual batch tensors
             (
-                spk_embs,  # Speaker embeddings [B, 512]
                 phonemes,  # Padded input phoneme IDs [B, T_text]
                 ph_inp_lens,  # Input phoneme lengths [B]
                 _,
@@ -322,6 +335,8 @@ def main():
                 mels,  # Padded mel spectrograms [B, n_mels, T_mel]
                 mel_inp_len,  # Mel spectrogram lengths [B]
                 _,
+                waves4spkenc,  # Wave segment for speaker encoder [B, T_wav]
+                waves4spkenc_len,  # Lengths of wave segments for speaker encoder [B]
             ) = batch
 
             # Generate masks for text and mel spectrograms
@@ -462,7 +477,7 @@ def main():
             # - if multispeaker, use other (style reference) mel spectrogram
             mel4style = mel_st.unsqueeze(1) if multispeaker else mel_gt.unsqueeze(1)
             # Only (acoustic) style encoder is trained within 1st stage training
-            style = model.acoustic_style_encoder(mel4style, spk_embs)
+            style = model.acoustic_style_encoder(mel4style)
 
             # Reconstruct the audio from the text-audio aligned encoded features, predicted style,
             # and ground truth pitch and norm
@@ -572,7 +587,7 @@ def main():
             if (batch_idx + 1) % log_interval == 0 and accelerator.is_main_process:
                 mel_loss = running_loss / log_interval
                 logger.info(
-                    "Epoch [%3d/%d], Step [%4d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f, Fusion Weight: %.5f",
+                    "Epoch [%3d/%d], Step [%4d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f",  # Fusion Weight: %.5f",
                     epoch + 1,
                     epochs,
                     batch_idx + 1,
@@ -583,7 +598,7 @@ def main():
                     loss_mono,
                     loss_s2s,
                     loss_slm,
-                    accelerator.unwrap_model(model.acoustic_style_encoder).fusion_weight.item(),
+                    # accelerator.unwrap_model(model.acoustic_style_encoder).fusion_weight.item(),
                 )
 
                 # Check current VRAM usage
@@ -605,9 +620,9 @@ def main():
                         "train/mono_loss": loss_mono,
                         "train/s2s_loss": loss_s2s,
                         "train/slm_loss": loss_slm,
-                        "train/fusion_weight": accelerator.unwrap_model(
-                            model.acoustic_style_encoder
-                        ).fusion_weight.item(),
+                        # "train/fusion_weight": accelerator.unwrap_model(
+                        #     model.acoustic_style_encoder
+                        # ).fusion_weight.item(),
                         "train/curr_vram": curr_vram,
                         "train/max_vram": max_vram,
                         "train/epoch": epoch,
@@ -640,7 +655,6 @@ def main():
                 waves = batch[0]
                 batch = [b.to(device) for b in batch[1:]]
                 (
-                    spk_embs,  # Speaker embeddings [B, 512]
                     phonemes,  # Padded input phoneme IDs [B, T_text]
                     ph_inp_lens,  # Input phoneme lengths [B]
                     _,
@@ -648,6 +662,8 @@ def main():
                     mels,  # Padded mel spectrograms [B, n_mels, T_mel]
                     mel_inp_len,  # Mel spectrogram lengths [B]
                     _,
+                    waves4spkenc,  # Wave segment for speaker encoder [B, T_wav]
+                    waves4spkenc_len,  # Lengths of wave segments for speaker encoder [B]
                 ) = batch
 
                 with torch.no_grad():
@@ -726,7 +742,7 @@ def main():
 
                 f0_real, _, _ = model.pitch_extractor(mel_gt.unsqueeze(1))
 
-                style = model.acoustic_style_encoder(mel_gt.unsqueeze(1), spk_embs)
+                style = model.acoustic_style_encoder(mel_gt.unsqueeze(1))
 
                 norm_real = log_norm(mel_gt.unsqueeze(1)).squeeze(1)
                 y_rec = model.decoder(ph_algn, f0_real, norm_real, style)
@@ -759,7 +775,8 @@ def main():
                         mels[idx, :, :mel_len].unsqueeze(0),  # Ground-truth mel spectrogram
                         # Ground-truth phoneme-audio alignment
                         h_algn[idx, :, : mel_len // 2].unsqueeze(0),
-                        spk_embs[idx].unsqueeze(0),
+                        # spk_embs[idx].unsqueeze(0),
+                        None,
                     )
 
                     # Write and save val audio
