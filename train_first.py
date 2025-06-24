@@ -429,6 +429,7 @@ def main():
 
             bsize = mel_inp_len.shape[0]  # Use current batch size
             wav_len = (mel_len_gt * 2) * hop_length  # Calculate fixed waveform segment length
+            wav_st_len = (mel_len_st * 2) * hop_length  # Calculate fixed style segment length
 
             # Pre-allocate tensors with the calculated fixed length
             ph_algn = torch.empty(
@@ -453,6 +454,7 @@ def main():
                 dtype=mels.dtype,
             )
             wav_gt = torch.empty(bsize, wav_len, device=device, dtype=torch.float)
+            wav_st = torch.empty(bsize, wav_st_len, device=device, dtype=torch.float)
 
             # Iterate through the batch samples
             for bidx in range(bsize):
@@ -477,12 +479,17 @@ def main():
                 beg_st = np.random.randint(0, mel_len - mel_len_st)
                 # Extract style reference mel spectrogram for style conditioning and assign to tensor
                 mel_st[bidx] = mels[bidx, :, (beg_st * 2) : ((beg_st + mel_len_st) * 2)]
+                # Extract corresponding ground-truth audio and assign to tensor
+                beg_idx_wav = (beg_st * 2) * hop_length
+                end_idx_wav = beg_idx_wav + wav_st_len  # Use pre-calculated length
+                wav_st[bidx] = waves[bidx][beg_idx_wav:end_idx_wav]
 
             # Detach tensors to avoid unnecessary gradient tracking
             # `h_algn_seg` is not detached as it is used for gradient computation
             mel_gt = mel_gt.detach()
             mel_st = mel_st.detach()
             wav_gt = wav_gt.detach()
+            wav_st = wav_st.detach()
 
             # --- End of Pre-allocated tensors ---
 
@@ -497,16 +504,16 @@ def main():
             mel4style = mel_st.unsqueeze(1) if multispeaker else mel_gt.unsqueeze(1)
 
             # Speaker encoding:
-            spk_embs = None
+            spk_embs_st = None
             if epoch >= tma_epoch and multispeaker:
                 # Resample ground-truth segments for speaker encoder
-                seg_gt_for_spkenc = resample(wav_gt, spkenc_resampler)
+                seg_st_for_spkenc = resample(wav_st, spkenc_resampler)
                 # Fine-tune speaker encoder
-                spk_embs = model.speaker_encoder(seg_gt_for_spkenc)
+                spk_embs_st = model.speaker_encoder(seg_st_for_spkenc)
                 # Use `with torch.no_grad()` when speaker encoder is frozen
 
             # Only (acoustic) style encoder is trained within 1st stage training
-            style = model.acoustic_style_encoder(mel4style, spk_embs)
+            style = model.acoustic_style_encoder(mel4style, spk_embs_st)
 
             # Reconstruct the audio from the text-audio aligned encoded features, predicted style,
             # and ground truth pitch and norm
@@ -561,12 +568,11 @@ def main():
 
                 # Calculate speaker consistency loss
                 if multispeaker:
-                    spk_embs_tgt = spk_embs  # target speaker embeddings
                     # Calculate speaker embeddings for the reconstructed audio
                     seg_rec_for_spkenc = resample(y_rec.squeeze(), spkenc_resampler)
                     spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc.detach())
-                    # Compute loss
-                    loss_scl = 1 - F.cosine_similarity(spk_embs_tgt.detach(), spk_embs_rec).mean()
+                    # Compute loss: use embeddings form style waves as target speaker embeddings
+                    loss_scl = 1 - F.cosine_similarity(spk_embs_st.detach(), spk_embs_rec).mean()
 
                     # # Compute speaker embedding for the ground truth audio
                     # spk_emb_gt = model.speaker_encoder.compute_embedding(
@@ -649,7 +655,7 @@ def main():
             if (batch_idx + 1) % log_interval == 0 and accelerator.is_main_process:
                 loss_mel = running_loss / log_interval
                 logger.info(
-                    "Epoch [%3d/%d], Step [%4d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f, SCL Loss: %.5f",  # Fusion Weight: %.5f",
+                    "Epoch [%3d/%d], Step [%4d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f, SCL Loss: %.5f, Fusion Weight: %.5f",
                     epoch + 1,
                     epochs,
                     batch_idx + 1,
@@ -661,7 +667,7 @@ def main():
                     loss_s2s,
                     loss_slm,
                     loss_scl,
-                    # accelerator.unwrap_model(model.acoustic_style_encoder).fusion_weight.item(),
+                    accelerator.unwrap_model(model.acoustic_style_encoder).fusion_weight.item(),
                 )
 
                 # Check current VRAM usage
@@ -684,9 +690,9 @@ def main():
                         "train/loss_s2s": loss_s2s,
                         "train/loss_slm": loss_slm,
                         "train/loss_scl": loss_scl,
-                        # "train/fusion_weight": accelerator.unwrap_model(
-                        #     model.acoustic_style_encoder
-                        # ).fusion_weight.item(),
+                        "train/fusion_weight": accelerator.unwrap_model(
+                            model.acoustic_style_encoder
+                        ).fusion_weight.item(),
                         "train/curr_vram": curr_vram,
                         "train/max_vram": max_vram,
                         "train/epoch": epoch,
@@ -806,15 +812,15 @@ def main():
                 f0_real, _, _ = model.pitch_extractor(mel_gt.unsqueeze(1))
                 norm_real = log_norm(mel_gt.unsqueeze(1)).squeeze(1)
 
-                spk_embs = None
+                spk_embs_st = None
                 if epoch >= tma_epoch and multispeaker:
                     # Resample ground-truth segments for speaker encoder
-                    seg_gt_for_spkenc = resample(wav_gt, spkenc_resampler)
+                    seg_st_for_spkenc = resample(wav_gt, spkenc_resampler)
                     # Fine-tune speaker encoder
-                    spk_embs = model.speaker_encoder(seg_gt_for_spkenc)
+                    spk_embs_st = model.speaker_encoder(seg_st_for_spkenc)
 
                 # Style encoding
-                style = model.acoustic_style_encoder(mel_gt.unsqueeze(1), spk_embs)
+                style = model.acoustic_style_encoder(mel_gt.unsqueeze(1), spk_embs_st)
 
                 # Reconstruct the audio from the text-audio aligned encoded features, predicted style,
                 # and ground truth pitch and norm
@@ -825,7 +831,7 @@ def main():
 
                 # Calculate speaker consistency loss
                 if epoch >= tma_epoch and multispeaker:
-                    spk_embs_tgt = spk_embs  # target speaker embeddings
+                    spk_embs_tgt = spk_embs_st  # target speaker embeddings
                     # Calculate speaker embeddings for the reconstructed audio
                     seg_rec_for_spkenc = resample(y_rec.squeeze(), spkenc_resampler)
                     spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc.detach())
