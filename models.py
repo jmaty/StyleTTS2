@@ -5,18 +5,14 @@ import os
 from collections import OrderedDict
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import yaml
 from munch import Munch
+from torch import nn
 from torch.nn.utils import spectral_norm, weight_norm
-from xlstm import (
-    mLSTMBlockConfig,
-    mLSTMLayerConfig,
-    xLSTMBlockStack,
-    xLSTMBlockStackConfig,
-)
+from xlstm import mLSTMBlockConfig, mLSTMLayerConfig, xLSTMBlockStack, xLSTMBlockStackConfig
 
+from logger import get_logger
 from Modules.diffusion.diffusion import AudioDiffusionConditional
 from Modules.diffusion.modules import StyleTransformer1d, Transformer1d
 from Modules.diffusion.sampler import KDiffusion, LogNormalDistribution
@@ -30,7 +26,6 @@ from Modules.istftnet import Decoder as ISTFTDecoder
 from Utils.ASR.models import ASRCNN
 from Utils.JDC.model import JDCNet
 from Utils.speaker_encoder.models import HASPSpeakerEncoder
-from logger import get_logger
 
 # Setup logger
 logger = get_logger(__name__)
@@ -181,49 +176,55 @@ class ResBlk(nn.Module):
         return x / math.sqrt(2)  # unit variance
 
 
-# class AcousticStyleEncoder(nn.Module):
-#     def __init__(
-#         self,
-#         dim_in=48,
-#         dim_spk_emb=512,
-#         style_dim=128,
-#         max_conv_dim=384,
-#         init_fusion_weight=0.01,
-#         activation=None,
-#     ):
-#         """Initialize the Acoustic Style Encoder.
-#         Args:
-#             dim_in (int, optional): Input dimension for the projection layer. Defaults to 48.
-#             dim_spk_emb (int, optional): Dimension of the external speaker embedding. Defaults to 512.
-#             style_dim (int, optional): Output dimension for the projection layer, representing the style embedding dimension. Defaults to 128.
-#             initial_fusion_weight (float, optional): Initial value for the trainable fusion weight. Defaults to 0.01.
-#             activation (torch.nn.Module, optional): Activation function to apply after the projection. Defaults to None.
-#         """
-#         super().__init__()
-#         self.project = nn.Linear(dim_spk_emb, style_dim)
-#         self.activation = activation
-#         self.style_encoder = StyleEncoder(
-#             dim_in=dim_in,
-#             style_dim=style_dim,
-#             max_conv_dim=max_conv_dim,
-#         )
-#         # Initialize the fusion weight as a trainable parameter
-#         self.fusion_weight = nn.Parameter(torch.tensor(init_fusion_weight))
+# TODO: subclass of StyleEncoder?
+class AcousticStyleEncoder(nn.Module):
+    def __init__(
+        self,
+        dim_in=48,
+        style_dim=128,
+        max_conv_dim=384,
+        dim_spk_emb=512,
+        init_fusion_weight=0.01,
+        activation=None,
+    ):
+        """Initialize the Acoustic Style Encoder.
+        Args:
+            dim_in (int, optional): Input dimension for the projection layer. Defaults to 48.
+            dim_spk_emb (int, optional): Dimension of the external speaker embedding. Defaults to 512.
+            style_dim (int, optional): Output dimension for the projection layer, representing the style embedding dimension. Defaults to 128.
+            initial_fusion_weight (float, optional): Initial value for the trainable fusion weight. Defaults to 0.01.
+            activation (torch.nn.Module, optional): Activation function to apply after the projection. Defaults to None.
+        """
+        super().__init__()
+        self.project = nn.Linear(dim_spk_emb, style_dim)
+        self.activation = activation
+        self.style_encoder = StyleEncoder(
+            dim_in=dim_in,
+            style_dim=style_dim,
+            max_conv_dim=max_conv_dim,
+        )
+        # Initialize the fusion weight as a trainable parameter
+        self.fusion_weight = nn.Parameter(torch.tensor(init_fusion_weight))
 
-#     def forward(self, x, spk_emb):
-#         """
-#         Forward pass of the module.
-#         Args:
-#             x (torch.Tensor): External speaker embedding.
-#             s (torch.Tensor): Style embedding.
-#         Returns:
-#             torch.Tensor: The output tensor after projection, optional activation, and addition of `s`.
-#         """
-#         spk_emb = self.project(spk_emb)
-#         if self.activation:
-#             spk_emb = self.activation(spk_emb)
+    def forward(self, x, spk_emb=None):
+        """
+        Forward pass of the module.
+        Args:
+            x (torch.Tensor): External speaker embedding.
+            s (torch.Tensor): Style embedding.
+        Returns:
+            torch.Tensor: The output tensor after projection, optional activation, and addition of `s`.
+        """
+        if spk_emb is None:
+            return self.style_encoder(x)
 
-#         return self.style_encoder(x) + self.fusion_weight * spk_emb
+        # External speaker embedding is provided, project it, apply activation if specified,
+        # and fuse with the internal style encoder output
+        spk_emb = self.project(spk_emb)
+        if self.activation:
+            spk_emb = self.activation(spk_emb)
+
+        return (1 - self.fusion_weight) * self.style_encoder(x) + self.fusion_weight * spk_emb
 
 
 class StyleEncoder(nn.Module):
@@ -254,7 +255,7 @@ class StyleEncoder(nn.Module):
 
 class LinearNorm(torch.nn.Module):
     def __init__(self, in_dim, out_dim, bias=True, w_init_gain="linear"):
-        super(LinearNorm, self).__init__()
+        super().__init__()
         self.linear_layer = torch.nn.Linear(in_dim, out_dim, bias=bias)
 
         torch.nn.init.xavier_uniform_(
@@ -1014,10 +1015,15 @@ def build_model(args, text_aligner=None, pitch_extractor=None, bert=None, speake
     )
 
     # Acoustic style encoder
-    acoustic_style_encoder = StyleEncoder(
+    acoustic_style_encoder = AcousticStyleEncoder(
         dim_in=args.dim_in,
         style_dim=args.style_dim,
         max_conv_dim=args.max_conv_dim,
+        dim_spk_emb=args.spkenc_params.dim_spk_emb,
+        # Initial external/internal speaker embedding fusion weight
+        init_fusion_weight=args.spkenc_params.init_fusion_weight,
+        # No activation function for external speaker embedding reduction
+        activation=None,
     )
 
     # Prosodic style encoder
@@ -1229,3 +1235,44 @@ def save_checkpoint(
 
     # Return saved model's filepath
     return filepath
+
+
+def model2device(model, device="cpu"):
+    """
+    Move model parameters to the specified device.
+    Args:
+        model (dict): Dictionary of model components
+        device (torch.device): Device to move the model to (e.g., 'cuda' or 'cpu')
+    Returns:
+        dict: Model with parameters moved to the specified device
+    """
+    device = torch.device(device)  # Convert once
+    for key, module in model.items():  # .items() is faster
+        if hasattr(module, "to"):
+            model[key] = module.to(device, non_blocking=True)  # non_blocking for CUDA
+    return model
+
+
+def model2mode(model, mode="train"):
+    """
+    Set model to training or evaluation mode.
+    Args:
+        model (dict): Dictionary of model components
+        mode (str): Mode to set the model to ('train' or 'eval')
+    Returns:
+        dict: Model with the specified mode set
+    """
+    if mode not in ["train", "eval"]:
+        raise ValueError("Mode must be either 'train' or 'eval'")
+
+    method_name = mode
+    for key, module in model.items():
+        if hasattr(module, method_name):
+            try:
+                getattr(module, method_name)()
+            except Exception as e:
+                logger.warning("Failed to set %s to %s mode: %s", key, mode, e)
+        else:
+            logger.debug("Module '%s' does not have a .%s() method", key, method_name)
+
+    return model

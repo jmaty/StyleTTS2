@@ -431,21 +431,25 @@ class Collater(object):
         self.max_mel_length = 192
         self.return_wave = return_wave
 
-        self.sr = kwargs.get("sr", 24000)
-        self.spkenc_sr = kwargs.get("spkenc_sr", 16000)
-        # Maximum length of wave for speaker encoder in samples
-        self.max_wave4spkenc_length = int(
-            kwargs.get("max_wave4spkenc_length", 3.0) * self.spkenc_sr
-        )
+        # self.sr = kwargs.get("sr", 24000)
+        # self.spkenc_sr = kwargs.get("spkenc_sr", 16000)
+        # # Maximum length of wave for speaker encoder in samples
+        # self.max_wave4spkenc_length = int(
+        #     kwargs.get("max_wave4spkenc_length", 3.0) * self.spkenc_sr
+        # )
+        # Leading and trailing silence in samples (24kHz)
+        # - added to the waveform during loading
+        self.silence_beg = kwargs.get("silence_beg", 4800)
+        self.silence_end = kwargs.get("silence_end", 4800)
 
-        # Resampler for speaker encoder waveforms
-        if self.spkenc_sr != self.sr:
-            self.spkenc_resampler = torchaudio.transforms.Resample(
-                orig_freq=self.sr,
-                new_freq=self.spkenc_sr,
-            )
-        else:
-            self.spkenc_resampler = None
+        # # Resampler for speaker encoder waveforms
+        # if self.spkenc_sr != self.sr:
+        #     self.spkenc_resampler = torchaudio.transforms.Resample(
+        #         orig_freq=self.sr,
+        #         new_freq=self.spkenc_sr,
+        #     )
+        # else:
+        #     self.spkenc_resampler = None
 
         logger.info("collate config: %s", kwargs)
 
@@ -491,7 +495,7 @@ class Collater(object):
               speaker encoder [B, 1, wave4spkenc_len].
         """
 
-        batch_size = len(batch)  # Number of samples in the batch
+        bsize = len(batch)  # Number of samples in the batch
 
         # Sort batch by acoustic feature (mel) length (descending)
         # b[1] is acoustic_feature from __getitem__
@@ -514,24 +518,24 @@ class Collater(object):
 
         # Initialize padded tensors
         # b[0] is speaker_id (integer)
-        labels = torch.zeros((batch_size)).long()
+        labels = torch.zeros((bsize)).long()
         # b[1] is acoustic_feature (mel spectrogram)
-        mels = torch.zeros((batch_size, nmels, max_mel_length)).float()
+        mels = torch.zeros((bsize, nmels, max_mel_length)).float()
         # b[2] is text_tensor (input phoneme IDs)
-        texts = torch.zeros((batch_size, max_text_length)).long()
+        texts = torch.zeros((bsize, max_text_length)).long()
         # b[3] is ref_ph_ids (OOD text phoneme IDs)
-        ref_texts = torch.zeros((batch_size, max_rtext_length)).long()
+        ref_texts = torch.zeros((bsize, max_rtext_length)).long()
 
-        input_lengths = torch.zeros(batch_size).long()
-        ref_lengths = torch.zeros(batch_size).long()
-        output_lengths = torch.zeros(batch_size).long()
-        waves4spkenc_lens = torch.zeros(batch_size).long()
+        input_lengths = torch.zeros(bsize).long()
+        ref_lengths = torch.zeros(bsize).long()
+        output_lengths = torch.zeros(bsize).long()
+        spkenc_segment_begs = torch.zeros(bsize).long()
 
         # Initialize ref_mels conditionally
         # b[4] is ref_mel_tensor, use `self.max_mel_length` (fixed size from config)
         # TODO: check max_mel_length from input ref_mel_tensor?
         ref_mels = (
-            torch.zeros((batch_size, nmels, self.max_mel_length)).float()
+            torch.zeros((bsize, nmels, self.max_mel_length)).float()
             if has_valid_ref_mel
             else torch.tensor([], dtype=torch.float)  # Return None if no item has ref_mel
         )
@@ -544,18 +548,18 @@ class Collater(object):
 
         # b[7] is raw wave tensor
         # Due to memory constraints, it is better to keep it as a list
-        waves = [None for _ in range(batch_size)]
+        waves = [None for _ in range(bsize)]
         # For speaker encoder, resample it to 16kHz and limit the length of wave to 10 seconds
-        # Keep it as a batch
-        wave_lens = [b[7].size(0) for b in batch]
-        # Max wave length for speaker encoder in samples:
-        # - maximum length of all resampled waves in the batch limited to `max_wave4spkenc_length`
-        wave4spkenc_len = min(
-            # Maximum wave length recalculated for speaker encoder sample rate
-            int(max(wave_lens) / self.sr * self.spkenc_sr),
-            self.max_wave4spkenc_length,
-        )
-        waves4spkenc = torch.zeros((batch_size, 1, wave4spkenc_len)).float()
+        # # Keep it as a batch
+        # wave_lens = [b[7].size(0) for b in batch]
+        # # Max wave length for speaker encoder in samples:
+        # # - maximum length of all resampled waves in the batch limited to `max_wave4spkenc_length`
+        # spkenc_segment_len = min(
+        #     # Maximum wave length recalculated for speaker encoder sample rate
+        #     int(max(wave_lens) / self.sr * self.spkenc_sr),
+        #     self.max_wave4spkenc_length,
+        # )
+        # # waves4spkenc = torch.zeros((batch_size, 1, wave4spkenc_len)).float()
 
         # Rearrange batch data according to mel length
         for bid, (label, mel, text, ref_text, ref_mel, _, _, wave) in enumerate(batch):
@@ -583,11 +587,10 @@ class Collater(object):
 
             # ref_labels[bid] = ref_label  # not used anymore
             waves[bid] = wave
-            # Extract wave for speaker encoder
-            waves4spkenc[bid], waves4spkenc_lens[bid] = self._extract_wave4spkenc(
-                wave,
-                wave4spkenc_len,
-            )
+            # spkenc_segment_begs[bid] = self._get_segment_start_for_speaker_encoder(
+            #     wave,
+            #     spkenc_segment_len,
+            # )
 
         return (
             waves,  # List of raw waveform tensors [T_samples] (or None)
@@ -598,47 +601,63 @@ class Collater(object):
             mels,  # Padded mel spectrograms [B, n_mels, T_mel]
             output_lengths,  # Mel spectrogram lengths [B]
             ref_mels,  # Padded reference mel spectrograms [B, n_mels, max_mel_length]
-            waves4spkenc,  # Cropped/padded resampled wave for speaker encoder [B, 1, wave4spkenc_len]
-            waves4spkenc_lens,  # Lengths of waves for speaker encoder [B]
+            # spkenc_segment_begs,  # Starting indices for speaker encoder segments [B]
+            # spkenc_segment_len,  # Batch-dependent length of segments for speaker encoder (int)
         )
 
-    def _extract_wave4spkenc(self, wave, wave4spkenc_len):
-        """Extracts a segment of the waveform for speaker encoder.
-        This method resamples the input waveform to a target sample rate
-        and extracts a segment of a specified length. If the resampled waveform
-        is shorter than the specified length, it pads the waveform with zeros.
-        Args:
-            wave (torch.Tensor): Input waveform tensor of shape [samples].
-            wave4spkenc_len (int): Length of the segment to extract for speaker encoder
-                (in samples).
-        Returns:
-            torch.Tensor: A 2D tensor of shape [1, wave4spkenc_len] containing
-            the extracted segment for speaker encoder.
-        """
-        # Resample wave for speaker encoder
-        resampled_wave = self.spkenc_resampler(wave.unsqueeze(0)).squeeze(0)
-        # Extract a segment of the resampled wave for speaker encoder
-        wlen = resampled_wave.size(0)
-        if wlen >= wave4spkenc_len:
-            # Randomly crop a segment of the resampled wave
-            max_start = wlen - wave4spkenc_len
-            start_idx = torch.randint(0, max_start + 1, (1,)).item()
-            segment = resampled_wave[start_idx : start_idx + wave4spkenc_len]
-            segment_len = wave4spkenc_len
-        else:
-            # If the resampled wave is shorter than wave4spkenc_len, pad it
-            pad_len = wave4spkenc_len - wlen
-            segment = F.pad(
-                resampled_wave,
-                (0, pad_len),
-                mode="constant",
-                value=0.0,
-            )
-            segment_len = wlen
-        return (
-            segment.unsqueeze(0),  # Return as a 2D tensor [1, wave4spkenc_len]
-            segment_len,  # Length of the segment
-        )
+    # def _extract_wave4spkenc(self, wave, wave4spkenc_len):
+    #     """Extracts a segment of the waveform for speaker encoder.
+    #     This method resamples the input waveform to a target sample rate
+    #     and extracts a segment of a specified length. If the resampled waveform
+    #     is shorter than the specified length, it pads the waveform with zeros.
+    #     Args:
+    #         wave (torch.Tensor): Input waveform tensor of shape [samples].
+    #         wave4spkenc_len (int): Length of the segment to extract for speaker encoder
+    #             (in samples).
+    #     Returns:
+    #         torch.Tensor: A 2D tensor of shape [1, wave4spkenc_len] containing
+    #         the extracted segment for speaker encoder.
+    #     """
+    #     # Remove silence padding at the beginning and end of the waveform
+    #     wave = wave[self.silence_beg : -self.silence_end]
+    #     # Resample wave for speaker encoder
+    #     resampled_wave = self.spkenc_resampler(wave.unsqueeze(0)).squeeze(0)
+    #     # Extract a segment of the resampled wave for speaker encoder
+    #     wlen = resampled_wave.size(0)
+    #     if wlen >= wave4spkenc_len:
+    #         # Randomly crop a segment of the resampled wave
+    #         max_start = wlen - wave4spkenc_len
+    #         start_idx = torch.randint(0, max_start + 1, (1,)).item()
+    #         segment = resampled_wave[start_idx : start_idx + wave4spkenc_len]
+    #         segment_len = wave4spkenc_len
+    #     else:
+    #         # If the resampled wave is shorter than wave4spkenc_len, pad it
+    #         pad_len = wave4spkenc_len - wlen
+    #         segment = F.pad(
+    #             resampled_wave,
+    #             (0, pad_len),
+    #             mode="constant",
+    #             value=0.0,
+    #         )
+    #         segment_len = wlen
+    #     return (
+    #         segment.unsqueeze(0),  # Return as a 2D tensor [1, wave4spkenc_len]
+    #         segment_len,  # Length of the segment
+    #     )
+
+    # def _get_segment_start_for_speaker_encoder(self, wave, wave4spkenc_len):
+    #     # Remove silence padding at the beginning and end of the waveform
+    #     wave = wave[self.silence_beg : -self.silence_end]
+    #     # Convert to samples at speaker encoder rate
+    #     wlen = int(wave.size(0) / self.sr * self.spkenc_sr)
+    #     if wlen >= wave4spkenc_len:
+    #         # Randomly crop a segment of the resampled wave
+    #         max_start = wlen - wave4spkenc_len
+    #         start_idx = torch.randint(0, max_start + 1, (1,)).item()
+    #     else:
+    #         start_idx = 0
+
+    #     return start_idx  # Return the starting index for the segment
 
 
 def build_dataloader(

@@ -549,7 +549,7 @@ class PTS:
             return out.squeeze().cpu().numpy()[self.offset_beg : -self.offset_end], pred_style
             # return out.squeeze().cpu().numpy()[..., :-50], s_pred
 
-    def reconstruct(self, mel_gt, en, spk_emb, p_en=None):
+    def reconstruct(self, mel_gt, en, spk_emb=None, p_en=None):
         """Reconstruct the waveform from the mel spectrogram.
         This method uses the decoder of the model to generate the waveform
         Args:
@@ -574,8 +574,8 @@ class PTS:
                 n = log_norm(mel_gt.unsqueeze(1)).squeeze(1)
 
             # Encode style from ground truth mel spectrogram
-            # acoust_style = self.model.acoustic_style_encoder(mel_gt.unsqueeze(1), spk_emb)
-            acoust_style = self.model.acoustic_style_encoder(mel_gt.unsqueeze(1))
+            acoust_style = self.model.acoustic_style_encoder(mel_gt.unsqueeze(1), spk_emb)
+            # acoust_style = self.model.acoustic_style_encoder(mel_gt.unsqueeze(1))
             # pros_style = self.model.prosodic_style_encoder(mel_gt.unsqueeze(1))
             # style = torch.cat([acoust_style, pros_style], dim=1)
             # Decode

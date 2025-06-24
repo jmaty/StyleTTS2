@@ -1,12 +1,11 @@
-import sys
 import logging
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn.functional as F
 from monotonic_align.core import maximum_path_c
 from munch import Munch
+from torchaudio.transforms import Resample
 
 
 def maximum_path(neg_cent, mask):
@@ -74,3 +73,108 @@ def recursive_munch(d):
 def log_print(message, logger):
     logger.info(message)
     print(message)
+
+
+# Resampler for speaker encoder waveforms
+def get_speaker_encoder_resampler(sr, spkenc_sr):
+    """
+    Returns a resampler for the speaker encoder based on the configuration.
+    """
+    if spkenc_sr != sr:
+        spkenc_resampler = Resample(
+            orig_freq=sr,
+            new_freq=spkenc_sr,
+        )
+    else:
+        spkenc_resampler = None
+    return spkenc_resampler
+
+
+# def get_segments_for_spkenc(waves, segment_begs, segment_len):
+#     """
+#     Get segments for speaker encoder from the waveform.
+#     waves: [B, T]
+#     segment_begs: [B]
+#     segment_len: int
+#     """
+#     batch_size = waves.size(0)
+#     device = waves.device
+
+#     # Create a tensor of indices for the segments
+#     batch_indices = torch.arange(batch_size, device=device).unsqueeze(1)
+#     # Create a tensor of segment beginnings
+#     segment_offsets = torch.arange(segment_len, device=device).unsqueeze(0)
+#     # Calculate the indices for the segments
+#     indices = segment_begs.unsqueeze(1) + segment_offsets
+#     # Extract the segments using advanced indexing
+#     segments = waves[batch_indices, indices]
+
+#     return segments
+
+
+# def get_segments_for_spkenc(waves, segment_begs, segment_len, spkenc_resampler=None, pad_value=0.0):#
+#     """
+#     Get segments for speaker encoder from the waveform with padding.
+
+#     Args:
+#         waves: [B, T] - Batch of waveforms
+#         segment_begs: [B] - Starting indices for each segment in batch
+#         segment_len: int - Length of each segment
+#         pad_value: float - Value to use for padding (default 0.0)
+
+#     Returns:
+#         segments: [B, segment_len] - Extracted segments with padding
+#     """
+
+#     print("Orig waves shape:", waves.shape)
+#     print("Segment length:", segment_len)
+
+#     # Resample the waveforms for speaker encoder
+#     if spkenc_resampler:
+#         waves = spkenc_resampler(waves)
+
+#     print("Processed waves shape:", waves.shape)
+
+#     batch_size, total_len = waves.shape
+#     device = waves.device
+#     dtype = waves.dtype
+
+#     # Pre-allocate output tensor filled with pad_value
+#     segments = torch.full((batch_size, segment_len), pad_value, device=device, dtype=dtype)
+
+#     # Create index tensors for matrix operations
+#     batch_indices = torch.arange(batch_size, device=device).unsqueeze(1)  # [B, 1]
+#     segment_offsets = torch.arange(segment_len, device=device).unsqueeze(0)  # [1, segment_len]
+#     indices = segment_begs.unsqueeze(1) + segment_offsets  # [B, segment_len]
+
+#     # Create mask for valid indices (within bounds)
+#     valid_mask = (indices >= 0) & (indices < total_len)
+
+#     # Clamp indices to valid range for safe indexing
+#     safe_indices = torch.clamp(indices, 0, total_len - 1)
+
+#     # Extract values using advanced indexing
+#     extracted = waves[batch_indices, safe_indices]
+
+#     # Apply mask - only use valid values, keep pad_value for invalid positions
+#     segments = torch.where(valid_mask, extracted, pad_value)
+
+#     print("Final segments shape:", segments.shape)
+
+#     return segments
+
+
+def resample(waves, resampler):
+    """
+    Resample the waveform using the provided resampler.
+
+    Args:
+        waves (torch.Tensor): Input waveform tensor of shape [B, T].
+        resampler (Resample): Resample waveform to the desired sample rate.
+
+    Returns:
+        torch.Tensor: Resampled waveform tensor.
+    """
+    if resampler:
+        waves = resampler(waves)
+    return waves
