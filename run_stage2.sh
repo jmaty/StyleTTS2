@@ -88,7 +88,10 @@ SELECT="-l select=1:ncpus=$NCPUS:mem=$MEM:$SCRATCH_TYPE=$LSCRATCH:ngpus=$NGPUS$C
 # Walltime argument
 WALLTIME="-l walltime=$HOURS:00:00"
 
-RUN=$(basename $CFG .yml)  # Extract name of the run (= config file)
+# Prepare name of the run: config2a.yml -> 2a
+BASENAME_CFG=$(basename "$CFG")
+TEMP_RUN="${BASENAME_CFG#config}"  # Remove 'config' prefix
+RUN="${TEMP_RUN%.*}"               # Remove file extension
 EXP=$(basename $EXPDIR)_$RUN  # Set name of the experiment
 
 # Timestep to differentiate among runs with the same run name
@@ -110,8 +113,8 @@ fi
 # -----------------------------------------------------------------------------
 # RUN TRAINING
 # -----------------------------------------------------------------------------
-OLOG=$EXPDIR/$RUN.$TIMESTEP.log
-ONTB=$EXPDIR/$(basename "$INTB" .ipynb).$RUN.processed.$TIMESTEP.ipynb
+OLOG=$EXPDIR/stage$RUN.$TIMESTEP.log
+ONTB=$EXPDIR/stage$RUN.$TIMESTEP.ipynb
 
 # Run PBS script
 JOBID=$(qsub -N $EXP \
