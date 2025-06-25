@@ -613,13 +613,11 @@ class PTS:
             wave_tensor = torch.from_numpy(wav).float()
             mel_tensor = self.audio_processor(wave_tensor).to(self.device)
 
-            # Compute style embedding
-            ref_acoust_style = self.model.acoustic_style_encoder(
-                mel_tensor.unsqueeze(1)
-            )  # style = timbre
-            ref_pros_style = self.model.prosodic_style_encoder(
-                mel_tensor.unsqueeze(1)
-            )  # style = prosody
+            # Compute style embedding:
+            # - style = timbre
+            ref_acoust_style = self.model.acoustic_style_encoder(mel_tensor.unsqueeze(1))
+            # - style = prosody
+            ref_pros_style = self.model.prosodic_style_encoder(mel_tensor.unsqueeze(1))
 
         return torch.cat([ref_acoust_style, ref_pros_style], dim=1)
 

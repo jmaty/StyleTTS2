@@ -547,7 +547,6 @@ def main():
                     # JMa: pitch extractor should not be updated, see:
                     # https://github.com/yl4579/StyleTTS2/issues/10#issuecomment-1783701686
                     # optimizer.step('pitch_extractor')
-                    # optimizer.zero_grad('text_aligner')
 
                 # Zero all gradients
                 optimizer.zero_grad()
