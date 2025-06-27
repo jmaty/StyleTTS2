@@ -30,6 +30,7 @@ from models import (
     save_checkpoint,
     model2device,
     model2mode,
+    clone_model,
 )
 from Modules.pts import PTS
 from optimizers import build_optimizer
@@ -176,14 +177,24 @@ def main():
         # Load speaker encoder model
         speaker_encoder = load_spkenc_model(spkenc_params.model)
         # # Freeze speaker encoder parameters
-        # for param in model.speaker_encoder.parameters():
+        # for param in speaker_encoder.parameters():
         #     param.requires_grad = False
 
     model = build_model(model_params, text_aligner, pitch_extractor, plbert, speaker_encoder)
     bert_size = model.bert.config.max_position_embeddings  # ALBERT config
 
+    model = model2device(model, device)  # Move model to device (cuda)
+
     for k in model:
         model[k] = accelerator.prepare(model[k])
+
+    # Create inference copy of speaker encoder (for speaker consistency loss)
+    speaker_encoder_infer = clone_model(
+        model.speaker_encoder,
+        device=device,
+        freeze=True,
+        eval_mode=True,
+    )
 
     # Load data
     train_list, val_list = get_data_path_list(train_path, val_path)
@@ -243,7 +254,7 @@ def main():
         dataset_config=dataset_config,
         # collate_config=collate_config,
     )
-    if accelerator.is_main_process:  # Přidat tuto podmínku
+    if accelerator.is_main_process:
         wb_logger.summary["n_train_samples"] = len(train_dataloader.dataset)
         wb_logger.summary["n_valid_samples"] = len(val_dataloader.dataset)
         wb_logger.summary["n_ood_texts"] = train_dataloader.dataset.number_ood_texts()
@@ -257,8 +268,6 @@ def main():
         "epochs": epochs,
         "steps_per_epoch": len(train_dataloader),
     }
-
-    model = model2device(model, device)  # Move model to device (cuda)
 
     # initialize optimizers after preparing models for compatibility with FSDP
     parameters_dict = {key: model[key].parameters() for key in model}
@@ -568,11 +577,14 @@ def main():
 
                 # Calculate speaker consistency loss
                 if multispeaker:
-                    # Calculate speaker embeddings for the reconstructed audio
-                    seg_rec_for_spkenc = resample(y_rec.squeeze(), spkenc_resampler)
-                    spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc.detach())
+                    with torch.no_grad():
+                        # Sync speaker encoder weights
+                        speaker_encoder_infer.load_state_dict(model.speaker_encoder.state_dict())
+                        # Calculate speaker embeddings for the reconstructed audio
+                        seg_rec_for_spkenc = resample(y_rec.squeeze(), spkenc_resampler)
+                        spk_embs_rec = speaker_encoder_infer(seg_rec_for_spkenc)
                     # Compute loss: use embeddings form style waves as target speaker embeddings
-                    loss_scl = 1 - F.cosine_similarity(spk_embs_st.detach(), spk_embs_rec).mean()
+                    loss_scl = 1 - F.cosine_similarity(spk_embs_st, spk_embs_rec).mean()
 
                     # # Compute speaker embedding for the ground truth audio
                     # spk_emb_gt = model.speaker_encoder.compute_embedding(
@@ -617,9 +629,8 @@ def main():
             if epoch >= tma_epoch:
                 inputs += list(model.text_aligner.parameters())
                 if multispeaker:
-                    inputs += list(
-                        model.speaker_encoder.parameters()
-                    )  # Do not do this if speaker encoder is frozen
+                    # Do not do this if speaker encoder is frozen
+                    inputs += list(model.speaker_encoder.parameters())
             accelerator.backward(loss_gen, inputs=inputs)
 
             # Accumulate mean mel-spectrogram loss (over all GPUs) across batches for logging
@@ -759,6 +770,7 @@ def main():
                         .float()
                     )
                     attn_mask = attn_mask < 1
+
                     d_algn.masked_fill_(attn_mask, 0.0)
 
                 # Encode phonemes
@@ -816,7 +828,7 @@ def main():
                 if epoch >= tma_epoch and multispeaker:
                     # Resample ground-truth segments for speaker encoder
                     seg_st_for_spkenc = resample(wav_gt, spkenc_resampler)
-                    # Fine-tune speaker encoder
+                    # Calculate ground truth speaker embeddings
                     spk_embs_st = model.speaker_encoder(seg_st_for_spkenc)
 
                 # Style encoding
@@ -834,9 +846,9 @@ def main():
                     spk_embs_tgt = spk_embs_st  # target speaker embeddings
                     # Calculate speaker embeddings for the reconstructed audio
                     seg_rec_for_spkenc = resample(y_rec.squeeze(), spkenc_resampler)
-                    spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc.detach())
+                    spk_embs_rec = speaker_encoder_infer(seg_rec_for_spkenc.detach())
                     # Compute speaker consistency loss (i.e. cosine similarity)
-                    loss_scl = 1 - F.cosine_similarity(spk_embs_tgt.detach(), spk_embs_rec)
+                    loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec)
                     # Gather similarity loss across all processes
                     loss_sim += accelerator.gather(loss_scl).mean().item()
 

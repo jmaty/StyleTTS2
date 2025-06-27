@@ -1,5 +1,6 @@
 # coding:utf-8
 
+import copy
 import math
 import os
 from collections import OrderedDict
@@ -1276,3 +1277,27 @@ def model2mode(model, mode="train"):
             logger.debug("Module '%s' does not have a .%s() method", key, method_name)
 
     return model
+
+
+def clone_model(model, device=None, freeze=False, eval_mode=False):
+    """
+    Returns a deep copy of a PyTorch model.
+    Args:
+        model:      model to be cloned
+        device:     torch.device (optional), target device for clone
+        freeze:     bool, if True sets requires_grad=False on all parameters
+        eval_mode:  bool, if True puts model in eval() mode
+    Returns:
+        model_clone: New instance, weights copied.
+    """
+    model_clone = copy.deepcopy(model)
+    if device is not None:
+        model_clone = model_clone.to(device)
+    else:
+        model_clone = model_clone.to(model.device)
+    if freeze:
+        for param in model_clone.parameters():
+            param.requires_grad = False
+    if eval_mode:
+        model_clone.eval()
+    return model_clone
