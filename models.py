@@ -1,5 +1,6 @@
 # coding:utf-8
 
+import copy
 import math
 import os
 from collections import OrderedDict
@@ -10,13 +11,9 @@ import torch.nn.functional as F
 import yaml
 from munch import Munch
 from torch.nn.utils import spectral_norm, weight_norm
-from xlstm import (
-    mLSTMBlockConfig,
-    mLSTMLayerConfig,
-    xLSTMBlockStack,
-    xLSTMBlockStackConfig,
-)
+from xlstm import mLSTMBlockConfig, mLSTMLayerConfig, xLSTMBlockStack, xLSTMBlockStackConfig
 
+from logger import get_logger
 from Modules.diffusion.diffusion import AudioDiffusionConditional
 from Modules.diffusion.modules import StyleTransformer1d, Transformer1d
 from Modules.diffusion.sampler import KDiffusion, LogNormalDistribution
@@ -29,7 +26,6 @@ from Modules.hifigan import Decoder as HifiDecoder
 from Modules.istftnet import Decoder as ISTFTDecoder
 from Utils.ASR.models import ASRCNN
 from Utils.JDC.model import JDCNet
-from logger import get_logger
 
 # Setup logger
 logger = get_logger(__name__)
@@ -1137,3 +1133,79 @@ def save_checkpoint(
 
     # Return saved model's filepath
     return filepath
+
+
+def model2device(model, device="cpu"):
+    """
+    Move model parameters to the specified device.
+    Args:
+        model (dict): Dictionary of model components
+        device (torch.device): Device to move the model to (e.g., 'cuda' or 'cpu')
+    Returns:
+        dict: Model with parameters moved to the specified device
+    """
+    device = torch.device(device)  # Convert once
+    for key, module in model.items():  # .items() is faster
+        if hasattr(module, "to"):
+            model[key] = module.to(device, non_blocking=True)  # non_blocking for CUDA
+    return model
+
+
+def model2mode(model, mode="train", components=None):
+    """
+    Set model to training or evaluation mode.
+    Args:
+        model (dict): Dictionary of model components
+        mode (str): Mode to set the model to ('train' or 'eval')
+        components (list, optional): List of component names (keys) to set mode for.
+                                   If None, all components are set. Defaults to None.
+    Returns:
+        dict: Model with the specified mode set
+    """
+    if mode not in ["train", "eval"]:
+        raise ValueError("Mode must be either 'train' or 'eval'")
+
+    # If no specific components specified, use all components
+    if components is None:
+        components = model.keys()
+
+    method_name = mode
+    for key in components:
+        if key in model:
+            module = model[key]
+            if hasattr(module, method_name):
+                try:
+                    getattr(module, method_name)()
+                    logger.debug("Component '%s' set to %s mode", key, mode)
+                except (RuntimeError, TypeError, AttributeError) as e:
+                    logger.warning("Failed to set %s to %s mode: %s", key, mode, e)
+            else:
+                logger.debug("Module '%s' does not have a .%s() method", key, method_name)
+        else:
+            logger.warning("Component '%s' not found in model", key)
+
+    return model
+
+
+def clone_model(model, device=None, freeze=False, eval_mode=False):
+    """
+    Returns a deep copy of a PyTorch model.
+    Args:
+        model:      model to be cloned
+        device:     torch.device (optional), target device for clone
+        freeze:     bool, if True sets requires_grad=False on all parameters
+        eval_mode:  bool, if True puts model in eval() mode
+    Returns:
+        model_clone: New instance, weights copied.
+    """
+    model_clone = copy.deepcopy(model)
+    if device is not None:
+        model_clone = model_clone.to(device)
+    else:
+        model_clone = model_clone.to(model.device)
+    if freeze:
+        for param in model_clone.parameters():
+            param.requires_grad = False
+    if eval_mode:
+        model_clone.eval()
+    return model_clone

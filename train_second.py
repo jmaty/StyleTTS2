@@ -23,13 +23,21 @@ from torch import nn
 from logger import get_logger, setup_logging
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, create_slm_loss
 from meldataset import build_dataloader
-from models import build_model, load_ASR_models, load_checkpoint, load_F0_models, save_checkpoint
+from models import (
+    build_model,
+    load_ASR_models,
+    load_checkpoint,
+    load_F0_models,
+    save_checkpoint,
+    model2device,
+    model2mode,
+)
 from Modules.diffusion.sampler import ADPM2Sampler, DiffusionSampler, KarrasSchedule
 from Modules.pts import PTS
 from Modules.slmadv import SLMAdversarialLoss
 from optimizers import build_optimizer
 from text_utils import TextCleaner
-from utils import get_data_path_list, length_to_mask, log_norm, maximum_path  # , recursive_munch
+from utils import get_data_path_list, length_to_mask, log_norm, maximum_path
 from Utils.PLBERT.util import load_plbert
 
 warnings.simplefilter("ignore")
@@ -212,14 +220,14 @@ def main():
     wb_logger.summary["n_valid_samples"] = len(val_dataloader.dataset)
     wb_logger.summary["n_ood_texts"] = train_dataloader.dataset.number_ood_texts()
 
-    # Move models to device (cuda)
-    _ = [model[key].to(device) for key in model]
+    model = model2device(model, device)  # Move models to device (cuda)
 
     # DP
     for key in model:
         if key not in ("mpd", "msd", "wd"):
             model[key] = MyDataParallel(model[key])
 
+    # Reset training parameters
     start_epoch = 0
     iters = 0
 
@@ -382,17 +390,23 @@ def main():
         running_loss = 0
         start_time = time.time()
 
-        # Set all models to eval mode
-        _ = [model[key].eval() for key in model]
+        model = model2mode(model, "eval")  # Set all models to eval mode
 
-        # Set following models to train mode
-        model.prosodic_predictor.train()
-        model.bert_encoder.train()
-        model.bert.train()
-        model.msd.train()
-        model.mpd.train()
-        model.acoustic_style_encoder.train()
-        model.prosodic_style_encoder.train()
+        # Models in train mode from the beginning
+        train_components = [
+            "prosodic_predictor",
+            "bert_encoder",
+            "bert",
+            "prosodic_style_encoder",
+        ]
+
+        # Models in train mode based on the epoch
+        if epoch >= diff_epoch:
+            train_components.extend(["msd", "mpd", "diffusion"])
+        if epoch >= joint_epoch:
+            train_components.extend(["decoder", "acoustic_style_encoder", "wd"])
+
+        model = model2mode(model, "train", train_components)  # Set models to train mode
 
         # Train loop for each epoch
         for batch_idx, batch in enumerate(train_dataloader):
@@ -710,10 +724,8 @@ def main():
             if epoch >= joint_epoch:
                 if grad_clip:
                     nn.utils.clip_grad_norm_(model.acoustic_style_encoder.parameters(), grad_clip)
-                    nn.utils.clip_grad_norm_(model.prosodic_style_encoder.parameters(), grad_clip)
                     nn.utils.clip_grad_norm_(model.decoder.parameters(), grad_clip)
                 optimizer.step("acoustic_style_encoder")
-                optimizer.step("prosodic_style_encoder")
                 optimizer.step("decoder")
 
                 if slmadv is not None:  # None means no SLM discriminator training
@@ -910,8 +922,7 @@ def main():
 
         # Validation
         loss_test, loss_align, loss_f = 0, 0, 0
-        # Set all models to eval mode
-        _ = [model[key].eval() for key in model]
+        model = model2mode(model, "eval")  # Set all models to eval mode
 
         with torch.no_grad():
             iters_test = 0

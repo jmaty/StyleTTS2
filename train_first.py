@@ -21,7 +21,15 @@ from munch import Munch
 from logger import get_logger, setup_logging
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, create_slm_loss
 from meldataset import build_dataloader
-from models import build_model, load_ASR_models, load_checkpoint, load_F0_models, save_checkpoint
+from models import (
+    build_model,
+    load_ASR_models,
+    load_checkpoint,
+    load_F0_models,
+    save_checkpoint,
+    model2device,
+    model2mode,
+)
 from Modules.pts import PTS
 from optimizers import build_optimizer
 from text_utils import TextCleaner
@@ -229,8 +237,7 @@ def main():
         "steps_per_epoch": len(train_dataloader),
     }
 
-    # Move models to device (cuda)
-    _ = [model[key].to(device) for key in model]
+    model = model2device(model, device)  # Move models to device (cuda)
 
     # initialize optimizers after preparing models for compatibility with FSDP
     parameters_dict = {key: model[key].parameters() for key in model}
@@ -300,8 +307,20 @@ def main():
         running_loss = 0
         start_time = time.time()
 
-        # Set all models to train mode
-        _ = [model[key].train() for key in model]
+        model = model2mode(model, "eval")  # Set all models to eval mode
+
+        # Models in train mode from the beginning
+        train_components = [
+            "decoder",
+            "text_encoder",
+            "acoustic_style_encoder",
+        ]
+
+        # Models in train mode based on the epoch
+        if epoch >= tma_epoch:
+            train_components.extend(["msd", "mpd", "text_aligner"])
+
+        model = model2mode(model, "train", train_components)  # Set models to train mode
 
         # JMa: Zero gradients of all optimizers at each epoch start
         optimizer.zero_grad()
@@ -611,7 +630,7 @@ def main():
         # Validation
         loss_test = 0
         # Set all models to eval mode
-        _ = [model[key].eval() for key in model]
+        model = model2mode(model, "eval")  # Set models to eval mode
 
         with torch.no_grad():
             iters_test = 0
