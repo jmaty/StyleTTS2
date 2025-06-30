@@ -188,13 +188,13 @@ def main():
     for k in model:
         model[k] = accelerator.prepare(model[k])
 
-    # Create inference copy of speaker encoder (for speaker consistency loss)
-    speaker_encoder_infer = clone_model(
-        model.speaker_encoder,
-        device=device,
-        freeze=True,
-        eval_mode=True,
-    )
+    # # Create inference copy of speaker encoder (for speaker consistency loss)
+    # speaker_encoder_infer = clone_model(
+    #     model.speaker_encoder,
+    #     device=device,
+    #     freeze=True,
+    #     eval_mode=True,
+    # )
 
     # Load data
     train_list, val_list = get_data_path_list(train_path, val_path)
@@ -575,31 +575,16 @@ def main():
                 # SLM loss to ensure the generated audio follows natural speech patterns
                 loss_slm = wl(wav_gt.detach(), y_rec).mean()
 
-                # Calculate speaker consistency loss
-                if multispeaker:
-                    with torch.no_grad():
-                        # Sync speaker encoder weights
-                        speaker_encoder_infer.load_state_dict(model.speaker_encoder.state_dict())
-                        # Calculate speaker embeddings for the reconstructed audio
-                        seg_rec_for_spkenc = resample(y_rec.squeeze(), spkenc_resampler)
-                        spk_embs_rec = speaker_encoder_infer(seg_rec_for_spkenc)
-                    # Compute loss: use embeddings form style waves as target speaker embeddings
-                    loss_scl = 1 - F.cosine_similarity(spk_embs_st, spk_embs_rec).mean()
-
-                    # # Compute speaker embedding for the ground truth audio
-                    # spk_emb_gt = model.speaker_encoder.compute_embedding(
-                    #     seg_gt_for_spkenc.unsqueeze(0)
-                    # ).squeeze()
-                    # print("Speaker embedding for ground truth audio:", spk_emb_gt.shape)
-                    # # Resample generated segments for speaker encoder
-                    # seg_rec_for_spkenc = resample(y_rec.squeeze(), spkenc_resampler)
-                    # # Compute speaker embedding for the reconstructed audio
-                    # spk_emb_rec = model.speaker_encoder.compute_embedding(
-                    #     seg_rec_for_spkenc.unsqueeze(0)
-                    # ).squeeze()
-                    # print("Speaker embedding for reconstructed audio:", spk_emb_rec.shape)
-                    # # Compute speaker consistency loss
-                    # loss_scl = model.speaker_consistency_loss(spk_emb_gt, spk_emb_rec)
+                # # Calculate speaker consistency loss
+                # if multispeaker:
+                #     with torch.no_grad():
+                #         # Sync speaker encoder weights
+                #         speaker_encoder_infer.load_state_dict(model.speaker_encoder.state_dict())
+                #         # Calculate speaker embeddings for the reconstructed audio
+                #         seg_rec_for_spkenc = resample(y_rec.squeeze(), spkenc_resampler)
+                #         spk_embs_rec = speaker_encoder_infer(seg_rec_for_spkenc)
+                #     # Compute loss: use embeddings form style waves as target speaker embeddings
+                #     loss_scl = 1 - F.cosine_similarity(spk_embs_st, spk_embs_rec).mean()
 
                 # Final generator loss is a weighted sum of the above losses
                 loss_gen = (
@@ -608,7 +593,7 @@ def main():
                     + loss_params.lambda_s2s * loss_s2s
                     + loss_params.lambda_gen * loss_gen_all
                     + loss_params.lambda_slm * loss_slm
-                    + loss_params.lambda_scl * loss_scl
+                    # + loss_params.lambda_scl * loss_scl
                 )
 
             else:
@@ -616,7 +601,7 @@ def main():
                 loss_mono = 0
                 loss_gen_all = 0
                 loss_slm = 0
-                loss_scl = 0
+                # loss_scl = 0
                 loss_gen = loss_mel
 
             loss_gen /= grad_accum_steps  # JMa: normalize loss
@@ -666,7 +651,8 @@ def main():
             if (batch_idx + 1) % log_interval == 0 and accelerator.is_main_process:
                 loss_mel = running_loss / log_interval
                 logger.info(
-                    "Epoch [%3d/%d], Step [%4d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f, SCL Loss: %.5f, Fusion Weight: %.5f",
+                    # "Epoch [%3d/%d], Step [%4d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f, SCL Loss: %.5f, Fusion Weight: %.5f",
+                    "Epoch [%3d/%d], Step [%4d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f, Fusion Weight: %.5f",
                     epoch + 1,
                     epochs,
                     batch_idx + 1,
@@ -677,7 +663,7 @@ def main():
                     loss_mono,
                     loss_s2s,
                     loss_slm,
-                    loss_scl,
+                    # loss_scl,
                     accelerator.unwrap_model(model.acoustic_style_encoder).fusion_weight.item(),
                 )
 
@@ -700,7 +686,7 @@ def main():
                         "train/loss_mono": loss_mono,
                         "train/loss_s2s": loss_s2s,
                         "train/loss_slm": loss_slm,
-                        "train/loss_scl": loss_scl,
+                        # "train/loss_scl": loss_scl,
                         "train/fusion_weight": accelerator.unwrap_model(
                             model.acoustic_style_encoder
                         ).fusion_weight.item(),
@@ -841,31 +827,33 @@ def main():
                 # Compute mel-spectrogram loss
                 loss_mel = stft_loss(y_rec.squeeze(), wav_gt.detach())
 
-                # Calculate speaker consistency loss
-                if epoch >= tma_epoch and multispeaker:
-                    spk_embs_tgt = spk_embs_st  # target speaker embeddings
-                    # Calculate speaker embeddings for the reconstructed audio
-                    seg_rec_for_spkenc = resample(y_rec.squeeze(), spkenc_resampler)
-                    spk_embs_rec = speaker_encoder_infer(seg_rec_for_spkenc.detach())
-                    # Compute speaker consistency loss (i.e. cosine similarity)
-                    loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec)
-                    # Gather similarity loss across all processes
-                    loss_sim += accelerator.gather(loss_scl).mean().item()
+                # # Calculate speaker consistency loss
+                # if epoch >= tma_epoch and multispeaker:
+                #     spk_embs_tgt = spk_embs_st  # target speaker embeddings
+                #     # Calculate speaker embeddings for the reconstructed audio
+                #     seg_rec_for_spkenc = resample(y_rec.squeeze(), spkenc_resampler)
+                #     spk_embs_rec = speaker_encoder_infer(seg_rec_for_spkenc.detach())
+                #     # Compute speaker consistency loss (i.e. cosine similarity)
+                #     loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec)
+                #     # Gather similarity loss across all processes
+                #     loss_sim += accelerator.gather(loss_scl).mean().item()
 
                 loss_test += accelerator.gather(loss_mel).mean().item()
                 iters_test += 1
 
         if accelerator.is_main_process:
             logger.info(
-                "Epoch [%3d/%d]: Validation loss: %.3f, Speaker Consistency Loss: %.3f",
+                # "Epoch [%3d/%d]: Validation loss: %.3f, Speaker Consistency Loss: %.3f",
+                "Epoch [%3d/%d]: Validation loss: %.3f",
                 epoch + 1,
                 epochs,
                 loss_test / iters_test,
-                loss_sim / iters_test,
+                # loss_sim / iters_test,
             )
             # attn_image = get_image(s2s_attn[0].cpu().numpy().squeeze())
             wb_logger.log(
-                {"eval/loss_mel": loss_test / iters_test, "eval/loss_scl": loss_sim / iters_test},
+                # {"eval/loss_mel": loss_test / iters_test, "eval/loss_scl": loss_sim / iters_test},
+                {"eval/loss_mel": loss_test / iters_test},
                 step=iters,
             )
 
