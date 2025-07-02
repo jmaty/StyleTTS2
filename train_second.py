@@ -421,6 +421,8 @@ def main():
                 mel_inp_len,
                 ref_mels,
             ) = batch
+            # Current batch size
+            bsize = mel_inp_len.shape[0]
 
             with torch.no_grad():
                 mel_mask = length_to_mask(mel_inp_len // (2**n_down)).to(device)
@@ -453,29 +455,39 @@ def main():
                     ref_pros_style = model.prosodic_style_encoder(ref_mels_batch)
                     ref_style = torch.cat([ref_acoust_style, ref_pros_style], dim=1)
 
-            # --- Vectorized computation of styles ---
-            # The original comment about avgpool preventing batching was incorrect
-            # because AdaptiveAvgPool2d handles variable lengths.
-
-            # Add channel dimension if needed by the encoders
-            ref_mels_batch = mels.unsqueeze(1)  # Shape: [B, 1, n_mels, max_len]
-
-            # Call encoders with the entire batch
-            # No mask needed due to AdaptiveAvgPool2d in the encoders
-            # Global prosodic style [B, style_dim]
-            pros_style = model.prosodic_style_encoder(ref_mels_batch)
-            # Global acoustic style [B, style_dim]
-            acoust_style = model.acoustic_style_encoder(ref_mels_batch)
-            # Set ground truth style for denoiser
+            # --- Compute the style of the entire utterance ---
+            # This operation cannot be done in batch because of the avgpool layer (may need to work on masked avgpool)
+            # ---
+            # Reset global prosodic and acoustic styles
+            pros_style = torch.empty(bsize, model.style_dim, device=device)
+            acoust_style = torch.empty(bsize, model.style_dim, device=device)
+            for bidx in range(bsize):
+                mels_ok = mels[bidx, :, : mel_inp_len[bidx]]
+                pros_style[bidx, :] = model.prosodic_style_encoder(mels_ok.unsqueeze(0).squeeze(1))
+                acoust_style[bidx, :] = model.acoustic_style_encoder(
+                    mels_ok.unsqueeze(0).squeeze(1)
+                )
             target_style = torch.cat([acoust_style, pros_style], dim=-1).detach()
-            # --- End of Vectorized computation of styles ---
+
+            # # --- Vectorized computation of styles ---
+            # # Add channel dimension if needed by the encoders
+            # ref_mels_batch = mels.unsqueeze(1)  # Shape: [B, 1, n_mels, max_len]
+
+            # # Call encoders with the entire batch
+            # # No mask needed due to AdaptiveAvgPool2d in the encoders
+            # # Global prosodic style [B, style_dim]
+            # pros_style = model.prosodic_style_encoder(ref_mels_batch)
+            # # Global acoustic style [B, style_dim]
+            # acoust_style = model.acoustic_style_encoder(ref_mels_batch)
+            # # Set ground truth style for denoiser
+            # target_style = torch.cat([acoust_style, pros_style], dim=-1).detach()
+            # # --- End of Vectorized computation of styles ---
 
             try:
                 # Compute contextualized embeddings from phonetic input
                 h_bert = model.bert(phonemes, attention_mask=(~ph_mask).int())
             except RuntimeError as e:
                 logger.warning("Error: %s", e)
-                # print(f"[!] Error: {e}")
                 continue  # skip batch
 
             # Encoded duration information [B, max_len, 768]
@@ -562,7 +574,6 @@ def main():
                 continue
             mel_len_st = int(mel_inp_len.min().item() / 2 - 1)
 
-            bsize = mel_inp_len.shape[0]  # Use current batch size
             wav_len = (mel_len_gt * 2) * hop_length  # Calculate fixed waveform segment length
 
             # Pre-allocate tensors with the calculated fixed length
