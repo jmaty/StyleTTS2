@@ -23,7 +23,15 @@ from munch import Munch
 from logger import get_logger, setup_logging
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, create_slm_loss
 from meldataset import build_dataloader
-from models import build_model, load_ASR_models, load_checkpoint, load_F0_models, save_checkpoint
+from models import (
+    build_model,
+    load_ASR_models,
+    load_checkpoint,
+    load_F0_models,
+    save_checkpoint,
+    model2device,
+    model2mode,
+)
 from Modules.pts import PTS
 from optimizers import build_optimizer
 from text_utils import TextCleaner
@@ -188,7 +196,7 @@ def main():
                 "hop_length": 300,
             },
         ),
-        "use_ref_mel": False,
+        "use_ref_sample": False,
     }
 
     # Prepare dataloaders
@@ -231,7 +239,7 @@ def main():
     }
 
     # Move models to device (cuda)
-    _ = [model[key].to(device) for key in model]
+    model = model2device(model, device)
 
     # initialize optimizers after preparing models for compatibility with FSDP
     parameters_dict = {key: model[key].parameters() for key in model}
@@ -295,14 +303,24 @@ def main():
         logger.info(" | > Input iterations: %d\n", iters)
 
     # === Start of training loop ==============================================
+    model = model2mode(model, "eval")
 
     # Iterate through the defined number of epochs
     for epoch in range(start_epoch, epochs):
         running_loss = 0
         start_time = time.time()
 
-        # Set all models to train mode
-        _ = [model[key].train() for key in model]
+        # Models in train mode from the beginning
+        train_components = [
+            "decoder",
+            "text_encoder",
+            "acoustic_style_encoder",
+        ]
+        # Models in train mode based on the epoch
+        if epoch >= tma_epoch:
+            train_components.extend(["msd", "mpd", "text_aligner"])
+        # Set models to train mode
+        model = model2mode(model, "train", train_components)
 
         # JMa: Zero gradients of all optimizers at each epoch start
         optimizer.zero_grad()
@@ -314,14 +332,15 @@ def main():
             batch = [b.to(device) for b in batch[1:]]
             # Keep individual batch tensors
             (
-                spk_embs,  # Speaker embeddings [B, 512]
+                spk_embs,  # Speaker embeddings [B, spk_emd_dim]
                 phonemes,  # Padded input phoneme IDs [B, T_text]
                 ph_inp_lens,  # Input phoneme lengths [B]
-                _,
-                _,
+                _,  # OOD texts not used in 1st stage training
+                _,  # OOD phoneme lengths not used in 1st stage training
                 mels,  # Padded mel spectrograms [B, n_mels, T_mel]
                 mel_inp_len,  # Mel spectrogram lengths [B]
-                _,
+                _,  # Reference mel spectrograms not used in 1st stage
+                _,  # Reference speaker embeddings not used in 1st stage
             ) = batch
 
             # Generate masks for text and mel spectrograms
@@ -462,7 +481,9 @@ def main():
             # - if multispeaker, use other (style reference) mel spectrogram
             mel4style = mel_st.unsqueeze(1) if multispeaker else mel_gt.unsqueeze(1)
             # Only (acoustic) style encoder is trained within 1st stage training
-            style = model.acoustic_style_encoder(mel4style, spk_embs)
+            style = model.acoustic_style_encoder(
+                mel4style, spk_embs if multispeaker and epoch >= tma_epoch else None
+            )
 
             # Reconstruct the audio from the text-audio aligned encoded features, predicted style,
             # and ground truth pitch and norm
@@ -630,7 +651,7 @@ def main():
         # Validation
         loss_test = 0
         # Set all models to eval mode
-        _ = [model[key].eval() for key in model]
+        model = model2mode(model, "eval")
 
         with torch.no_grad():
             iters_test = 0
@@ -640,15 +661,18 @@ def main():
                 waves = batch[0]
                 batch = [b.to(device) for b in batch[1:]]
                 (
-                    spk_embs,  # Speaker embeddings [B, 512]
+                    spk_embs,  # Speaker embeddings [B, spk_emb_dim]
                     phonemes,  # Padded input phoneme IDs [B, T_text]
                     ph_inp_lens,  # Input phoneme lengths [B]
-                    _,
-                    _,
+                    _,  # OOD texts not used in 1st stage training
+                    _,  # OOD phoneme lengths not used in 1st stage training
                     mels,  # Padded mel spectrograms [B, n_mels, T_mel]
                     mel_inp_len,  # Mel spectrogram lengths [B]
-                    _,
+                    _,  # Reference mel spectrograms not used in 1st stage
+                    _,  # Reference speaker embeddings not used in 1st stage
                 ) = batch
+                # Current batch size
+                bsize = mel_inp_len.shape[0]
 
                 with torch.no_grad():
                     mel_mask = length_to_mask(mel_inp_len // (2**n_down)).to("cuda")
@@ -687,17 +711,23 @@ def main():
                 mel_len_gt = min([int(mel_inp_len.min().item() / 2 - 1), max_len // 2])
 
                 # --- Pre-allocate tensors ---
-
-                bsize = mel_inp_len.shape[0]  # Use current batch size
                 wav_len = (mel_len_gt * 2) * hop_length  # Calculate fixed waveform segment length
 
                 # Pre-allocate tensors with the calculated fixed length
                 # Note: Style tensor `mel_st` is not used in validation
                 ph_algn = torch.empty(
-                    bsize, h_algn.shape[1], mel_len_gt, device=device, dtype=h_algn.dtype
+                    bsize,
+                    h_algn.shape[1],
+                    mel_len_gt,
+                    device=device,
+                    dtype=h_algn.dtype,
                 )
                 mel_gt = torch.empty(
-                    bsize, mels.shape[1], mel_len_gt * 2, device=device, dtype=mels.dtype
+                    bsize,
+                    mels.shape[1],
+                    mel_len_gt * 2,
+                    device=device,
+                    dtype=mels.dtype,
                 )
                 wav_gt = torch.empty(bsize, wav_len, device=device, dtype=torch.float)
 
@@ -725,12 +755,18 @@ def main():
                 # --- End of Pre-allocated tensors ---
 
                 f0_real, _, _ = model.pitch_extractor(mel_gt.unsqueeze(1))
-
-                style = model.acoustic_style_encoder(mel_gt.unsqueeze(1), spk_embs)
-
                 norm_real = log_norm(mel_gt.unsqueeze(1)).squeeze(1)
+
+                # Style encoding:
+                style = model.acoustic_style_encoder(
+                    mel_gt.unsqueeze(1), spk_embs if multispeaker and epoch >= tma_epoch else None
+                )
+
+                # Reconstruct the audio from the text-audio aligned encoded features, predicted style,
+                # and ground truth pitch and norm
                 y_rec = model.decoder(ph_algn, f0_real, norm_real, style)
 
+                # Compute mel-spectrogram loss
                 loss_mel = stft_loss(y_rec.squeeze(), wav_gt.detach())
 
                 loss_test += accelerator.gather(loss_mel).mean().item()
@@ -759,7 +795,7 @@ def main():
                         mels[idx, :, :mel_len].unsqueeze(0),  # Ground-truth mel spectrogram
                         # Ground-truth phoneme-audio alignment
                         h_algn[idx, :, : mel_len // 2].unsqueeze(0),
-                        spk_embs[idx].unsqueeze(0),
+                        spk_embs[idx].unsqueeze(0) if multispeaker and epoch >= tma_epoch else None,
                     )
 
                     # Write and save val audio
@@ -767,8 +803,8 @@ def main():
                         outfile = f"epoch_1st_{epoch:0>5}_val-rec-{idx}.wav"
                         pts.save_wav(wav, osp.join(test_audio_dir, outfile))
 
-                    # Save ground truth
-                    if epoch == 0:
+                    # Save ground truth audio in given epochs
+                    if epoch in (0, tma_epoch):
                         wav_gt = waves[idx].squeeze()
                         if save_val_audio:
                             outfile = f"epoch_1st_{epoch:0>5}_gt-{idx}.wav"

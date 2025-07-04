@@ -1,5 +1,6 @@
 # coding:utf-8
 
+import copy
 import math
 import os
 from collections import OrderedDict
@@ -10,13 +11,9 @@ import torch.nn.functional as F
 import yaml
 from munch import Munch
 from torch.nn.utils import spectral_norm, weight_norm
-from xlstm import (
-    mLSTMBlockConfig,
-    mLSTMLayerConfig,
-    xLSTMBlockStack,
-    xLSTMBlockStackConfig,
-)
+from xlstm import mLSTMBlockConfig, mLSTMLayerConfig, xLSTMBlockStack, xLSTMBlockStackConfig
 
+from logger import get_logger
 from Modules.diffusion.diffusion import AudioDiffusionConditional
 from Modules.diffusion.modules import StyleTransformer1d, Transformer1d
 from Modules.diffusion.sampler import KDiffusion, LogNormalDistribution
@@ -29,7 +26,6 @@ from Modules.hifigan import Decoder as HifiDecoder
 from Modules.istftnet import Decoder as ISTFTDecoder
 from Utils.ASR.models import ASRCNN
 from Utils.JDC.model import JDCNet
-from logger import get_logger
 
 # Setup logger
 logger = get_logger(__name__)
@@ -184,7 +180,7 @@ class AcousticStyleEncoder(nn.Module):
     def __init__(
         self,
         dim_in=48,
-        dim_spk_emb=512,
+        spk_emb_dim=512,
         style_dim=128,
         max_conv_dim=384,
         init_fusion_weight=0.01,
@@ -193,13 +189,13 @@ class AcousticStyleEncoder(nn.Module):
         """Initialize the Acoustic Style Encoder.
         Args:
             dim_in (int, optional): Input dimension for the projection layer. Defaults to 48.
-            dim_spk_emb (int, optional): Dimension of the external speaker embedding. Defaults to 512.
+            spk_emb_dim (int, optional): Dimension of the external speaker embedding. Defaults to 512.
             style_dim (int, optional): Output dimension for the projection layer, representing the style embedding dimension. Defaults to 128.
             initial_fusion_weight (float, optional): Initial value for the trainable fusion weight. Defaults to 0.01.
             activation (torch.nn.Module, optional): Activation function to apply after the projection. Defaults to None.
         """
         super().__init__()
-        self.project = nn.Linear(dim_spk_emb, style_dim)
+        self.project = nn.Linear(spk_emb_dim, style_dim)
         self.activation = activation
         self.style_encoder = StyleEncoder(
             dim_in=dim_in,
@@ -209,7 +205,7 @@ class AcousticStyleEncoder(nn.Module):
         # Initialize the fusion weight as a trainable parameter
         self.fusion_weight = nn.Parameter(torch.tensor(init_fusion_weight))
 
-    def forward(self, x, spk_emb):
+    def forward(self, x, spk_emb=None):
         """
         Forward pass of the module.
         Args:
@@ -218,11 +214,16 @@ class AcousticStyleEncoder(nn.Module):
         Returns:
             torch.Tensor: The output tensor after projection, optional activation, and addition of `s`.
         """
+        if spk_emb is None or spk_emb.numel() == 0:
+            return self.style_encoder(x)
+
+        # External speaker embedding is provided, project it, apply activation if specified,
+        # and fuse with the internal style encoder output
         spk_emb = self.project(spk_emb)
         if self.activation:
             spk_emb = self.activation(spk_emb)
 
-        return self.style_encoder(x) + self.fusion_weight * spk_emb
+        return (1 - self.fusion_weight) * self.style_encoder(x) + self.fusion_weight * spk_emb
 
 
 class StyleEncoder(nn.Module):
@@ -629,60 +630,6 @@ class ProsodyPredictor(nn.Module):
         self.f0_proj = nn.Conv1d(d_hid // 2, 1, 1, 1, 0)
         self.n_proj = nn.Conv1d(d_hid // 2, 1, 1, 1, 0)
 
-    # def forward(self, texts, style, text_lengths=None, alignment=None, m=None, f0=None):
-    #     if f0:
-    #         x, s = texts, style
-    #         # x  = self.prepare_projection(x.transpose(-1, -2))
-    #         # x = self.shared(x)
-
-    #         x = self.shared(x.transpose(-1, -2))
-    #         x = self.prepare_projection(x)
-
-    #         f0o = x.transpose(-1, -2)
-    #         for block in self.f0:
-    #             f0o = block(f0o, s)
-    #         f0o = self.f0_proj(f0o)
-
-    #         n = x.transpose(-1, -2)
-    #         for block in self.n:
-    #             n = block(n, s)
-    #         n = self.n_proj(n)
-
-    #         return f0o.squeeze(1), n.squeeze(1)
-    #     else:
-    #         # Problem is here
-    #         d = self.text_encoder(texts, style, text_lengths, m)
-
-    #         # batch_size = d.shape[0]
-    #         # text_size = d.shape[1]
-
-    #         # # predict duration
-    #         # input_lengths = text_lengths.cpu().numpy()
-
-    #         # x = nn.utils.rnn.pack_padded_sequence(
-    #         #     d, input_lengths, batch_first=True, enforce_sorted=False)
-    #         x = d  # this dude can handle variable seq len so no need for padding
-    #         m = m.to(text_lengths.device).unsqueeze(1)
-
-    #         x = self.lstm(x)  # no longer using lstm
-    #         x = self.prepare_projection(x)
-
-    #         # x, _ = nn.utils.rnn.pad_packed_sequence(
-    #         #     x, batch_first=True)
-
-    #         # x_pad = torch.zeros([x.shape[0], m.shape[-1], x.shape[-1]])
-
-    #         # x_pad[:, :x.shape[1], :] = x
-    #         # x = x_pad.to(x.device)
-
-    #         x = x.transpose(-1, -2)
-    #         x = x.permute(0, 2, 1)
-    #         duration = self.duration_proj(nn.functional.dropout(x, 0.5, training=self.training))
-
-    #         en = d.transpose(-1, -2) @ alignment
-
-    #         return duration.squeeze(-1), en
-
     def forward(self, texts, style, text_lengths=None, alignment=None, mask=None, compute_f0=False):
         """Forward pass of the model.
         This method performs one of two main operations based on the `compute_f0` flag:
@@ -1029,7 +976,7 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     # Acoustic style encoder
     acoustic_style_encoder = AcousticStyleEncoder(
         dim_in=args.dim_in,
-        dim_spk_emb=args.dim_spk_emb,
+        spk_emb_dim=args.spk_emb_dim,
         style_dim=args.style_dim,
         max_conv_dim=args.max_conv_dim,
         # Initial external/internal speaker embedding fusion weight
@@ -1246,3 +1193,79 @@ def save_checkpoint(
 
     # Return saved model's filepath
     return filepath
+
+
+def model2device(model, device="cpu"):
+    """
+    Move model parameters to the specified device.
+    Args:
+        model (dict): Dictionary of model components
+        device (torch.device): Device to move the model to (e.g., 'cuda' or 'cpu')
+    Returns:
+        dict: Model with parameters moved to the specified device
+    """
+    device = torch.device(device)  # Convert once
+    for key, module in model.items():  # .items() is faster
+        if hasattr(module, "to"):
+            model[key] = module.to(device, non_blocking=True)  # non_blocking for CUDA
+    return model
+
+
+def model2mode(model, mode="train", components=None):
+    """
+    Set model to training or evaluation mode.
+    Args:
+        model (dict): Dictionary of model components
+        mode (str): Mode to set the model to ('train' or 'eval')
+        components (list, optional): List of component names (keys) to set mode for.
+                                   If None, all components are set. Defaults to None.
+    Returns:
+        dict: Model with the specified mode set
+    """
+    if mode not in ["train", "eval"]:
+        raise ValueError("Mode must be either 'train' or 'eval'")
+
+    # If no specific components specified, use all components
+    if components is None:
+        components = model.keys()
+
+    method_name = mode
+    for key in components:
+        if key in model:
+            module = model[key]
+            if hasattr(module, method_name):
+                try:
+                    getattr(module, method_name)()
+                    logger.debug("Component '%s' set to %s mode", key, mode)
+                except (RuntimeError, TypeError, AttributeError) as e:
+                    logger.warning("Failed to set %s to %s mode: %s", key, mode, e)
+            else:
+                logger.debug("Module '%s' does not have a .%s() method", key, method_name)
+        else:
+            logger.warning("Component '%s' not found in model", key)
+
+    return model
+
+
+def clone_model(model, device=None, freeze=False, eval_mode=False):
+    """
+    Returns a deep copy of a PyTorch model.
+    Args:
+        model:      model to be cloned
+        device:     torch.device (optional), target device for clone
+        freeze:     bool, if True sets requires_grad=False on all parameters
+        eval_mode:  bool, if True puts model in eval() mode
+    Returns:
+        model_clone: New instance, weights copied.
+    """
+    model_clone = copy.deepcopy(model)
+    if device is not None:
+        model_clone = model_clone.to(device)
+    else:
+        model_clone = model_clone.to(model.device)
+    if freeze:
+        for param in model_clone.parameters():
+            param.requires_grad = False
+    if eval_mode:
+        model_clone.eval()
+    return model_clone

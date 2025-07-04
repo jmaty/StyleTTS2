@@ -23,7 +23,15 @@ from torch import nn
 from logger import get_logger, setup_logging
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, create_slm_loss
 from meldataset import build_dataloader
-from models import build_model, load_ASR_models, load_checkpoint, load_F0_models, save_checkpoint
+from models import (
+    build_model,
+    load_ASR_models,
+    load_checkpoint,
+    load_F0_models,
+    save_checkpoint,
+    model2device,
+    model2mode,
+)
 from Modules.diffusion.sampler import ADPM2Sampler, DiffusionSampler, KarrasSchedule
 from Modules.pts import PTS
 from Modules.slmadv import SLMAdversarialLoss
@@ -129,6 +137,7 @@ def main():
     )
     # Set up test sentences
     test_sentences = data_params.get("test_sentences", [])
+    logger.debug("Test sentences: %s", test_sentences)
 
     # Set up loss and optimizer parameters
     loss_params = config.loss_params
@@ -161,8 +170,6 @@ def main():
     # Load data & dataloaders
     train_list, val_list = get_data_path_list(train_path, val_path)
 
-    logger.info("BERT size: %d", model.bert.config.max_position_embeddings)
-
     dataset_config = {
         "sr": sr,
         "min_length": data_params.min_length,
@@ -178,7 +185,7 @@ def main():
                 "hop_length": 300,
             },
         ),
-        "use_ref_mel": True,
+        "use_ref_sample": True,
     }
 
     # Prepare dataloaders
@@ -210,7 +217,7 @@ def main():
     wb_logger.summary["n_ood_texts"] = train_dataloader.dataset.number_ood_texts()
 
     # Move models to device (cuda)
-    _ = [model[key].to(device) for key in model]
+    model = model2device(model, device)
 
     # DP
     for key in model:
@@ -379,31 +386,43 @@ def main():
         start_time = time.time()
 
         # Set all models to eval mode
-        _ = [model[key].eval() for key in model]
+        model = model2mode(model, "eval")
 
-        # Set following models to train mode
-        model.prosodic_predictor.train()
-        model.bert_encoder.train()
-        model.bert.train()
-        model.msd.train()
-        model.mpd.train()
-        model.acoustic_style_encoder.train()
-        model.prosodic_style_encoder.train()
+        # Models in train mode from the beginning
+        train_components = [
+            "prosodic_predictor",
+            "bert_encoder",
+            "bert",
+            "prosodic_style_encoder",
+        ]
+        # Models in train mode based on the epoch
+        if epoch >= diff_epoch:
+            train_components.extend(["msd", "mpd", "diffusion"])
+        if epoch >= joint_epoch:
+            train_components.extend(["decoder", "acoustic_style_encoder", "wd"])
+
+        # Set models to train mode
+        model = model2mode(model, "train", train_components)
 
         # Train loop for each epoch
         for batch_idx, batch in enumerate(train_dataloader):
-            waves = batch[0]
+            waves = batch[0]  # Keep ground truth audio
+            # Move other batch tensors to device
             batch = [b.to(device) for b in batch[1:]]
+            # Keep individual batch tensors
             (
-                spk_embs,
-                phonemes,
-                ph_inp_lens,
-                ref_phonemes,
-                ref_lens,
-                mels,
-                mel_inp_len,
-                ref_mels,
+                spk_embs,  # Speaker embeddings [B, spk_emd_dim]
+                phonemes,  # Padded input phoneme IDs [B, T_text]
+                ph_inp_lens,  # Input phoneme lengths [B]
+                ref_phonemes,  # OOD texts
+                ref_lens,  # OOD phoneme lengths
+                mels,  # Padded mel spectrograms [B, n_mels, T_mel]
+                mel_inp_len,  # Mel spectrogram lengths [B]
+                ref_mels,  # Reference mel spectrograms
+                ref_spk_embs,  # Reference speaker embeddings
             ) = batch
+            # Current batch size
+            bsize = mel_inp_len.shape[0]
 
             with torch.no_grad():
                 mel_mask = length_to_mask(mel_inp_len // (2**n_down)).to(device)
@@ -421,10 +440,9 @@ def main():
                 mask_st = mask_from_lens(d_algn, ph_inp_lens, mel_inp_len // (2**n_down))
                 d_algn_mono = maximum_path(d_algn, mask_st)
 
-                # encode
+                # Encode
                 h_ph = model.text_encoder(phonemes, ph_inp_lens, ph_mask)
                 h_algn = h_ph @ d_algn_mono
-
                 d_gt = d_algn_mono.sum(axis=-1).detach()
 
                 # Compute reference styles
@@ -432,33 +450,34 @@ def main():
                 if multispeaker and epoch >= diff_epoch:
                     # Vectorized computation for reference styles
                     ref_mels_batch = ref_mels.unsqueeze(1)  # Shape: [B, 1, n_mels, max_ref_len]
-                    ref_acoust_style = model.acoustic_style_encoder(ref_mels_batch, spk_embs)
+                    ref_acoust_style = model.acoustic_style_encoder(ref_mels_batch, ref_spk_embs)
                     ref_pros_style = model.prosodic_style_encoder(ref_mels_batch)
                     ref_style = torch.cat([ref_acoust_style, ref_pros_style], dim=1)
 
-            # --- Vectorized computation of styles ---
-            # The original comment about avgpool preventing batching was incorrect
-            # because AdaptiveAvgPool2d handles variable lengths.
-
-            # Add channel dimension if needed by the encoders
-            ref_mels_batch = mels.unsqueeze(1)  # Shape: [B, 1, n_mels, max_len]
-
-            # Call encoders with the entire batch
-            # No mask needed due to AdaptiveAvgPool2d in the encoders
-            # Global prosodic style [B, style_dim]
-            pros_style = model.prosodic_style_encoder(ref_mels_batch)
-            # Global acoustic style [B, style_dim]
-            acoust_style = model.acoustic_style_encoder(ref_mels_batch, spk_embs)
+            # --- Compute the style of the entire utterance ---
+            # This operation cannot be done in batch because of the avgpool layer (may need to work on masked avgpool)
+            # ---
+            # Initialize global prosodic and acoustic styles
+            pros_style = torch.empty(bsize, model_params.style_dim, device=device)
+            acoust_style = torch.empty(bsize, model_params.style_dim, device=device)
+            for bidx in range(bsize):
+                mels_ok = mels[bidx, :, : mel_inp_len[bidx].item()]
+                pros_style[bidx, :] = model.prosodic_style_encoder(
+                    mels_ok.unsqueeze(0).unsqueeze(1)
+                )
+                acoust_style[bidx, :] = model.acoustic_style_encoder(
+                    mels_ok.unsqueeze(0).unsqueeze(1),
+                    spk_embs[bidx],
+                )
             # Set ground truth style for denoiser
             target_style = torch.cat([acoust_style, pros_style], dim=-1).detach()
-            # --- End of Vectorized computation of styles ---
 
             try:
                 # Compute contextualized embeddings from phonetic input
                 h_bert = model.bert(phonemes, attention_mask=(~ph_mask).int())
             except RuntimeError as e:
-                logger.warning("Error: %s", e)
-                # print(f"[!] Error: {e}")
+                logger.warning("Error while computing PL-BERT embeddings: %s", e)
+                logger.warning("Skipping batch: %d", batch_idx)
                 continue  # skip batch
 
             # Encoded duration information [B, max_len, 768]
@@ -509,6 +528,7 @@ def main():
                 # style reconstruction loss
                 loss_sty = F.l1_loss(pred_style, target_style.detach())
 
+            # Predict prosodic features
             d, p_algn = model.prosodic_predictor(
                 h_bert_en,
                 pros_style,
@@ -540,16 +560,32 @@ def main():
 
             # Pre-allocate tensors with the calculated fixed length
             ph_algn = torch.empty(
-                bsize, h_algn.shape[1], mel_len_gt, device=device, dtype=h_algn.dtype
+                bsize,
+                h_algn.shape[1],
+                mel_len_gt,
+                device=device,
+                dtype=h_algn.dtype,
             )
             pros_algn = torch.empty(
-                bsize, p_algn.shape[1], mel_len_gt, device=device, dtype=p_algn.dtype
+                bsize,
+                p_algn.shape[1],
+                mel_len_gt,
+                device=device,
+                dtype=p_algn.dtype,
             )
             mel_gt = torch.empty(
-                bsize, mels.shape[1], mel_len_gt * 2, device=device, dtype=mels.dtype
+                bsize,
+                mels.shape[1],
+                mel_len_gt * 2,
+                device=device,
+                dtype=mels.dtype,
             )
             mel_st = torch.empty(
-                bsize, mels.shape[1], mel_len_st * 2, device=device, dtype=mels.dtype
+                bsize,
+                mels.shape[1],
+                mel_len_st * 2,
+                device=device,
+                dtype=mels.dtype,
             )
             wav_gt = torch.empty(bsize, wav_len, device=device, dtype=torch.float)
 
@@ -699,7 +735,6 @@ def main():
                     nn.utils.clip_grad_norm_(model.prosodic_style_encoder.parameters(), grad_clip)
                     nn.utils.clip_grad_norm_(model.decoder.parameters(), grad_clip)
                 optimizer.step("acoustic_style_encoder")
-                optimizer.step("prosodic_style_encoder")
                 optimizer.step("decoder")
 
                 if slmadv is not None:  # None means no SLM discriminator training
@@ -895,18 +930,25 @@ def main():
                 optimizer.zero_grad()
 
                 try:
+                    # Keep ground truth audio
                     waves = batch[0]
+                    # Move other batch tensors to device
                     batch = [b.to(device) for b in batch[1:]]
+                    # Keep individual batch tensors
                     (
-                        spk_embs,
-                        phonemes,
-                        ph_inp_lens,
-                        ref_phonemes,
-                        ref_lens,
-                        mels,
-                        mel_inp_len,
-                        ref_mels,
+                        spk_embs,  # Speaker embeddings [B, spk_emd_dim]
+                        phonemes,  # Padded input phoneme IDs [B, T_text]
+                        ph_inp_lens,  # Input phoneme lengths [B]
+                        ref_phonemes,  # OOD texts
+                        ref_lens,  # OOD phoneme lengths
+                        mels,  # Padded mel spectrograms [B, n_mels, T_mel]
+                        mel_inp_len,  # Mel spectrogram lengths [B]
+                        ref_mels,  # Reference mel spectrograms
+                        ref_spk_embs,  # Reference speaker embeddings
                     ) = batch
+                    # Current batch size
+                    bsize = mel_inp_len.shape[0]
+
                     with torch.no_grad():
                         mel_mask = length_to_mask(mel_inp_len // (2**n_down)).to(device)
                         ph_mask = length_to_mask(ph_inp_lens).to(phonemes.device)
@@ -925,19 +967,14 @@ def main():
 
                         d_gt = d_algn_mono.sum(axis=-1).detach()
 
-                    # --- Vectorized style computation ---
-                    # Add channel dimension
-                    ref_mels_batch = mels.unsqueeze(1)  # Shape: [B, 1, n_mels, max_len]
-                    # Call encoders with the entire batch
-                    # No mask needed due to AdaptiveAvgPool2d in the encoders
-                    # Shape: [B, style_dim]
-                    pros_style = model.prosodic_style_encoder(ref_mels_batch)
-                    # acoust_style = model.style_encoder(spk_embs)      # Shape: [B, style_dim]
-                    # --- End of vectorized style computation ---
-
-                    # TODO: not used anymore!?
-                    # target_style = torch.cat([acoust_style, pros_style, gs], dim=-1).detach()
-                    # --- End of Vectorized style computation ---
+                    # Compute prosodic style for the entire utterance
+                    # This operation cannot be done in batch because of the avgpool layer (may need to work on masked avgpool)
+                    pros_style = torch.empty(bsize, model_params.style_dim, device=device)
+                    for bidx in range(bsize):
+                        mels_ok = mels[bidx, :, : mel_inp_len[bidx]]
+                        pros_style[bidx, :] = model.prosodic_style_encoder(
+                            mels_ok.unsqueeze(0).unsqueeze(1)
+                        )
 
                     # # JMa: Fix: remove explicitly 2nd dimension
                     # # otherwise all dimensions of size 1 are removed
@@ -965,7 +1002,6 @@ def main():
                     # Get clips
                     mel_len_gt = int(mel_inp_len.min().item() / 2 - 1)
 
-                    bsize = mel_inp_len.shape[0]  # Use current batch size
                     # Calculate fixed waveform segment length
                     wav_len = (mel_len_gt * 2) * hop_length
 
@@ -1110,7 +1146,7 @@ def main():
                         pts.save_wav(wav_pred, os.path.join(test_audio_dir, outfile))
 
                     # Save ground truth
-                    if epoch == 0 or multispeaker:
+                    if epoch in (0, diff_epoch, joint_epoch):
                         # wav_gt = np.squeeze(waves[idx].cpu().numpy())
                         wav_gt = waves[idx].squeeze()
                         if save_val_audio and epoch % saving_epoch == 0:
@@ -1129,11 +1165,11 @@ def main():
                     # Add channel dimension
                     # Shape: [n_val_samples, 1, n_mels, max_len]
                     ref_mels_val = ref_mels[:n_val_samples].unsqueeze(1)
-                    spk_embs_val = spk_embs[:n_val_samples]
+                    ref_spk_embs_val = ref_spk_embs[:n_val_samples]
 
                     # Call encoders with the entire batch
                     # Shape: [ref_mels_val, style_dim]
-                    ref_acoust_style = model.acoustic_style_encoder(ref_mels_val, spk_embs_val)
+                    ref_acoust_style = model.acoustic_style_encoder(ref_mels_val, ref_spk_embs_val)
                     # Shape: [ref_mels_val, style_dim]
                     ref_pros_style = model.prosodic_style_encoder(ref_mels_val)
                     # Combined style [B, 256+512, T]
@@ -1160,7 +1196,7 @@ def main():
                         pts.save_wav(wav_pred, os.path.join(test_audio_dir, outfile))
 
                     # Save ground truth
-                    if epoch == 0 or multispeaker:
+                    if epoch in (0, diff_epoch, joint_epoch):
                         wav_gt = waves[idx].squeeze()
                         if save_val_audio and epoch % saving_epoch == 0:
                             outfile = f"epoch_2nd_{epoch:0>5}_gt-{idx}.wav"
@@ -1207,6 +1243,11 @@ def main():
             if save_test_audio and epoch >= joint_epoch:
                 # Set up number of speakers to test if multispeaker is enabled
                 n_speakers = min(3, len(ref_style)) if multispeaker else 1
+                logger.debug(
+                    "Synthesizing %d test sentences for %d speakers",
+                    len(test_sentences),
+                    n_speakers,
+                )
                 # Iterate over the defined number of validation test speakers
                 for sidx in range(n_speakers):
                     # Generate test sentences for each speaker
