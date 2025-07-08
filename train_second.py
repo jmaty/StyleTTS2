@@ -459,13 +459,15 @@ def main():
             # This operation cannot be done in batch because of the avgpool layer (may need to work on masked avgpool)
             # ---
             # Reset global prosodic and acoustic styles
-            pros_style = torch.empty(bsize, model.style_dim, device=device)
-            acoust_style = torch.empty(bsize, model.style_dim, device=device)
+            pros_style = torch.empty(bsize, model_params.style_dim, device=device)
+            acoust_style = torch.empty(bsize, model_params.style_dim, device=device)
             for bidx in range(bsize):
                 mels_ok = mels[bidx, :, : mel_inp_len[bidx]]
-                pros_style[bidx, :] = model.prosodic_style_encoder(mels_ok.unsqueeze(0).squeeze(1))
+                pros_style[bidx, :] = model.prosodic_style_encoder(
+                    mels_ok.unsqueeze(0).unsqueeze(1)
+                )
                 acoust_style[bidx, :] = model.acoustic_style_encoder(
-                    mels_ok.unsqueeze(0).squeeze(1)
+                    mels_ok.unsqueeze(0).unsqueeze(1)
                 )
             target_style = torch.cat([acoust_style, pros_style], dim=-1).detach()
 
@@ -578,16 +580,32 @@ def main():
 
             # Pre-allocate tensors with the calculated fixed length
             ph_algn = torch.empty(
-                bsize, h_algn.shape[1], mel_len_gt, device=device, dtype=h_algn.dtype
+                bsize,
+                h_algn.shape[1],
+                mel_len_gt,
+                device=device,
+                dtype=h_algn.dtype,
             )
             pros_algn = torch.empty(
-                bsize, p_algn.shape[1], mel_len_gt, device=device, dtype=p_algn.dtype
+                bsize,
+                p_algn.shape[1],
+                mel_len_gt,
+                device=device,
+                dtype=p_algn.dtype,
             )
             mel_gt = torch.empty(
-                bsize, mels.shape[1], mel_len_gt * 2, device=device, dtype=mels.dtype
+                bsize,
+                mels.shape[1],
+                mel_len_gt * 2,
+                device=device,
+                dtype=mels.dtype,
             )
             mel_st = torch.empty(
-                bsize, mels.shape[1], mel_len_st * 2, device=device, dtype=mels.dtype
+                bsize,
+                mels.shape[1],
+                mel_len_st * 2,
+                device=device,
+                dtype=mels.dtype,
             )
             wav_gt = torch.empty(bsize, wav_len, device=device, dtype=torch.float)
 
@@ -952,6 +970,9 @@ def main():
                         mel_inp_len,
                         ref_mels,
                     ) = batch
+                    # Current batch size
+                    bsize = mel_inp_len.shape[0]
+
                     with torch.no_grad():
                         mel_mask = length_to_mask(mel_inp_len // (2**n_down)).to(device)
                         ph_mask = length_to_mask(ph_inp_lens).to(phonemes.device)
@@ -970,19 +991,19 @@ def main():
 
                         d_gt = d_algn_mono.sum(axis=-1).detach()
 
-                    # --- Vectorized style computation ---
-                    # Add channel dimension
-                    ref_mels_batch = mels.unsqueeze(1)  # Shape: [B, 1, n_mels, max_len]
-                    # Call encoders with the entire batch
-                    # No mask needed due to AdaptiveAvgPool2d in the encoders
-                    # Shape: [B, style_dim]
-                    pros_style = model.prosodic_style_encoder(ref_mels_batch)
-                    # acoust_style = model.style_encoder(spk_embs)      # Shape: [B, style_dim]
-                    # --- End of vectorized style computation ---
+                    # --- Compute the style of the entire utterance ---
+                    # This operation cannot be done in batch because of the avgpool layer (may need to work on masked avgpool)
+                    # ---
+                    # Reset global prosodic and acoustic styles
+                    pros_style = torch.empty(bsize, model_params.style_dim, device=device)
+                    for bidx in range(bsize):
+                        mels_ok = mels[bidx, :, : mel_inp_len[bidx]]
+                        pros_style[bidx, :] = model.prosodic_style_encoder(
+                            mels_ok.unsqueeze(0).unsqueeze(1)
+                        )
 
                     # TODO: not used anymore!?
-                    # target_style = torch.cat([acoust_style, pros_style, gs], dim=-1).detach()
-                    # --- End of Vectorized style computation ---
+                    # target_style = torch.cat([acoust_style, pros_style], dim=-1).detach()
 
                     # # JMa: Fix: remove explicitly 2nd dimension
                     # # otherwise all dimensions of size 1 are removed
@@ -1172,6 +1193,8 @@ def main():
                 ref_style = None
 
                 # --- Vectorized reference style computation ---
+                # We can do it in batch because `ref_mels` should have the same length
+                # (unlike mels in training loop)
                 if multispeaker and epoch >= diff_epoch:
                     # Take only the first `n_val_samples` samples
                     # Add channel dimension
