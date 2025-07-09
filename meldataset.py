@@ -489,8 +489,6 @@ class Collater(object):
         # batch[0] = wave, mel, text, f0, speakerid
         batch_size = len(batch)
 
-        print([b[7] for b in batch])
-
         # Sort batch by acoustic feature (mel) length (descending)
         # b[1] is acoustic_feature from __getitem__
         lengths = [b[1].shape[1] for b in batch]

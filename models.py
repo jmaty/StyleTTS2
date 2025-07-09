@@ -195,8 +195,13 @@ class AcousticStyleEncoder(nn.Module):
             activation (torch.nn.Module, optional): Activation function to apply after the projection. Defaults to None.
         """
         super().__init__()
-        self.project = nn.Linear(spk_emb_dim, style_dim)
+
+        self.spk_proj = nn.Sequential(
+            nn.Linear(spk_emb_dim, style_dim),  # Reduce the dimension of the speaker embedding
+            nn.LayerNorm(style_dim),  # Stabilize the statistics
+        )
         self.activation = activation
+
         self.style_encoder = StyleEncoder(
             dim_in=dim_in,
             style_dim=style_dim,
@@ -210,16 +215,16 @@ class AcousticStyleEncoder(nn.Module):
         Forward pass of the module.
         Args:
             x (torch.Tensor): External speaker embedding.
-            s (torch.Tensor): Style embedding.
+            spk_emb (torch.Tensor): Style embedding.
         Returns:
-            torch.Tensor: The output tensor after projection, optional activation, and addition of `s`.
+            torch.Tensor: The output style tensor.
         """
         if spk_emb is None or spk_emb.numel() == 0:
             return self.style_encoder(x)
 
-        # External speaker embedding is provided, project it, apply activation if specified,
-        # and fuse with the internal style encoder output
-        spk_emb = self.project(spk_emb)
+        # External speaker embedding is provided, project it, normalize,
+        # apply activation if specified, and fuse with the internal style encoder output
+        spk_emb = self.spk_proj(spk_emb)
         if self.activation:
             spk_emb = self.activation(spk_emb)
 
