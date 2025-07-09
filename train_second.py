@@ -71,7 +71,7 @@ def main():
 
     # Set up logging
     log_dir = config.log_dir
-    exp_label = config.get("label", "")  # Experiment label
+    # exp_label = config.get("label", "")  # Experiment label
     formatter_file = logging.Formatter(
         fmt="%(levelname)s:%(asctime)s: %(message)s",
         datefmt="%y%m%d-%H:%M:%S",
@@ -87,7 +87,8 @@ def main():
         # Set the wandb project where this run will be logged.
         project="StyleTTS2-spkenc",
         # Set run name
-        name=f"{osp.basename(log_dir)}_{exp_label}",
+        # name=f"{osp.basename(log_dir)}_{exp_label}",
+        name=f"{osp.basename(log_dir)}",
         # Track hyperparameters and run metadata.
         config=config,
         dir=log_dir,
@@ -465,9 +466,13 @@ def main():
                 pros_style[bidx, :] = model.prosodic_style_encoder(
                     mels_ok.unsqueeze(0).unsqueeze(1)
                 )
+                # print(f"Speaker embedding shape: {spk_embs[bidx].unsqueeze(0).shape}")
+                # print(
+                #     f"Expected shape by model: {model.acoustic_style_encoder.project.in_features}"
+                # )
                 acoust_style[bidx, :] = model.acoustic_style_encoder(
                     mels_ok.unsqueeze(0).unsqueeze(1),
-                    spk_embs[bidx],
+                    spk_embs[bidx].unsqueeze(0) if multispeaker else None,
                 )
             # Set ground truth style for denoiser
             target_style = torch.cat([acoust_style, pros_style], dim=-1).detach()
