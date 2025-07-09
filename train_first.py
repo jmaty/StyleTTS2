@@ -83,14 +83,14 @@ def main():
 
     # Distributed computing
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
-    accelerator = Accelerator(project_dir=log_dir, split_batches=True, kwargs_handlers=[ddp_kwargs])
+    acc = Accelerator(project_dir=log_dir, split_batches=True, kwargs_handlers=[ddp_kwargs])
 
-    if accelerator.is_main_process:
+    if acc.is_main_process:
         # writer = SummaryWriter(osp.join(log_dir, "tensorboard"))
         # Initialize the wandb logger and name wandb project and run
         wb_logger = wandb.init(
             # Set the wandb project where this run will be logged.
-            project="StyleTTS2-spkenc",
+            project="StyleTTS2+spkenc",
             # Set run name
             # name=f"{osp.basename(log_dir)}_{exp_label}",
             name=f"{osp.basename(log_dir)}",
@@ -100,7 +100,7 @@ def main():
         )
 
     # Set up device
-    device = accelerator.device
+    device = acc.device
 
     # Init NVLM
     nvidia_smi.nvmlInit()
@@ -110,7 +110,7 @@ def main():
     total_vram = (
         nvidia_smi.nvmlDeviceGetMemoryInfo(nvidia_smi.nvmlDeviceGetHandleByIndex(0)).total >> 30
     )
-    if accelerator.is_main_process:
+    if acc.is_main_process:
         logger.info("NVLM initialized")
 
     # Set up training parameters
@@ -149,7 +149,7 @@ def main():
 
     # Set up text cleaner and pre-processing function
     text_cleaner = TextCleaner(data_params["symbol_dict_path"], pad=data_params["pad"])
-    if accelerator.is_main_process:
+    if acc.is_main_process:
         logger.debug("Number of symbols: %d", len(text_cleaner))
     assert len(text_cleaner) == 81, f"Number of symbols must be 81 but it is {len(text_cleaner)}"
     assert (
@@ -157,7 +157,7 @@ def main():
     ), f"Number of tokens must be 81 but it is {model_params.n_token}"
 
     # Load utility models
-    with accelerator.main_process_first():
+    with acc.main_process_first():
         # load pretrained ASR model
         asr_config = config.get("ASR_config", False)
         asr_path = config.get("ASR_path", False)
@@ -175,7 +175,7 @@ def main():
     bert_size = model.bert.config.max_position_embeddings  # ALBERT config
 
     for k in model:
-        model[k] = accelerator.prepare(model[k])
+        model[k] = acc.prepare(model[k])
 
     # Load data
     train_list, val_list = get_data_path_list(train_path, val_path)
@@ -206,11 +206,13 @@ def main():
         train_list,
         root_path,
         text_cleaner,
+        validation=False,
         ood_data=None,  # OOD data not used for 1st stage training
         batch_size=batch_size,
         num_workers=args.num_workers,
         device=device,
         dataset_config=dataset_config,
+        use_speaker_sampler=True if multispeaker else False,
     )
     logger.info("Building validation dataloader...")
     val_dataloader = build_dataloader(
@@ -223,14 +225,15 @@ def main():
         num_workers=0,
         device=device,
         dataset_config=dataset_config,
+        use_speaker_sampler=False,
     )
-    if accelerator.is_main_process:  # Přidat tuto podmínku
+    if acc.is_main_process:  # Přidat tuto podmínku
         wb_logger.summary["n_train_samples"] = len(train_dataloader.dataset)
         wb_logger.summary["n_valid_samples"] = len(val_dataloader.dataset)
         wb_logger.summary["n_ood_texts"] = train_dataloader.dataset.number_ood_texts()
 
     # Prepare dataloaders for accelerated training
-    train_dataloader, val_dataloader = accelerator.prepare(train_dataloader, val_dataloader)
+    train_dataloader, val_dataloader = acc.prepare(train_dataloader, val_dataloader)
 
     scheduler_params = {
         "max_lr": float(config["optimizer_params"].get("lr", 1e-4)),
@@ -249,10 +252,10 @@ def main():
     optimizer = build_optimizer(parameters_dict, scheduler_params_dict, lr)
 
     for k, _ in optimizer.optimizers.items():
-        optimizer.optimizers[k] = accelerator.prepare(optimizer.optimizers[k])
-        optimizer.schedulers[k] = accelerator.prepare(optimizer.schedulers[k])
+        optimizer.optimizers[k] = acc.prepare(optimizer.optimizers[k])
+        optimizer.schedulers[k] = acc.prepare(optimizer.schedulers[k])
 
-    with accelerator.main_process_first():
+    with acc.main_process_first():
         if config.get("pretrained_model", "") != "":
             model, optimizer, start_epoch, iters = load_checkpoint(
                 model,
@@ -296,7 +299,7 @@ def main():
 
     best_loss = float("inf")  # best test loss
 
-    if accelerator.is_main_process:
+    if acc.is_main_process:
         logger.info(" > Start training cycles:")
         logger.info(" | > Starting epoch:   %d", start_epoch)
         logger.info(" | > Total epochs:     %d", epochs)
@@ -310,6 +313,7 @@ def main():
     for epoch in range(start_epoch, epochs):
         running_loss = 0
         start_time = time.time()
+        train_dataloader.batch_sampler.epoch = epoch  # Set epoch for the sampler
 
         # Models in train mode from the beginning
         train_components = [
@@ -397,7 +401,7 @@ def main():
 
             # --- Pre-allocate tensors ---
 
-            mel_inp_len_all = accelerator.gather(mel_inp_len)  # for balanced load
+            mel_inp_len_all = acc.gather(mel_inp_len)  # for balanced load
             mel_len_gt = min([int(mel_inp_len_all.min().item() / 2 - 1), max_len // 2])
             # Early check for segment length:
             # - mel_len_gt * 2 is the length of the original mel spectrogram
@@ -496,17 +500,14 @@ def main():
                 loss_disc = dl(wav_gt.detach().unsqueeze(1).float(), y_rec.detach()).mean()
                 loss_disc = loss_disc / grad_accum_steps  # JMa: normalize loss
                 # JMa: Compute gradients only for discriminators
-                accelerator.backward(
+                acc.backward(
                     loss_disc, inputs=list(model.mpd.parameters()) + list(model.msd.parameters())
                 )
                 # JMa: Gradient accumulation
                 if (batch_idx + 1) % grad_accum_steps == 0:
                     # JMa: gradient clipping
                     if grad_clip:
-                        _ = [
-                            accelerator.clip_grad_norm_(model[k].parameters(), grad_clip)
-                            for k in model
-                        ]
+                        _ = [acc.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
                     optimizer.step("msd")
                     optimizer.step("mpd")
                     optimizer.zero_grad("msd")
@@ -562,18 +563,16 @@ def main():
             )
             if epoch >= tma_epoch:
                 inputs += list(model.text_aligner.parameters())
-            accelerator.backward(g_loss, inputs=inputs)
+            acc.backward(g_loss, inputs=inputs)
 
             # Accumulate mean mel-spectrogram loss (over all GPUs) across batches for logging
-            running_loss += accelerator.gather(loss_mel).mean().item()
+            running_loss += acc.gather(loss_mel).mean().item()
 
             # JMa: Gradient accumulation
             if (batch_idx + 1) % grad_accum_steps == 0:
                 # JMa: gradient clipping
                 if grad_clip:
-                    _ = [
-                        accelerator.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model
-                    ]
+                    _ = [acc.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
 
                 optimizer.step("text_encoder")
                 optimizer.step("acoustic_style_encoder")
@@ -591,7 +590,7 @@ def main():
             iters += 1
 
             # Log training progress
-            if (batch_idx + 1) % log_interval == 0 and accelerator.is_main_process:
+            if (batch_idx + 1) % log_interval == 0 and acc.is_main_process:
                 mel_loss = running_loss / log_interval
                 logger.info(
                     "Epoch [%3d/%d], Step [%4d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f, Fusion Weight: %.5f",
@@ -605,7 +604,7 @@ def main():
                     loss_mono,
                     loss_s2s,
                     loss_slm,
-                    accelerator.unwrap_model(model.acoustic_style_encoder).fusion_weight.item(),
+                    acc.unwrap_model(model.acoustic_style_encoder).fusion_weight.item(),
                 )
 
                 # Check current VRAM usage
@@ -627,7 +626,7 @@ def main():
                         "train/mono_loss": loss_mono,
                         "train/s2s_loss": loss_s2s,
                         "train/slm_loss": loss_slm,
-                        "train/fusion_weight": accelerator.unwrap_model(
+                        "train/fusion_weight": acc.unwrap_model(
                             model.acoustic_style_encoder
                         ).fusion_weight.item(),
                         "train/curr_vram": curr_vram,
@@ -770,10 +769,10 @@ def main():
                 # Compute mel-spectrogram loss
                 loss_mel = stft_loss(y_rec.squeeze(), wav_gt.detach())
 
-                loss_test += accelerator.gather(loss_mel).mean().item()
+                loss_test += acc.gather(loss_mel).mean().item()
                 iters_test += 1
 
-        if accelerator.is_main_process:
+        if acc.is_main_process:
             logger.info(
                 "Epoch [%3d/%d]: Validation loss: %.3f",
                 epoch + 1,
@@ -836,7 +835,7 @@ def main():
                     log_dir,
                 )
 
-    if accelerator.is_main_process:
+    if acc.is_main_process:
         # Save final 1st stage model
         final_filepath = save_checkpoint(
             model,

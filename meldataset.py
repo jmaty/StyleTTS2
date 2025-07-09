@@ -1,12 +1,14 @@
 # coding: utf-8
 import os.path as osp
 import random
+import math
+from collections import defaultdict
 
 import numpy as np
 import pandas as pd
 import torch
 import torchaudio
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 
 from logger import get_logger
 
@@ -484,9 +486,10 @@ class Collater(object):
             - All tensors except waves are zero-padded to maximum length in batch
             - Uses self.max_ref_mel_length for reference mel padding (from config)
         """
-
         # batch[0] = wave, mel, text, f0, speakerid
         batch_size = len(batch)
+
+        print([b[7] for b in batch])
 
         # Sort batch by acoustic feature (mel) length (descending)
         # b[1] is acoustic_feature from __getitem__
@@ -602,6 +605,206 @@ class Collater(object):
         )
 
 
+class BalancedSpeakerSampler(Sampler):
+    """A PyTorch Sampler that ensures balanced speaker representation across mini-batches.
+    This sampler distributes data samples to maintain approximately equal representation
+    of different speakers within each batch, which is particularly useful for training
+    speaker-aware models like text-to-speech systems.
+    The sampler supports distributed training (DDP) by partitioning speakers across
+    multiple processes and provides deterministic shuffling through epoch-based seeding.
+    Args:
+        dataset: Dataset object containing data_list where each item has speaker_id at index 2
+        batch_size (int): Number of samples per mini-batch
+        drop_last (bool): Whether to drop the last incomplete batch
+        seed (int, optional): Base random seed for reproducibility. Defaults to 42.
+        rank (int, optional): Process rank for distributed training. Defaults to 0.
+        world_size (int, optional): Total number of processes in distributed training. Defaults to 1.
+    Raises:
+        ValueError: If batch_size < 1 or world_size < 1
+        TypeError: If batch_size is not an integer
+    Attributes:
+        batch_size (int): Number of samples per batch
+        drop_last (bool): Whether to drop incomplete final batch
+        base_seed (int): Base seed for random number generation
+        rank (int): Current process rank
+        world_size (int): Total number of distributed processes
+        epoch (int): Current training epoch (updated via set_epoch)
+        spk2idx (dict): Mapping from speaker IDs to lists of sample indices
+        speakers (list): List of all unique speaker IDs
+    Example:
+        >>> sampler = BalancedSpeakerSampler(dataset, batch_size=32, drop_last=True)
+        >>> dataloader = DataLoader(dataset, batch_sampler=sampler)
+        >>> for epoch in range(num_epochs):
+        ...     sampler.set_epoch(epoch)
+        ...     for batch in dataloader:
+        ...         # Training code here
+        ...         pass
+    Note:
+        Call set_epoch() at the beginning of each training epoch to ensure
+        proper shuffling and reproducibility across epochs and distributed processes."""
+
+    def __init__(
+        self,
+        dataset,
+        batch_size,
+        drop_last,
+        seed=42,
+        rank=0,
+        world_size=1,
+    ):
+        super().__init__(None)
+
+        self.batch_size = batch_size
+        self.drop_last = drop_last
+        self.base_seed = seed
+        self.rank = rank
+        self.world_size = world_size
+        self.epoch = 0  # Updated via ``set_epoch`` from the training loop.
+
+        # Build mapping {speaker_id: [indices]}
+        self.spk2idx = defaultdict(list)
+        for index, data in enumerate(dataset.data_list):
+            spk_id = data[2]  # data[2] is speaker_id
+            self.spk2idx[spk_id].append(index)
+        self.speakers = list(self.spk2idx.keys())
+
+        # Pre‑allocate RNG.  We *reseed* it every epoch for determinism.
+        self._rng = random.Random()
+
+    # ---------------------------------------------------------------------
+    # Epoch property with setter
+    # ---------------------------------------------------------------------
+    @property
+    def epoch(self):
+        """Current training epoch number."""
+        return self._epoch
+
+    @epoch.setter
+    def epoch(self, value):
+        """Set the current epoch for deterministic sampling.
+
+        This method is typically called by the DataLoader to ensure proper
+        shuffling behavior across training epochs when using distributed training
+        or epoch-based sampling strategies.
+
+        Args:
+            value (int): The current epoch number.
+        """
+        self._epoch = value
+
+    # ---------------------------------------------------------------------
+    # Legacy compatibility method
+    # ---------------------------------------------------------------------
+    def set_epoch(self, epoch):  # noqa: D401 (non‑imperative)
+        """Set the current epoch for the dataset.
+
+        This method is typically called by the DataLoader to ensure proper
+        shuffling behavior across training epochs when using distributed training
+        or epoch-based sampling strategies.
+
+        Args:
+            epoch (int): The current epoch number.
+        """
+        self.epoch = epoch
+
+    # ------------------------------------------------------------------
+    # Sampler core
+    # ------------------------------------------------------------------
+    def __iter__(self):  # noqa: D401
+        def __iter__(self):
+            """Iterate over batches of data indices with speaker-balanced sampling.
+            This iterator implements a sophisticated batching strategy that:
+            1. Uses deterministic seeding based on epoch and rank for reproducibility
+            2. Shuffles samples within each speaker and shuffles speaker order
+            3. Distributes speakers across multiple ranks for distributed training
+            4. Rotates through active speakers to create balanced batches
+            5. Ensures each batch contains samples from different speakers when possible
+            The algorithm maintains fairness by cycling through speakers and only
+            removing them from the active pool when they're exhausted. This prevents
+            any single speaker from dominating the batches.
+            Yields:
+                List[int]: Batches of data indices, each of size `batch_size`
+                          (except possibly the last batch if `drop_last=False`)
+            Note:
+                - Uses NumPy's permutation for efficient shuffling of large lists (>32 items)
+                - Falls back to Python's random.shuffle for smaller lists
+                - Supports distributed data parallel (DDP) training via rank-based partitioning
+                - Reshuffles active speakers after each full rotation to maintain randomness
+            """
+
+        # ------------------------------------------------------------------
+        # (1) Deterministic seed per epoch & rank
+        # ------------------------------------------------------------------
+        epoch_seed = self.base_seed + self.epoch + self.rank * 10_000
+        self._rng.seed(epoch_seed)
+        np_rng = np.random.default_rng(epoch_seed)
+
+        # ------------------------------------------------------------------
+        # (2) Shuffle order *inside* each speaker + order of speakers
+        # ------------------------------------------------------------------
+        for idx_list in self.spk2idx.values():
+            # NumPy shuffle is ~2× faster for long lists than pure Python.
+            if len(idx_list) > 32:
+                idx_list[:] = np_rng.permutation(idx_list).tolist()
+            else:
+                self._rng.shuffle(idx_list)
+
+        # Partition speakers among ranks in DDP (simple round‑robin split)
+        speakers_this_rank = self.speakers[self.rank :: self.world_size]
+        self._rng.shuffle(speakers_this_rank)
+
+        # Cursor tracks how many clips have been consumed per speaker.
+        cursor = {spk: 0 for spk in speakers_this_rank}
+
+        batch = []
+        active_spk = [spk for spk in speakers_this_rank if cursor[spk] < len(self.spk2idx[spk])]
+
+        while active_spk:
+            # Rotate through the list, reshuffling every full pass.
+            for spk in list(active_spk):
+                pos = cursor[spk]
+                if pos >= len(self.spk2idx[spk]):
+                    continue  # Speaker exhausted, handled later.
+
+                batch.append(self.spk2idx[spk][pos])
+                cursor[spk] += 1
+
+                if len(batch) == self.batch_size:
+                    yield batch
+                    batch = []
+
+            # Remove exhausted speakers and reshuffle the remainder.
+            active_spk = [s for s in active_spk if cursor[s] < len(self.spk2idx[s])]
+            self._rng.shuffle(active_spk)
+
+        # Tail batch (if allowed)
+        if batch and not self.drop_last:
+            yield batch
+
+    # ------------------------------------------------------------------
+    # Misc helpers
+    # ------------------------------------------------------------------
+    def __len__(self) -> int:  # noqa: D401
+        """
+        Calculate the number of batches available for this dataset rank.
+        Returns the total number of batches that will be produced by this dataset
+        instance, taking into account distributed training settings. The calculation
+        considers the portion of data assigned to the current rank and applies
+        batch size division with optional dropping of incomplete batches.
+        Returns:
+            int: Number of batches available for iteration. If drop_last is True,
+                 returns only complete batches. Otherwise, includes the final
+                 incomplete batch if present.
+        """
+
+        total_clips = sum(len(v) for v in self.spk2idx.values())
+        # Only the portion of data assigned to *this* rank counts.
+        total_clips = math.ceil(total_clips / self.world_size)
+        if self.drop_last:
+            return total_clips // self.batch_size
+        return math.ceil(total_clips / self.batch_size)
+
+
 def build_dataloader(
     path_list,
     root_path,
@@ -613,6 +816,7 @@ def build_dataloader(
     device="cpu",
     collate_config=None,
     dataset_config=None,
+    use_speaker_sampler=False,
 ):
     """Builds and returns a PyTorch DataLoader.
     The DataLoader is configured for loading audio and text data pairs
@@ -634,6 +838,8 @@ def build_dataloader(
             Defaults to an empty dict.
         dataset_config (dict, optional): Configuration dictionary for the FilePathDataset.
             Defaults to an empty dict.
+        use_speaker_sampler (bool, optional): If True, use BalancedSpeakerSampler
+            to ensure one sample per speaker per batch. Defaults to False.
     Returns:
         torch.utils.data.DataLoader: Configured DataLoader instance.
     """
@@ -648,8 +854,27 @@ def build_dataloader(
         validation=validation,
         **dataset_config,
     )
+    # Create collate function with provided configuration
     collate_fn = Collater(**collate_config)
-    data_loader = DataLoader(
+
+    # Dataloader for speaker-balanced sampling
+    if use_speaker_sampler and not validation:
+        batch_sampler = BalancedSpeakerSampler(
+            dataset,
+            batch_size=batch_size,
+            drop_last=False,
+        )
+        dataloader = DataLoader(
+            dataset,
+            batch_sampler=batch_sampler,
+            num_workers=num_workers,
+            collate_fn=collate_fn,
+            pin_memory=(device != "cpu"),
+        )
+        return dataloader
+
+    # Dataloader for regular sampling
+    dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=(not validation),
@@ -659,4 +884,4 @@ def build_dataloader(
         pin_memory=(device != "cpu"),
     )
 
-    return data_loader
+    return dataloader
