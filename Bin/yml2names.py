@@ -71,7 +71,7 @@ def main():
     for spk_id in stats.keys():
         fpath = next(iter(stats[spk_id].keys()))
         name = fpath.split(os.sep)[0]
-        output_target.write(f"{spk_id}: {name}\n")
+        output_target.write(f"{name}\n")
 
     # Close the file if it was opened
     if args.output:

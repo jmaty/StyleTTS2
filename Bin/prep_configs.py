@@ -77,9 +77,8 @@ def main():
 
     # Stage 2: epochs = 0 - diffusion
     config_out = copy.deepcopy(config)
-    config_out["epochs"]["stage2"] = settings["start2"][
-        "epochs"
-    ]  # Set diffusion epoch as the last epoch
+    # Set diffusion epoch as the last epoch
+    config_out["epochs"]["stage2"] = settings["start2"]["epochs"]
     config_out["batch_size"] = settings["start2"]["batch_size"]
     config_out["max_len"] = settings["start2"]["max_len"]
     config_out["data_params"]["train_data"] = settings["start2"]["train_data"]
