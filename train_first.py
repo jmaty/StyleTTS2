@@ -64,7 +64,6 @@ def main():
 
     # Set up logging
     log_dir = config["log_dir"]  # Directory for logs
-    exp_label = config.get("label", "")  # Experiment label
     formatter_file = logging.Formatter(
         fmt="%(levelname)s:%(asctime)s: %(message)s",
         datefmt="%y%m%d-%H:%M:%S",
@@ -89,7 +88,7 @@ def main():
             # Set the wandb project where this run will be logged.
             project="StyleTTS2_cs",
             # Set run name
-            name=f"{osp.basename(log_dir)}_{exp_label}",
+            name=f"{osp.basename(log_dir)}",
             # Track hyperparameters and run metadata.
             config=config,
             dir=log_dir,
@@ -766,7 +765,7 @@ def main():
                         pts.save_wav(wav, osp.join(test_audio_dir, outfile))
 
                     # Save ground truth
-                    if epoch == 0:
+                    if epoch in (0, tma_epoch):
                         wav_gt = waves[idx].squeeze()
                         if save_val_audio:
                             outfile = f"epoch_1st_{epoch:0>5}_gt-{idx}.wav"
