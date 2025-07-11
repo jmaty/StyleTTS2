@@ -591,20 +591,19 @@ def main():
 
             # Log training progress
             if (batch_idx + 1) % log_interval == 0 and acc.is_main_process:
-                mel_loss = running_loss / log_interval
+                loss_mel = running_loss / log_interval
                 logger.info(
-                    "Epoch [%3d/%d], Step [%4d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f, Fusion Weight: %.5f",
+                    "Epoch [%3d/%d], Step [%4d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f",
                     epoch + 1,
                     epochs,
                     batch_idx + 1,
                     steps_per_epoch,
-                    mel_loss,
+                    loss_mel,
                     loss_gen_all,
                     loss_disc,
                     loss_mono,
                     loss_s2s,
                     loss_slm,
-                    acc.unwrap_model(model.acoustic_style_encoder).fusion_weight.item(),
                 )
 
                 # Check current VRAM usage
@@ -620,15 +619,12 @@ def main():
 
                 wb_logger.log(
                     {
-                        "train/mel_loss": mel_loss,
-                        "train/gen_loss": loss_gen_all,
-                        "train/disc_loss": loss_disc,
-                        "train/mono_loss": loss_mono,
-                        "train/s2s_loss": loss_s2s,
-                        "train/slm_loss": loss_slm,
-                        "train/fusion_weight": acc.unwrap_model(
-                            model.acoustic_style_encoder
-                        ).fusion_weight.item(),
+                        "train/loss_mel": loss_mel,
+                        "train/loss_gen": loss_gen_all,
+                        "train/loss_disc": loss_disc,
+                        "train/loss_mono": loss_mono,
+                        "train/loss_s2s": loss_s2s,
+                        "train/loss_slm": loss_slm,
                         "train/curr_vram": curr_vram,
                         "train/max_vram": max_vram,
                         "train/epoch": epoch,
@@ -773,15 +769,32 @@ def main():
                 iters_test += 1
 
         if acc.is_main_process:
+            # Compute average loss over all validation batches
+            curr_loss = loss_test / iters_test
+            # Update best_loss
+            best_loss = min(curr_loss, best_loss)
+
+            gate_param = acc.unwrap_model(model.acoustic_style_encoder).gate_param
+            # For learnable gate, show values after sigmoid activation
+            # For non-learnable gate, show raw values
+            gate_values = (
+                torch.sigmoid(gate_param)
+                if acc.unwrap_model(model.acoustic_style_encoder).learnable_gate
+                else gate_param
+            )
             logger.info(
-                "Epoch [%3d/%d]: Validation loss: %.3f",
+                "Epoch [%3d/%d]: Validation loss: %.3f (best: %.3f), Gate weights: %.6f±%.6f (%.6f-%.6f)",
                 epoch + 1,
                 epochs,
-                loss_test / iters_test,
+                curr_loss,
+                best_loss,
+                gate_values.mean().item(),
+                gate_values.std().item(),
+                gate_values.min().item(),
+                gate_values.max().item(),
             )
-            # attn_image = get_image(s2s_attn[0].cpu().numpy().squeeze())
             wb_logger.log(
-                {"eval/mel_loss": loss_test / iters_test},
+                {"eval/loss_mel": curr_loss, "eval/best_loss_mel": best_loss},
                 step=iters,
             )
 
@@ -811,8 +824,6 @@ def main():
                             pts.save_wav(wav_gt, os.path.join(test_audio_dir, outfile))
 
             if epoch % saving_epoch == 0:
-                curr_loss = loss_test / iters_test
-                best_loss = min(curr_loss, best_loss)
                 save_checkpoint(
                     model,
                     optimizer,
@@ -823,6 +834,7 @@ def main():
                     log_dir,
                     max_saved_models,
                 )
+
             # Save pre-TMA model
             if save_milestones and epoch == tma_epoch - 1:
                 save_checkpoint(
@@ -830,7 +842,7 @@ def main():
                     optimizer,
                     epoch,
                     iters,
-                    loss_test / iters_test,
+                    curr_loss,
                     "stage1_pre-tma",
                     log_dir,
                 )
@@ -842,7 +854,7 @@ def main():
             optimizer,
             epoch,
             iters,
-            loss_test / iters_test,
+            curr_loss,
             "epoch_1st",
             log_dir,
             max_saved_models,

@@ -85,7 +85,7 @@ def main():
     logger = get_logger(__name__)  # Get a logger
     wb_logger = wandb.init(
         # Set the wandb project where this run will be logged.
-        project="StyleTTS2-spkenc",
+        project="StyleTTS2+spkenc",
         # Set run name
         # name=f"{osp.basename(log_dir)}_{exp_label}",
         name=f"{osp.basename(log_dir)}",
@@ -859,8 +859,7 @@ def main():
                     "Sty Loss: %.5f, "
                     "Diff Loss: %.5f, "
                     "DiscLM Loss: %.5f, "
-                    "GenLM Loss: %.5f, "
-                    "Fusion Weight: %.5f",
+                    "GenLM Loss: %.5f",
                     epoch + 1,
                     epochs,
                     batch_idx + 1,
@@ -877,7 +876,6 @@ def main():
                     loss_diff,
                     loss_disc_slm,
                     loss_gen_lm,
-                    model.acoustic_style_encoder.fusion_weight.item(),
                 )
 
                 # Check current VRAM usage
@@ -905,7 +903,6 @@ def main():
                         "train/diff_loss": loss_diff,
                         "train/d_loss_slm": loss_disc_slm,
                         "train/gen_loss_slm": loss_gen_lm,
-                        "train/fusion_weight": model.acoustic_style_encoder.fusion_weight.item(),
                         "train/curr_vram": curr_vram,
                         "train/max_vram": max_vram,
                         "train/epoch": epoch,
@@ -973,7 +970,8 @@ def main():
                         d_gt = d_algn_mono.sum(axis=-1).detach()
 
                     # Compute prosodic style for the entire utterance
-                    # This operation cannot be done in batch because of the avgpool layer (may need to work on masked avgpool)
+                    # This operation cannot be done in batch because of the avgpool layer
+                    # (may need to work on masked avgpool)
                     pros_style = torch.empty(bsize, model_params.style_dim, device=device)
                     for bidx in range(bsize):
                         mels_ok = mels[bidx, :, : mel_inp_len[bidx]]
@@ -1106,13 +1104,28 @@ def main():
         avg_loss_test = loss_test.item() / iters_test
         avg_loss_align = loss_align.item() / iters_test
         avg_loss_f = loss_f.item() / iters_test
+        # Update best validation loss
+        best_loss = min(avg_loss_test, best_loss)
+
+        # For learnable gate, show values after sigmoid activation
+        # For non-learnable gate, show raw values
+        gate_values = (
+            torch.sigmoid(model.acoustic_style_encoder.gate_param)
+            if model.acoustic_style_encoder.learnable_gate
+            else model.acoustic_style_encoder.gate_param
+        )
         logger.info(
-            "Epoch [%3d/%d]: Validation loss: %.3f, Dur loss: %.3f, F0 loss: %.3f",
+            "Epoch [%3d/%d]: Validation loss: %.3f (best: %.3f), Dur loss: %.3f, F0 loss: %.3f, Gate weights: %.6f±%.6f (%.6f-%.6f)",
             epoch + 1,
             epochs,
             avg_loss_test,
+            best_loss,
             avg_loss_align,
             avg_loss_f,
+            gate_values.mean().item(),
+            gate_values.std().item(),
+            gate_values.min().item(),
+            gate_values.max().item(),
         )
         wb_logger.log(
             {
@@ -1213,15 +1226,12 @@ def main():
 
         # Save progress
         if epoch % saving_epoch == 0:
-            curr_loss = loss_test.item() / iters_test
-            if curr_loss < best_loss:
-                best_loss = curr_loss
             save_checkpoint(
                 model,
                 optimizer,
                 epoch,
                 iters,
-                curr_loss,
+                avg_loss_test,
                 "epoch_2nd",
                 log_dir,
                 max_saved_models,

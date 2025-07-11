@@ -183,52 +183,88 @@ class AcousticStyleEncoder(nn.Module):
         spk_emb_dim=512,
         style_dim=128,
         max_conv_dim=384,
-        init_fusion_weight=0.01,
-        activation=None,
+        mix_weight=0.0,
+        learnable_gate=True,
     ):
         """Initialize the Acoustic Style Encoder.
         Args:
             dim_in (int, optional): Input dimension for the projection layer. Defaults to 48.
-            spk_emb_dim (int, optional): Dimension of the external speaker embedding. Defaults to 512.
-            style_dim (int, optional): Output dimension for the projection layer, representing the style embedding dimension. Defaults to 128.
-            initial_fusion_weight (float, optional): Initial value for the trainable fusion weight. Defaults to 0.01.
-            activation (torch.nn.Module, optional): Activation function to apply after the projection. Defaults to None.
+            spk_emb_dim (int, optional): Dimension of the external speaker embedding.
+                Defaults to 512.
+            style_dim (int, optional): Output dimension for the projection layer,
+                representing the style embedding dimension. Defaults to 128.
+            max_conv_dim (int, optional): Maximum dimension for the convolutional layers
+                in the style encoder. Defaults to 384.
+            mix_weight (float, optional): Initial value for the trainable mix weight.
+                Defaults to 0.0 (0.5 after sigmoid activation).
+            learnable_gate (bool, optional): If True, the gate is a learnable parameter with
+                initialization close to 0.5 (after sigmoid activation when `mix_weight` is 0.0)
+                to allow for a balanced mix between the internal style encoder output and the
+                external speaker embedding.
+                If False, it is a fixed value `mix_weight`. Defaults to True.
         """
         super().__init__()
+        self.learnable_gate = learnable_gate
 
         self.spk_proj = nn.Sequential(
             nn.Linear(spk_emb_dim, style_dim),  # Reduce the dimension of the speaker embedding
             nn.LayerNorm(style_dim),  # Stabilize the statistics
         )
-        self.activation = activation
 
         self.style_encoder = StyleEncoder(
             dim_in=dim_in,
             style_dim=style_dim,
             max_conv_dim=max_conv_dim,
         )
-        # Initialize the fusion weight as a trainable parameter
-        self.fusion_weight = nn.Parameter(torch.tensor(init_fusion_weight))
+
+        if learnable_gate:
+            # Initialize the gate parameter as a trainable parameter
+            # The gate parameter is initialized to a value close to 0.5 (after sigmoid activation)
+            # to allow for a balanced mix between the internal style encoder output and the external speaker embedding
+            # This allows the model to learn the optimal mix during training
+            self.gate_param = nn.Parameter(
+                torch.full(
+                    (style_dim,),
+                    mix_weight,
+                    dtype=torch.float32,
+                )
+            )
+        else:
+            # If not learnable, register a buffer to hold the untrainable gate parameter
+            # This will not be updated during training, but can still be used in the forward pass
+            self.register_buffer(
+                "gate_param",
+                torch.full(
+                    (style_dim,),
+                    mix_weight,
+                    dtype=torch.float32,
+                ),
+            )
 
     def forward(self, x, spk_emb=None):
         """
         Forward pass of the module.
         Args:
-            x (torch.Tensor): External speaker embedding.
-            spk_emb (torch.Tensor): Style embedding.
+            x (torch.Tensor): Internal style embedding.
+            spk_emb (torch.Tensor): External speaker embedding.
         Returns:
             torch.Tensor: The output style tensor.
         """
+        style_enc = self.style_encoder(x)
         if spk_emb is None or spk_emb.numel() == 0:
-            return self.style_encoder(x)
+            return style_enc
 
         # External speaker embedding is provided, project it, normalize,
-        # apply activation if specified, and fuse with the internal style encoder output
+        # and fuse with the internal style encoder output
         spk_emb = self.spk_proj(spk_emb)
-        if self.activation:
-            spk_emb = self.activation(spk_emb)
 
-        return (1 - self.fusion_weight) * self.style_encoder(x) + self.fusion_weight * spk_emb
+        g = torch.sigmoid(self.gate_param) if self.learnable_gate else self.gate_param
+        # Fusion: (1 - g) * style_encoder(x) + g * spk_emb
+        # g: shape (style_dim,) or (batch, style_dim) (broadcasted to match batch)
+        # self.style_encoder(x): shape (batch, style_dim)
+        # spk_emb: shape (batch, style_dim)
+        # Broadcasting ensures elementwise mixing per style dimension.
+        return (1 - g) * style_enc + g * spk_emb
 
 
 class StyleEncoder(nn.Module):
@@ -985,9 +1021,8 @@ def build_model(args, text_aligner, pitch_extractor, bert):
         style_dim=args.style_dim,
         max_conv_dim=args.max_conv_dim,
         # Initial external/internal speaker embedding fusion weight
-        init_fusion_weight=args.init_fusion_weight,
-        # No activation function for external speaker embedding reduction
-        activation=None,
+        mix_weight=args.mix_weight,
+        learnable_gate=args.learnable_gate,
     )
 
     # Prosodic style encoder
