@@ -14,7 +14,7 @@ INTB=Train_second.ipynb
 MEM=256gb
 LSCRATCH=20gb
 SCRATCH_TYPE="scratch-local"
-NCPUS=8
+NCPUS1=8  # Number of CPUs per process (GPU) for DP computing
 NGPUS=2
 
 if [[ "$#" -lt 1 ]]; then
@@ -42,6 +42,8 @@ fi
 if [[ "$#" -gt 3 ]]; then
      # Number of GPUs
      NGPUS=$4
+     # Set number of CPUs according to the number of GPUs (for DP computing)
+     NCPUS=$((NGPUS * NCPUS1))
 fi
 if [[ "$#" -gt 4 ]]; then
      # JOBID to continue run
