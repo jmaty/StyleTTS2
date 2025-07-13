@@ -928,7 +928,7 @@ def main():
 
         with torch.no_grad():
             iters_test = 0
-            for _, batch in enumerate(val_dataloader):
+            for batch_idx, batch in enumerate(val_dataloader):
                 optimizer.zero_grad()
 
                 try:
@@ -1097,9 +1097,13 @@ def main():
                     iters_test += 1
 
                 except Exception as e:
-                    logger.error("[!] Error: %s", e)
+                    logger.error("[!] Error in validation batch %d:\n%s", batch_idx, e)
                     traceback.print_exc()
-                    continue
+                    logger.error("n_fake shape: %s", n_fake.shape)
+                    logger.error("f0_fake shape: %s", f0_fake.shape)
+                    logger.error("f0_real shape: %s", f0_real.shape)
+                    logger.error("Skipping batch %d", batch_idx)
+                    continue  # Skipping the batch
 
         avg_loss_test = loss_test.item() / iters_test
         avg_loss_align = loss_align.item() / iters_test
