@@ -1136,6 +1136,7 @@ def main():
                 "eval/mel_loss": avg_loss_test,
                 "eval/dur_loss": avg_loss_align,
                 "eval/F0_loss": avg_loss_f,
+                "eval/best_mel_loss": best_loss,
             },
             step=iters,
         )

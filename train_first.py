@@ -619,12 +619,12 @@ def main():
 
                 wb_logger.log(
                     {
-                        "train/loss_mel": loss_mel,
-                        "train/loss_gen": loss_gen_all,
-                        "train/loss_disc": loss_disc,
-                        "train/loss_mono": loss_mono,
-                        "train/loss_s2s": loss_s2s,
-                        "train/loss_slm": loss_slm,
+                        "train/mel_loss": loss_mel,
+                        "train/gen_loss": loss_gen_all,
+                        "train/disc_loss": loss_disc,
+                        "train/mono_loss": loss_mono,
+                        "train/s2s_loss": loss_s2s,
+                        "train/slm_loss": loss_slm,
                         "train/curr_vram": curr_vram,
                         "train/max_vram": max_vram,
                         "train/epoch": epoch,
@@ -794,7 +794,7 @@ def main():
                 gate_values.max().item(),
             )
             wb_logger.log(
-                {"eval/loss_mel": curr_loss, "eval/best_loss_mel": best_loss},
+                {"eval/mel_loss": curr_loss, "eval/best_mel_loss": best_loss},
                 step=iters,
             )
 
