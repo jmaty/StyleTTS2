@@ -144,10 +144,19 @@ class JDCNet(nn.Module):
         # sizes: (b, 31, 722), (b, 31, 2)
         # classifier output consists of predicted pitch classes per frame
         # detector output consists of: (isvoice, notvoice) estimates per frame
-
-        # Fix for the case when batch size is 1
-        # return torch.abs(classifier_out.squeeze()), GAN_feature, poolblock_out
         return torch.abs(classifier_out.squeeze(-1)), gan_feature, poolblock_out
+
+        # # Fix for the case when batch size is 1 - preserve batch, flatten rest
+        # output = torch.abs(classifier_out)
+        # batch_size = output.shape[0]
+
+        # # Reshape to (batch_size, -1) and then squeeze last dim if it's size 1
+        # reshaped = output.view(batch_size, -1)
+        # print(f"reshaped shape: {reshaped.shape}")
+        # # if reshaped.shape[-1] == 1:
+        # #     reshaped = reshaped.squeeze(-1)
+
+        # return reshaped, gan_feature, poolblock_out
 
     @staticmethod
     def init_weights(m):
