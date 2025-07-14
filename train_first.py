@@ -331,7 +331,7 @@ def main():
         optimizer.zero_grad()
 
         # Check if warmup is to be applied
-        is_warmup = model_params.mode == "mix" and epoch < model_params.warmup_epoch
+        is_warmup = model_params.mode == "mix" and epoch < model_params.warmup_epochs
         logger.debug("Epoch %d, warmup: %s", epoch, is_warmup)
 
         # Train loop for each epoch
