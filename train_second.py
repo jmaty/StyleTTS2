@@ -451,7 +451,10 @@ def main():
                 if multispeaker and epoch >= diff_epoch:
                     # Vectorized computation for reference styles
                     ref_mels_batch = ref_mels.unsqueeze(1)  # Shape: [B, 1, n_mels, max_ref_len]
-                    ref_acoust_style = model.acoustic_style_encoder(ref_mels_batch, ref_spk_embs)
+                    ref_acoust_style = model.acoustic_style_encoder(
+                        ref_mels_batch,
+                        ref_spk_embs if multispeaker else None,
+                    )
                     ref_pros_style = model.prosodic_style_encoder(ref_mels_batch)
                     ref_style = torch.cat([ref_acoust_style, ref_pros_style], dim=1)
 
@@ -634,7 +637,7 @@ def main():
             style_input_mel_batch = style_input_mel.unsqueeze(1)
             # Compute styles for the extracted segments
             pros_style = model.prosodic_style_encoder(style_input_mel_batch)
-            acoust_style = model.acoustic_style_encoder(style_input_mel_batch, spk_embs)
+            acoust_style = model.acoustic_style_encoder(style_input_mel_batch, spk_emb=spk_embs)
 
             with torch.no_grad():
                 # Extract F0 and normalization from the ground truth segment [B, 1, n_mels, mel_len * 2]
@@ -1082,7 +1085,10 @@ def main():
                     loss_dur /= phonemes.size(0)
 
                     # Recompute style using style_encoder for decoder input
-                    acoust_style = model.acoustic_style_encoder(mel_gt.unsqueeze(1), spk_embs)
+                    acoust_style = model.acoustic_style_encoder(
+                        mel_gt.unsqueeze(1),
+                        spk_emb=spk_embs,
+                    )
 
                     y_rec = model.decoder(ph_algn, f0_fake, n_fake, acoust_style)
                     loss_mel = stft_loss(y_rec.squeeze(), wav_gt.detach())
@@ -1157,7 +1163,7 @@ def main():
                         mels[idx, :, :mel_len].unsqueeze(0),  # Ground-truth mel spectrogram
                         # Ground-truth phonemes-audio alignment
                         h_algn[idx, :, : mel_len // 2].unsqueeze(0),
-                        spk_embs[idx].unsqueeze(0),
+                        spk_embs[idx].unsqueeze(0) if multispeaker else None,
                         # Predicted phonemes-audio alignment encoding
                         p_algn[idx, :, : mel_len // 2].unsqueeze(0),
                     )
@@ -1192,7 +1198,10 @@ def main():
 
                     # Call encoders with the entire batch
                     # Shape: [ref_mels_val, style_dim]
-                    ref_acoust_style = model.acoustic_style_encoder(ref_mels_val, ref_spk_embs_val)
+                    ref_acoust_style = model.acoustic_style_encoder(
+                        ref_mels_val,
+                        spk_emb=ref_spk_embs_val,
+                    )
                     # Shape: [ref_mels_val, style_dim]
                     ref_pros_style = model.prosodic_style_encoder(ref_mels_val)
                     # Combined style [B, 256+512, T]

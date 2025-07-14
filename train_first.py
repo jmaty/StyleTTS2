@@ -330,6 +330,10 @@ def main():
         # JMa: Zero gradients of all optimizers at each epoch start
         optimizer.zero_grad()
 
+        # Check if warmup is to be applied
+        is_warmup = model_params.mode == "mix" and epoch < model_params.warmup_epoch
+        logger.debug("Epoch %d, warmup: %s", epoch, is_warmup)
+
         # Train loop for each epoch
         for batch_idx, batch in enumerate(train_dataloader):
             waves = batch[0]  # Keep ground truth audio
@@ -487,7 +491,10 @@ def main():
             mel4style = mel_st.unsqueeze(1) if multispeaker else mel_gt.unsqueeze(1)
             # Only (acoustic) style encoder is trained within 1st stage training
             style = model.acoustic_style_encoder(
-                mel4style, spk_embs if multispeaker and epoch >= tma_epoch else None
+                mel4style,
+                spk_emb=spk_embs if multispeaker else None,
+                is_warmup=is_warmup,
+                # if multispeaker and epoch >= tma_epoch else None
             )
 
             # Reconstruct the audio from the text-audio aligned encoded features, predicted style,
@@ -755,7 +762,11 @@ def main():
 
                 # Style encoding:
                 style = model.acoustic_style_encoder(
-                    mel_gt.unsqueeze(1), spk_embs if multispeaker and epoch >= tma_epoch else None
+                    # mel_gt.unsqueeze(1), spk_embs if multispeaker and epoch >= tma_epoch else None
+                    mel_gt.unsqueeze(1),
+                    spk_emb=spk_embs if multispeaker else None,
+                    is_warmup=is_warmup,
+                    # if multispeaker and epoch >= tma_epoch else None
                 )
 
                 # Reconstruct the audio from the text-audio aligned encoded features, predicted style,
@@ -808,7 +819,8 @@ def main():
                         mels[idx, :, :mel_len].unsqueeze(0),  # Ground-truth mel spectrogram
                         # Ground-truth phoneme-audio alignment
                         h_algn[idx, :, : mel_len // 2].unsqueeze(0),
-                        spk_embs[idx].unsqueeze(0) if multispeaker and epoch >= tma_epoch else None,
+                        spk_emb=spk_embs[idx].unsqueeze(0) if multispeaker else None,
+                        is_warmup=is_warmup,
                     )
 
                     # Write and save val audio

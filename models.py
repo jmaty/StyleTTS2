@@ -183,6 +183,7 @@ class AcousticStyleEncoder(nn.Module):
         spk_emb_dim=512,
         style_dim=128,
         max_conv_dim=384,
+        mode="internal",
         mix_weight=0.0,
         learnable_gate=True,
     ):
@@ -205,12 +206,12 @@ class AcousticStyleEncoder(nn.Module):
         """
         super().__init__()
         self.learnable_gate = learnable_gate
+        self.mode = mode
 
         self.spk_proj = nn.Sequential(
             nn.Linear(spk_emb_dim, style_dim),  # Reduce the dimension of the speaker embedding
             nn.LayerNorm(style_dim),  # Stabilize the statistics
         )
-
         self.style_encoder = StyleEncoder(
             dim_in=dim_in,
             style_dim=style_dim,
@@ -232,16 +233,22 @@ class AcousticStyleEncoder(nn.Module):
         else:
             # If not learnable, register a buffer to hold the untrainable gate parameter
             # This will not be updated during training, but can still be used in the forward pass
+            if mode == "external":
+                w = 1
+            elif mode == "internal":
+                w = 0
+            else:
+                w = mix_weight
             self.register_buffer(
                 "gate_param",
                 torch.full(
                     (style_dim,),
-                    mix_weight,
+                    w,
                     dtype=torch.float32,
                 ),
             )
 
-    def forward(self, x, spk_emb=None):
+    def forward(self, x, spk_emb=None, is_warmup=False):
         """
         Forward pass of the module.
         Args:
@@ -250,21 +257,33 @@ class AcousticStyleEncoder(nn.Module):
         Returns:
             torch.Tensor: The output style tensor.
         """
-        style_enc = self.style_encoder(x)
-        if spk_emb is None or spk_emb.numel() == 0:
-            return style_enc
-
-        # External speaker embedding is provided, project it, normalize,
-        # and fuse with the internal style encoder output
-        spk_emb = self.spk_proj(spk_emb)
-
-        g = torch.sigmoid(self.gate_param) if self.learnable_gate else self.gate_param
-        # Fusion: (1 - g) * style_encoder(x) + g * spk_emb
-        # g: shape (style_dim,) or (batch, style_dim) (broadcasted to match batch)
-        # self.style_encoder(x): shape (batch, style_dim)
-        # spk_emb: shape (batch, style_dim)
-        # Broadcasting ensures elementwise mixing per style dimension.
-        return (1 - g) * style_enc + g * spk_emb
+        if self.mode == "internal" or spk_emb is None:
+            # Internal style encoding is used
+            return self.style_encoder(x)
+        elif self.mode == "external":
+            # External speaker embedding is provided, project it and normalize
+            if spk_emb is None:
+                raise ValueError("External speaker embedding is required when mode is 'external'.")
+            style_extern = self.spk_proj(spk_emb)
+            return style_extern.detach()
+        else:  # Both internal and external style encodings are used => style will be mixed
+            style_intern = self.style_encoder(x)
+            if is_warmup:
+                # During warmup, use the internal style encoder output only
+                return style_intern
+            style_extern = self.spk_proj(spk_emb)
+            style_extern = style_extern.detach()
+            # Setup gate parameter:
+            # - If learnable, use sigmoid activation to ensure it is between 0 and 1
+            #   with a default value of `mix_weight=0` being 0.5 after sigmoid activation.
+            # - If not learnable, use the fixed value of `mix_weight`.
+            g = torch.sigmoid(self.gate_param) if self.learnable_gate else self.gate_param
+            # Fusion: (1 - g) * style_intern + g * style_extern
+            # g: shape (style_dim,) or (batch, style_dim) (broadcasted to match batch)
+            # style_intern: shape (batch, style_dim)
+            # style_extern: shape (batch, style_dim)
+            # Broadcasting ensures elementwise mixing per style dimension.
+            return (1 - g) * style_intern + g * style_extern
 
 
 class StyleEncoder(nn.Module):
@@ -1024,6 +1043,7 @@ def build_model(args, text_aligner, pitch_extractor, bert):
         # Initial external/internal speaker embedding fusion weight
         mix_weight=args.mix_weight,
         learnable_gate=args.learnable_gate,
+        mode=args.mode,
     )
 
     # Prosodic style encoder
