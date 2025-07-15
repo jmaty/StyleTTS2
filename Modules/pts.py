@@ -567,7 +567,7 @@ class PTS:
             else:
                 # Extract real F0
                 f0, _, _ = self.model.pitch_extractor(mel_gt.unsqueeze(1))
-                f0 = f0.unsqueeze(0)
+                # f0 = f0.unsqueeze(0)
                 # Extract real norm
                 n = log_norm(mel_gt.unsqueeze(1)).squeeze(1)
 

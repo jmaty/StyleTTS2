@@ -773,7 +773,8 @@ def load_F0_models(path):
     The model expects the checkpoint to have a 'net' key containing the state dictionary.
     """
     logger.info("Loading F0 model from %s", path)
-    f0_model = JDCNet(num_class=1, seq_len=192)
+    # f0_model = JDCNet(num_class=1, seq_len=192)
+    f0_model = JDCNet(num_class=1)
     params = torch.load(path, map_location="cpu")["net"]
     f0_model.load_state_dict(params)
     _ = f0_model.train()
