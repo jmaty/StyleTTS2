@@ -14,7 +14,7 @@ INTB=Train_second.ipynb
 MEM=256gb
 LSCRATCH=20gb
 SCRATCH_TYPE="scratch-local"
-NCPUS1=8  # Number of CPUs per process (GPU) for DP computing
+NCPUS1=4  # Number of CPUs per process (GPU) for DP computing
 NGPUS=2
 
 if [[ "$#" -lt 1 ]]; then
