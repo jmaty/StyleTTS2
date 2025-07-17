@@ -212,7 +212,7 @@ def main():
         num_workers=args.num_workers,
         device=device,
         dataset_config=dataset_config,
-        use_speaker_sampler=True if multispeaker else False,
+        use_speaker_sampler=bool(multispeaker),
     )
     logger.info("Building validation dataloader...")
     val_dataloader = build_dataloader(
