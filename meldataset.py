@@ -709,26 +709,25 @@ class BalancedSpeakerSampler(Sampler):
     # Sampler core
     # ------------------------------------------------------------------
     def __iter__(self):  # noqa: D401
-        def __iter__(self):
-            """Iterate over batches of data indices with speaker-balanced sampling.
-            This iterator implements a sophisticated batching strategy that:
-            1. Uses deterministic seeding based on epoch and rank for reproducibility
-            2. Shuffles samples within each speaker and shuffles speaker order
-            3. Distributes speakers across multiple ranks for distributed training
-            4. Rotates through active speakers to create balanced batches
-            5. Ensures each batch contains samples from different speakers when possible
-            The algorithm maintains fairness by cycling through speakers and only
-            removing them from the active pool when they're exhausted. This prevents
-            any single speaker from dominating the batches.
-            Yields:
-                List[int]: Batches of data indices, each of size `batch_size`
-                          (except possibly the last batch if `drop_last=False`)
-            Note:
-                - Uses NumPy's permutation for efficient shuffling of large lists (>32 items)
-                - Falls back to Python's random.shuffle for smaller lists
-                - Supports distributed data parallel (DDP) training via rank-based partitioning
-                - Reshuffles active speakers after each full rotation to maintain randomness
-            """
+        """Iterate over batches of data indices with speaker-balanced sampling.
+        This iterator implements a sophisticated batching strategy that:
+        1. Uses deterministic seeding based on epoch and rank for reproducibility
+        2. Shuffles samples within each speaker and shuffles speaker order
+        3. Distributes speakers across multiple ranks for distributed training
+        4. Rotates through active speakers to create balanced batches
+        5. Ensures each batch contains samples from different speakers when possible
+        The algorithm maintains fairness by cycling through speakers and only
+        removing them from the active pool when they're exhausted. This prevents
+        any single speaker from dominating the batches.
+        Yields:
+            List[int]: Batches of data indices, each of size `batch_size`
+                        (except possibly the last batch if `drop_last=False`)
+        Note:
+            - Uses NumPy's permutation for efficient shuffling of large lists (>32 items)
+            - Falls back to Python's random.shuffle for smaller lists
+            - Supports distributed data parallel (DDP) training via rank-based partitioning
+            - Reshuffles active speakers after each full rotation to maintain randomness
+        """
 
         # ------------------------------------------------------------------
         # (1) Deterministic seed per epoch & rank
@@ -881,5 +880,4 @@ def build_dataloader(
         collate_fn=collate_fn,
         pin_memory=(device != "cpu"),
     )
-
     return dataloader
