@@ -208,10 +208,13 @@ class AcousticStyleEncoder(nn.Module):
         self.learnable_gate = learnable_gate
         self.mode = mode
 
-        self.spk_proj = nn.Sequential(
-            nn.Linear(spk_emb_dim, style_dim),  # Reduce the dimension of the speaker embedding
-            nn.LayerNorm(style_dim),  # Stabilize the statistics
-        )
+        # self.spk_proj = nn.Sequential(
+        #     nn.Linear(spk_emb_dim, style_dim),  # Reduce the dimension of the speaker embedding
+        #     nn.LayerNorm(style_dim),  # Stabilize the statistics
+        # )
+        # Reduce the dimension of the speaker embedding
+        self.spk_proj = nn.Linear(spk_emb_dim, style_dim)
+
         self.style_encoder = StyleEncoder(
             dim_in=dim_in,
             style_dim=style_dim,
@@ -265,14 +268,15 @@ class AcousticStyleEncoder(nn.Module):
             if spk_emb is None:
                 raise ValueError("External speaker embedding is required when mode is 'external'.")
             style_extern = self.spk_proj(spk_emb)
-            return style_extern.detach()
+            # return style_extern.detach()
+            return style_extern
         else:  # Both internal and external style encodings are used => style will be mixed
             style_intern = self.style_encoder(x)
             if is_warmup:
                 # During warmup, use the internal style encoder output only
                 return style_intern
             style_extern = self.spk_proj(spk_emb)
-            style_extern = style_extern.detach()
+            # style_extern = style_extern.detach()
             # Setup gate parameter:
             # - If learnable, use sigmoid activation to ensure it is between 0 and 1
             #   with a default value of `mix_weight=0` being 0.5 after sigmoid activation.
