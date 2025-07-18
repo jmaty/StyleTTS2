@@ -272,6 +272,9 @@ def main():
         else:
             start_epoch = 0
             iters = 0
+        # Log model parameters
+        logger.info("Acoustic style dimension: %d", model.acoustic_style_encoder.style_dim)
+        logger.info("")
 
     # in case not distributed computing
     try:

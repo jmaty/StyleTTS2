@@ -474,8 +474,8 @@ class PTS:
                 # convex combination of previous and current styles
                 pred_style = self.t * pred_style + (1 - self.t) * s_prev
 
-            pros_style = pred_style[:, 128:]  # prosodic features
-            acoust_style = pred_style[:, :128]  # acoustics/timbre features
+            pros_style = pred_style[:, self.acoustic_style_dim :]  # prosodic features
+            acoust_style = pred_style[:, : self.acoustic_style_dim]  # acoustics/timbre features
 
             # If reference speaker style embedding  `ref_s` is provided,
             # combine it with the generated style
@@ -487,8 +487,13 @@ class PTS:
             #   lower = more similar to the reference style)
             if ref_s is not None:
                 logger.debug("Combining styles with reference speaker style embedding")
-                acoust_style = self.alpha * acoust_style + (1 - self.alpha) * ref_s[:, :128]
-                pros_style = self.beta * pros_style + (1 - self.beta) * ref_s[:, 128:]
+                acoust_style = (
+                    self.alpha * acoust_style
+                    + (1 - self.alpha) * ref_s[:, : self.acoustic_style_dim]
+                )
+                pros_style = (
+                    self.beta * pros_style + (1 - self.beta) * ref_s[:, self.acoustic_style_dim :]
+                )
                 pred_style = torch.cat([acoust_style, pros_style], dim=-1)
 
             # Style-conditioned phonetic features
@@ -758,6 +763,11 @@ class PTS:
         if not isinstance(value, (int, float)) or value <= 0:
             raise ValueError("speech_rate must be a positive number.")
         self._speech_rate = value
+
+    @property
+    def acoustic_style_dim(self):
+        """Get the acoustic style dimension."""
+        return self._model.acoustic_style_encoder.style_dim if self._model else None
 
 
 def set_random_seed(seed, deterministic=False):
