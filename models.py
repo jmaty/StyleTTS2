@@ -262,32 +262,63 @@ class AcousticStyleEncoder(nn.Module):
         """
         if self.mode == "internal" or spk_emb is None:
             # Internal style encoding is used
-            return self.style_encoder(x)
+            return self.forward_internal(x)
         elif self.mode == "external":
             # External speaker embedding is provided, project it and normalize
-            if spk_emb is None:
-                raise ValueError("External speaker embedding is required when mode is 'external'.")
-            style_extern = self.spk_proj(spk_emb)
-            # return style_extern.detach()
-            return style_extern
-        else:  # Both internal and external style encodings are used => style will be mixed
-            style_intern = self.style_encoder(x)
-            if is_warmup:
-                # During warmup, use the internal style encoder output only
-                return style_intern
-            style_extern = self.spk_proj(spk_emb)
-            # style_extern = style_extern.detach()
-            # Setup gate parameter:
-            # - If learnable, use sigmoid activation to ensure it is between 0 and 1
-            #   with a default value of `mix_weight=0` being 0.5 after sigmoid activation.
-            # - If not learnable, use the fixed value of `mix_weight`.
-            g = torch.sigmoid(self.gate_param) if self.learnable_gate else self.gate_param
-            # Fusion: (1 - g) * style_intern + g * style_extern
-            # g: shape (style_dim,) or (batch, style_dim) (broadcasted to match batch)
-            # style_intern: shape (batch, style_dim)
-            # style_extern: shape (batch, style_dim)
-            # Broadcasting ensures elementwise mixing per style dimension.
-            return (1 - g) * style_intern + g * style_extern
+            return self.forward_external(spk_emb)
+
+        # Both internal and external style encodings are used => style will be mixed
+        return self.forward_mix(x, spk_emb, is_warmup)
+
+    def forward_internal(self, x):
+        """
+        Forward pass for internal style encoding only.
+        Args:
+            x (torch.Tensor): Internal style embedding.
+        Returns:
+            torch.Tensor: The output style tensor from the internal style encoder.
+        """
+        return self.style_encoder(x)
+
+    def forward_external(self, spk_emb):
+        """
+        Forward pass for external speaker embedding only.
+        Args:
+            spk_emb (torch.Tensor): External speaker embedding.
+        Returns:
+            torch.Tensor: The output style tensor from the external speaker embedding projection.
+        """
+        if spk_emb is None:
+            raise ValueError("External speaker embedding is required when mode is 'external'.")
+        style_extern = self.spk_proj(spk_emb)
+        return style_extern.detach()
+
+    def forward_mix(self, x, spk_emb, is_warmup=False):
+        """
+        Forward pass for mixing internal and external style embeddings.
+        Args:
+            x (torch.Tensor): Internal style embedding.
+            spk_emb (torch.Tensor): External speaker embedding.
+            is_warmup (bool, optional): If True, only use the internal style encoder output.
+        Returns:
+            torch.Tensor: The output style tensor after mixing.
+        """
+        style_intern = self.forward_internal(x)
+        if is_warmup:
+            # During warmup, use the internal style encoder output only
+            return style_intern
+        style_extern = self.forward_external(spk_emb)
+        # Setup gate parameter:
+        # - If learnable, use sigmoid activation to ensure it is between 0 and 1
+        #   with a default value of `mix_weight=0` being 0.5 after sigmoid activation.
+        # - If not learnable, use the fixed value of `mix_weight`.
+        g = torch.sigmoid(self.gate_param) if self.learnable_gate else self.gate_param
+        # Fusion: (1 - g) * style_intern + g * style_extern
+        # g: shape (style_dim,) or (batch, style_dim) (broadcasted to match batch)
+        # style_intern: shape (batch, style_dim)
+        # style_extern: shape (batch, style_dim)
+        # Broadcasting ensures elementwise mixing per style dimension.
+        return (1 - g) * style_intern + g * style_extern
 
 
 class StyleEncoder(nn.Module):
