@@ -67,6 +67,11 @@ class PTS:
         self._model = None
         self._config = None
         self._sampler = None
+        self._acoustic_style_dim = (
+            model.acoustic_style_encoder.module.style_dim
+            if hasattr(model.acoustic_style_encoder, "module")
+            else model.acoustic_style_encoder.style_dim
+        )
 
         self.t = t
         self.alpha = alpha
@@ -263,7 +268,7 @@ class PTS:
         Returns:
             tensor: Noise for diffusion.
         """
-        return torch.randn(1, 1, 256, device=self.device)
+        return torch.randn(1, 1, 2 * self.style_dim, device=self.device)
 
     def _setup_sampler(self):
         """Setup diffusion sampler."""
@@ -683,6 +688,11 @@ class PTS:
             self.to_eval()
 
     @property
+    def style_dim(self):
+        """Get model style dimension."""
+        return self._config.model_params.style_dim
+
+    @property
     def offset_beg(self):
         """Get the beginning offset for audio generation."""
         return self._config.preprocess_params.silence_beg
@@ -767,7 +777,7 @@ class PTS:
     @property
     def acoustic_style_dim(self):
         """Get the acoustic style dimension."""
-        return self._model.acoustic_style_encoder.style_dim if self._model else None
+        return self._acoustic_style_dim
 
 
 def set_random_seed(seed, deterministic=False):
