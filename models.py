@@ -214,7 +214,7 @@ class AcousticStyleEncoder(nn.Module):
         #     nn.LayerNorm(style_dim),  # Stabilize the statistics
         # )
         # Reduce the dimension of the speaker embedding
-        if mode == "external" and spk_emb_dim > style_dim:
+        if mode != "internal" and spk_emb_dim > style_dim:
             self.spk_proj = nn.Linear(spk_emb_dim, style_dim)
         else:
             self.spk_proj = nn.Identity()
@@ -294,6 +294,7 @@ class AcousticStyleEncoder(nn.Module):
         """
         if spk_emb is None:
             raise ValueError("External speaker embedding is required when mode is 'external'.")
+        # normalized = F.normalize(projected, p=2, dim=-1)
         return self.spk_proj(spk_emb)
 
     def forward_mix(self, x, spk_emb, is_warmup=False):
@@ -372,6 +373,7 @@ class StyleEncoder(nn.Module):
         h = self.shared(x)
         h = h.view(h.size(0), -1)
         s = self.unshared(h)
+        # normalized = F.normalize(s, p=2, dim=-1)
         return s
 
 
