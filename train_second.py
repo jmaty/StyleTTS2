@@ -463,7 +463,7 @@ def main():
             # ---
             # Initialize global prosodic and acoustic styles
             pros_style = torch.empty(bsize, model_params.style_dim, device=device)
-            acoust_style = torch.empty(bsize, model_params.style_dim, device=device)
+            acoust_style = torch.empty(bsize, model.acoustic_style_encoder.style_dim, device=device)
             for bidx in range(bsize):
                 mels_ok = mels[bidx, :, : mel_inp_len[bidx].item()]
                 pros_style[bidx, :] = model.prosodic_style_encoder(

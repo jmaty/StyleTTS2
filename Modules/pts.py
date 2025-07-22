@@ -67,6 +67,11 @@ class PTS:
         self._model = None
         self._config = None
         self._sampler = None
+        self._acoustic_style_dim = (
+            model.acoustic_style_encoder.module.style_dim
+            if hasattr(model.acoustic_style_encoder, "module")
+            else model.acoustic_style_encoder.style_dim
+        )
 
         self.t = t
         self.alpha = alpha
@@ -263,7 +268,7 @@ class PTS:
         Returns:
             tensor: Noise for diffusion.
         """
-        return torch.randn(1, 1, 256, device=self.device)
+        return torch.randn(1, 1, 2 * self.style_dim, device=self.device)
 
     def _setup_sampler(self):
         """Setup diffusion sampler."""
@@ -474,8 +479,8 @@ class PTS:
                 # convex combination of previous and current styles
                 pred_style = self.t * pred_style + (1 - self.t) * s_prev
 
-            pros_style = pred_style[:, 128:]  # prosodic features
-            acoust_style = pred_style[:, :128]  # acoustics/timbre features
+            pros_style = pred_style[:, self.acoustic_style_dim :]  # prosodic features
+            acoust_style = pred_style[:, : self.acoustic_style_dim]  # acoustics/timbre features
 
             # If reference speaker style embedding  `ref_s` is provided,
             # combine it with the generated style
@@ -487,8 +492,13 @@ class PTS:
             #   lower = more similar to the reference style)
             if ref_s is not None:
                 logger.debug("Combining styles with reference speaker style embedding")
-                acoust_style = self.alpha * acoust_style + (1 - self.alpha) * ref_s[:, :128]
-                pros_style = self.beta * pros_style + (1 - self.beta) * ref_s[:, 128:]
+                acoust_style = (
+                    self.alpha * acoust_style
+                    + (1 - self.alpha) * ref_s[:, : self.acoustic_style_dim]
+                )
+                pros_style = (
+                    self.beta * pros_style + (1 - self.beta) * ref_s[:, self.acoustic_style_dim :]
+                )
                 pred_style = torch.cat([acoust_style, pros_style], dim=-1)
 
             # Style-conditioned phonetic features
@@ -678,6 +688,11 @@ class PTS:
             self.to_eval()
 
     @property
+    def style_dim(self):
+        """Get model style dimension."""
+        return self._config.model_params.style_dim
+
+    @property
     def offset_beg(self):
         """Get the beginning offset for audio generation."""
         return self._config.preprocess_params.silence_beg
@@ -758,6 +773,11 @@ class PTS:
         if not isinstance(value, (int, float)) or value <= 0:
             raise ValueError("speech_rate must be a positive number.")
         self._speech_rate = value
+
+    @property
+    def acoustic_style_dim(self):
+        """Get the acoustic style dimension."""
+        return self._acoustic_style_dim
 
 
 def set_random_seed(seed, deterministic=False):

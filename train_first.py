@@ -172,6 +172,7 @@ def main():
         plbert = load_plbert(bert_path)
 
     model = build_model(model_params, text_aligner, pitch_extractor, plbert)
+    acoustic_style_dim = model.acoustic_style_encoder.style_dim
     bert_size = model.bert.config.max_position_embeddings  # ALBERT config
 
     for k in model:
@@ -272,6 +273,9 @@ def main():
         else:
             start_epoch = 0
             iters = 0
+        # Log model parameters
+        logger.info("Acoustic style dimension: %d", acoustic_style_dim)
+        logger.info("")
 
     # in case not distributed computing
     try:
