@@ -8,10 +8,10 @@ export LC_NUMERIC="en_US.UTF-8"
 # -----------------------------------------------------------------------------
 # Default params
 SPEC="gpu3"
-HOURS=72
+HOURS=48  
 INTB=Train_finetune.ipynb
 # QSUB ARGUMENTS
-MEM=128gb
+MEM=64gb
 LSCRATCH=20gb
 NCPUS=8
 NGPUS=1
@@ -82,7 +82,7 @@ SELECT="-l select=1:ncpus=$NCPUS:mem=$MEM:scratch_local=$LSCRATCH:ngpus=$NGPUS$C
 WALLTIME="-l walltime=$HOURS:00:00"
 
 # Extract name of the experiment
-EXP="$(basename $EXPDIR)_ft"
+EXP="$(basename $EXPDIR)"
 
 # Timestep to differentiate among runs with the same run name
 TIMESTEP=$(date +"%y%m%d-%H%M%S")
