@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import yaml
-from munch import Munch
+from munch import munchify, Munch
 from torch.nn.utils import spectral_norm, weight_norm
 from xlstm import mLSTMBlockConfig, mLSTMLayerConfig, xLSTMBlockStack, xLSTMBlockStackConfig
 
@@ -228,8 +228,9 @@ class AcousticStyleEncoder(nn.Module):
         if learnable_gate:
             # Initialize the gate parameter as a trainable parameter
             # The gate parameter is initialized to a value close to 0.5 (after sigmoid activation)
-            # to allow for a balanced mix between the internal style encoder output and the external speaker embedding
-            # This allows the model to learn the optimal mix during training
+            # to allow for a balanced mix between the internal style encoder output and
+            # the external speaker embedding. This allows the model to learn the optimal mix
+            # during training
             self.gate_param = nn.Parameter(
                 torch.full(
                     (style_dim,),
@@ -1148,9 +1149,34 @@ def save_checkpoint(
 
 
 class StyleTTS2:
+    """
+    StyleTTS2 model class that encapsulates all components of the StyleTTS2 text-to-speech system.
+
+    This class provides a unified interface to access various components of the StyleTTS2 model,
+    including text encoding, style encoding, prosody prediction, diffusion model, and waveform
+    generation. It allows for easy access to model components using both dot notation and
+    dictionary-like access.
+
+    Attributes
+    ----------
+    model : Munch
+        A Munch object containing all model components.
+    """
+
     def __init__(self, args, text_aligner, pitch_extractor, bert):
+        """
+        Initializes the StyleTTS2 model with the provided arguments and components.
+        This constructor sets up the model parameters and builds the model components.
+
+        Args:
+            args (object): Configuration object containing model hyperparameters.
+            text_aligner (nn.Module): Module that aligns text with audio features.
+            pitch_extractor (nn.Module): Module that extracts pitch information from audio.
+            bert (nn.Module): Pre-trained BERT model for extracting contextual text embeddings.
+        """
+        self._model = Munch()
         self._params = args
-        self.build(args, text_aligner, pitch_extractor, bert)
+        self._build(args, text_aligner, pitch_extractor, bert)
 
     @property
     def model(self):
@@ -1158,9 +1184,23 @@ class StyleTTS2:
 
     @model.setter
     def model(self, value):
-        if not isinstance(value, (dict, Munch)):
-            raise TypeError("Model must be a dictionary or Munch of components")
-        self._model = Munch(value) if isinstance(value, dict) else value
+        try:
+            self._model = munchify(value)
+        except (TypeError, AttributeError) as exc:
+            raise TypeError("Model must be a dictionary or Munch-compatible object") from exc
+
+    def __getattr__(self, item):
+        """
+        Enable dot notation access to model components.
+        This method is called when an attribute is not found in the instance.
+        It delegates to the Munch object to provide dot notation access.
+        """
+        try:
+            return self._model[item]
+        except (AttributeError, KeyError) as exc:
+            raise AttributeError(
+                f"'{self.__class__.__name__}' object has no attribute '{item}'"
+            ) from exc
 
     def __getitem__(self, key):
         """
@@ -1181,7 +1221,27 @@ class StyleTTS2:
         """
         self._model[key] = value
 
-    def build(self, args, text_aligner, pitch_extractor, bert):
+    def __iter__(self):
+        """
+        Enable iteration over model components.
+        This allows for 'for k in model:' syntax to iterate over model component names.
+        Returns:
+            Iterator over the keys in self._model
+        """
+        return iter(self._model)
+
+    def __contains__(self, key):
+        """
+        Enable membership testing using the 'in' operator.
+        This allows for 'key in model' syntax to check if a component exists.
+        Args:
+            key: Key to check for existence in the model dictionary
+        Returns:
+            bool: True if the key exists in self._model, False otherwise
+        """
+        return key in self._model
+
+    def _build(self, args, text_aligner, pitch_extractor, bert):
         """
         Builds the StyleTTS2 model components.
         This function constructs and configures all neural network components required for the
@@ -1335,21 +1395,23 @@ class StyleTTS2:
         diffusion.diffusion.net = transformer
         diffusion.unet = transformer
 
-        self._model = Munch(
-            bert=bert,
-            bert_encoder=nn.Linear(bert.config.hidden_size, args.hidden_dim),
-            prosodic_predictor=prosodic_predictor,
-            decoder=decoder,
-            text_encoder=text_encoder,
-            prosodic_style_encoder=prosodic_style_encoder,
-            acoustic_style_encoder=acoustic_style_encoder,
-            diffusion=diffusion,
-            text_aligner=text_aligner,
-            pitch_extractor=pitch_extractor,
-            mpd=MultiPeriodDiscriminator(),
-            msd=MultiResSpecDiscriminator(),
-            # slm discriminator head
-            wd=WavDiscriminator(args.slm.hidden, args.slm.nlayers, args.slm.initial_channel),
+        self._model = munchify(
+            {
+                "bert": bert,
+                "bert_encoder": nn.Linear(bert.config.hidden_size, args.hidden_dim),
+                "prosodic_predictor": prosodic_predictor,
+                "decoder": decoder,
+                "text_encoder": text_encoder,
+                "prosodic_style_encoder": prosodic_style_encoder,
+                "acoustic_style_encoder": acoustic_style_encoder,
+                "diffusion": diffusion,
+                "text_aligner": text_aligner,
+                "pitch_extractor": pitch_extractor,
+                "mpd": MultiPeriodDiscriminator(),
+                "msd": MultiResSpecDiscriminator(),
+                # slm discriminator head
+                "wd": WavDiscriminator(args.slm.hidden, args.slm.nlayers, args.slm.initial_channel),
+            }
         )
 
     def to(self, device="cpu"):

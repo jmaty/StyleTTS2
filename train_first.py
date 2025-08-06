@@ -169,13 +169,12 @@ def main():
         bert_path = config.get("PLBERT_dir", False)
         plbert = load_plbert(bert_path)
 
-    tts = StyleTTS2(model_params, text_aligner, pitch_extractor, plbert)
-    models = tts.model
-    acoustic_style_dim = models.acoustic_style_encoder.style_dim
-    bert_size = models.bert.config.max_position_embeddings  # ALBERT config
+    model = StyleTTS2(model_params, text_aligner, pitch_extractor, plbert)
+    acoustic_style_dim = model.acoustic_style_encoder.style_dim
+    bert_size = model.bert.config.max_position_embeddings  # ALBERT config
 
-    for k in models:
-        models[k] = acc.prepare(models[k])
+    for k in model:
+        model[k] = acc.prepare(model[k])
 
     # Load data
     train_list, val_list = get_data_path_list(train_path, val_path)
@@ -243,11 +242,11 @@ def main():
     }
 
     # Move models to device (cuda)
-    tts.to(device)
+    model.to(device)
 
     # initialize optimizers after preparing models for compatibility with FSDP
-    parameters_dict = {key: models[key].parameters() for key in models}
-    scheduler_params_dict = {key: scheduler_params.copy() for key in models}
+    parameters_dict = {key: model[key].parameters() for key in model}
+    scheduler_params_dict = {key: scheduler_params.copy() for key in model}
     lr = float(config["optimizer_params"].get("lr", 1e-4))
     optimizer = build_optimizer(parameters_dict, scheduler_params_dict, lr)
 
@@ -257,8 +256,8 @@ def main():
 
     with acc.main_process_first():
         if config.get("pretrained_model", "") != "":
-            models, optimizer, start_epoch, iters = load_checkpoint(
-                models,
+            model, optimizer, start_epoch, iters = load_checkpoint(
+                model,
                 optimizer,
                 config["pretrained_model"],
                 load_only_params=config.get("load_only_params", True),
@@ -278,16 +277,16 @@ def main():
 
     # in case not distributed computing
     try:
-        n_down = models.text_aligner.module.n_down
+        n_down = model.text_aligner.module.n_down
     except AttributeError:
         logger.warning("Distributed computing NOT used")
-        n_down = models.text_aligner.n_down
+        n_down = model.text_aligner.n_down
 
     # wrapped losses for compatibility with mixed precision
     stft_loss = MultiResolutionSTFTLoss().to(device)
-    gl = GeneratorLoss(models.mpd, models.msd).to(device)
-    dl = DiscriminatorLoss(models.mpd, models.msd).to(device)
-    wl = create_slm_loss(model_params.slm, models.wd, sr).to(device)
+    gl = GeneratorLoss(model.mpd, model.msd).to(device)
+    dl = DiscriminatorLoss(model.mpd, model.msd).to(device)
+    wl = create_slm_loss(model_params.slm, model.wd, sr).to(device)
 
     # Create test audio dir under log/eval dir
     if (save_val_audio or save_test_audio) and not os.path.exists(test_audio_dir):
@@ -295,7 +294,7 @@ def main():
 
     # Create phoneme-to-speech object for synthesizing validation sentences
     # - use global noise for speed
-    pts = PTS(config, models, use_glob_noise=True)
+    pts = PTS(config, model, use_glob_noise=True)
 
     # Number of steps per epoch for the current process
     steps_per_epoch = len(train_dataloader)
@@ -310,7 +309,7 @@ def main():
         logger.info(" | > Input iterations: %d\n", iters)
 
     # === Start of training loop ==============================================
-    tts.set_mode("eval")
+    model.set_mode("eval")
 
     # Iterate through the defined number of epochs
     for epoch in range(start_epoch, epochs):
@@ -328,13 +327,13 @@ def main():
         if epoch >= tma_epoch:
             train_components.extend(["msd", "mpd", "text_aligner"])
         # Set models to train mode
-        tts.set_mode("train", train_components)
+        model.set_mode("train", train_components)
 
         # JMa: Zero gradients of all optimizers at each epoch start
         optimizer.zero_grad()
 
         # Check if warmup is to be applied
-        logger.debug("Epoch %d, warmup: %s", epoch, tts.is_warmup(epoch))
+        logger.debug("Epoch %d, warmup: %s", epoch, model.is_warmup(epoch))
 
         # Train loop for each epoch
         for batch_idx, batch in enumerate(train_dataloader):
@@ -361,7 +360,7 @@ def main():
                 ph_mask = length_to_mask(ph_inp_lens).to(phonemes.device)
 
             # Align text and audio (mel)
-            _, s2s_pred, d_algn = models.text_aligner(mels, mel_mask, phonemes)
+            _, s2s_pred, d_algn = model.text_aligner(mels, mel_mask, phonemes)
             # Refine attention matrix
             d_algn = d_algn.transpose(-1, -2)
             d_algn = d_algn[..., 1:]
@@ -393,7 +392,7 @@ def main():
                 d_algn_mono = maximum_path(d_algn, mask_st)
 
             # Encode
-            h_ph = models.text_encoder(phonemes, ph_inp_lens, ph_mask)
+            h_ph = model.text_encoder(phonemes, ph_inp_lens, ph_mask)
 
             # 50% of chance of using monotonic version
             if bool(random.getrandbits(1)):
@@ -485,23 +484,23 @@ def main():
             with torch.no_grad():
                 # Get the pitch and norm of the ground truth samples
                 norm_real = log_norm(mel_gt.unsqueeze(1)).squeeze(1).detach()
-                f0_real, _, _ = models.pitch_extractor(mel_gt.unsqueeze(1))
+                f0_real, _, _ = model.pitch_extractor(mel_gt.unsqueeze(1))
 
             # Style encoding:
             # - if not multispeaker, use the ground truth mel spectrogram
             # - if multispeaker, use other (style reference) mel spectrogram
             mel4style = mel_st.unsqueeze(1) if multispeaker else mel_gt.unsqueeze(1)
             # Only (acoustic) style encoder is trained within 1st stage training
-            style = models.acoustic_style_encoder(
+            style = model.acoustic_style_encoder(
                 mel4style,
                 spk_emb=spk_embs if multispeaker else None,
-                is_warmup=tts.is_warmup(epoch),
+                is_warmup=model.is_warmup(epoch),
                 # if multispeaker and epoch >= tma_epoch else None
             )
 
             # Reconstruct the audio from the text-audio aligned encoded features, predicted style,
             # and ground truth pitch and norm
-            y_rec = models.decoder(ph_algn, f0_real, norm_real, style)
+            y_rec = model.decoder(ph_algn, f0_real, norm_real, style)
 
             # --- Discriminator loss ---
             if epoch >= tma_epoch:
@@ -511,13 +510,13 @@ def main():
                 # JMa: Compute gradients only for discriminators
                 acc.backward(
                     loss_disc,
-                    inputs=list(models.mpd.parameters()) + list(models.msd.parameters()),
+                    inputs=list(model.mpd.parameters()) + list(model.msd.parameters()),
                 )
                 # JMa: Gradient accumulation
                 if (batch_idx + 1) % grad_accum_steps == 0:
                     # JMa: gradient clipping
                     if grad_clip:
-                        _ = [acc.clip_grad_norm_(models[k].parameters(), grad_clip) for k in models]
+                        _ = [acc.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
                     optimizer.step("msd")
                     optimizer.step("mpd")
                     optimizer.zero_grad("msd")
@@ -567,12 +566,12 @@ def main():
             g_loss /= grad_accum_steps  # JMa: normalize loss
             # JMa: Compute gradients only for generator
             inputs = (
-                list(models.decoder.parameters())
-                + list(models.acoustic_style_encoder.parameters())
-                + list(models.text_encoder.parameters())
+                list(model.decoder.parameters())
+                + list(model.acoustic_style_encoder.parameters())
+                + list(model.text_encoder.parameters())
             )
             if epoch >= tma_epoch:
-                inputs += list(models.text_aligner.parameters())
+                inputs += list(model.text_aligner.parameters())
             acc.backward(g_loss, inputs=inputs)
 
             # Accumulate mean mel-spectrogram loss (over all GPUs) across batches for logging
@@ -582,7 +581,7 @@ def main():
             if (batch_idx + 1) % grad_accum_steps == 0:
                 # JMa: gradient clipping
                 if grad_clip:
-                    _ = [acc.clip_grad_norm_(models[k].parameters(), grad_clip) for k in models]
+                    _ = [acc.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
 
                 optimizer.step("text_encoder")
                 optimizer.step("acoustic_style_encoder")
@@ -657,7 +656,7 @@ def main():
         # Validation
         loss_test = 0
         # Set all models to eval mode
-        tts.set_mode("eval")
+        model.set_mode("eval")
 
         with torch.no_grad():
             iters_test = 0
@@ -682,7 +681,7 @@ def main():
 
                 with torch.no_grad():
                     mel_mask = length_to_mask(mel_inp_len // (2**n_down)).to("cuda")
-                    _, s2s_pred, d_algn = models.text_aligner(mels, mel_mask, phonemes)
+                    _, s2s_pred, d_algn = model.text_aligner(mels, mel_mask, phonemes)
 
                     d_algn = d_algn.transpose(-1, -2)
                     d_algn = d_algn[..., 1:]
@@ -707,7 +706,7 @@ def main():
                     d_algn.masked_fill_(attn_mask, 0.0)
 
                 # Encode phonemes
-                h_ph = models.text_encoder(phonemes, ph_inp_lens, ph_mask)
+                h_ph = model.text_encoder(phonemes, ph_inp_lens, ph_mask)
 
                 h_algn = h_ph @ d_algn
 
@@ -760,21 +759,21 @@ def main():
 
                 # --- End of Pre-allocated tensors ---
 
-                f0_real, _, _ = models.pitch_extractor(mel_gt.unsqueeze(1))
+                f0_real, _, _ = model.pitch_extractor(mel_gt.unsqueeze(1))
                 norm_real = log_norm(mel_gt.unsqueeze(1)).squeeze(1)
 
                 # Style encoding:
-                style = models.acoustic_style_encoder(
+                style = model.acoustic_style_encoder(
                     # mel_gt.unsqueeze(1), spk_embs if multispeaker and epoch >= tma_epoch else None
                     mel_gt.unsqueeze(1),
                     spk_emb=spk_embs if multispeaker else None,
-                    is_warmup=tts.is_warmup(epoch),
+                    is_warmup=model.is_warmup(epoch),
                     # if multispeaker and epoch >= tma_epoch else None
                 )
 
                 # Reconstruct the audio from the text-audio aligned encoded features, predicted style,
                 # and ground truth pitch and norm
-                y_rec = models.decoder(ph_algn, f0_real, norm_real, style)
+                y_rec = model.decoder(ph_algn, f0_real, norm_real, style)
 
                 # Compute mel-spectrogram loss
                 loss_mel = stft_loss(y_rec.squeeze(), wav_gt.detach())
@@ -788,12 +787,12 @@ def main():
             # Update best_loss
             best_loss = min(curr_loss, best_loss)
 
-            gate_param = acc.unwrap_model(models.acoustic_style_encoder).gate_param
+            gate_param = acc.unwrap_model(model.acoustic_style_encoder).gate_param
             # For learnable gate, show values after sigmoid activation
             # For non-learnable gate, show raw values
             gate_values = (
                 torch.sigmoid(gate_param)
-                if acc.unwrap_model(models.acoustic_style_encoder).learnable_gate
+                if acc.unwrap_model(model.acoustic_style_encoder).learnable_gate
                 else gate_param
             )
             logger.info(
@@ -823,7 +822,7 @@ def main():
                         # Ground-truth phoneme-audio alignment
                         h_algn[idx, :, : mel_len // 2].unsqueeze(0),
                         spk_emb=spk_embs[idx].unsqueeze(0) if multispeaker else None,
-                        is_warmup=tts.is_warmup(epoch),
+                        is_warmup=model.is_warmup(epoch),
                     )
 
                     # Write and save val audio
@@ -840,7 +839,7 @@ def main():
 
             if epoch % saving_epoch == 0:
                 save_checkpoint(
-                    models,
+                    model,
                     optimizer,
                     epoch,
                     iters,
@@ -853,7 +852,7 @@ def main():
             # Save pre-TMA model
             if save_milestones and epoch == tma_epoch - 1:
                 save_checkpoint(
-                    models,
+                    model,
                     optimizer,
                     epoch,
                     iters,
@@ -865,7 +864,7 @@ def main():
     if acc.is_main_process:
         # Save final 1st stage model
         final_filepath = save_checkpoint(
-            models,
+            model,
             optimizer,
             epoch,
             iters,
