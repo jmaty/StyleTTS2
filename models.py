@@ -1001,180 +1001,6 @@ def load_ASR_models(ASR_MODEL_PATH, ASR_MODEL_CONFIG):
     return asr_model
 
 
-def build_model(args, text_aligner, pitch_extractor, bert):
-    """
-    Builds the StyleTTS2 model components.
-    This function constructs and configures all neural network components required for the
-    StyleTTS2 TTS system, including text encoding, style encoding, prosody prediction,
-    diffusion model, and waveform generation.
-    Parameters
-    ----------
-    args : object
-        Configuration object containing model hyperparameters:
-        - hidden_dim: Dimension of hidden layers
-        - style_dim: Dimension of style vectors
-        - n_mels: Number of mel spectrogram bins
-        - n_layer: Number of layers in various components
-        - max_dur: Maximum duration for prosody prediction
-        - dropout: Dropout rate for predictor
-        - dim_in: Input dimension for style encoders
-        - n_token: Number of tokens in the vocabulary
-        - multispeaker: Boolean flag for multispeaker model configuration
-        - diffusion: Configuration for diffusion model parameters
-        - slm: Configuration for SLM discriminator parameters
-        - decoder: Configuration for the decoder:
-          - type: Either "istftnet" or "hifigan"
-          - resblock_kernel_sizes: Kernel sizes for residual blocks
-          - upsample_rates: Rates for upsampling
-          - upsample_initial_channel: Initial channel count for upsampling
-          - resblock_dilation_sizes: Dilation sizes for residual blocks
-          - upsample_kernel_sizes: Kernel sizes for upsampling
-          - gen_istft_n_fft: FFT size for ISTFT (for istftnet only)
-          - gen_istft_hop_size: Hop size for ISTFT (for istftnet only)
-    text_aligner : nn.Module
-        Module that aligns text with audio features
-    pitch_extractor : nn.Module
-        Module that extracts pitch information from audio
-    bert : nn.Module
-        Pre-trained BERT model for extracting contextual text embeddings
-    Returns
-    -------
-    nets : Munch
-        A Munch object containing all model components:
-        - bert: BERT model for text embedding
-        - bert_encoder: Linear projection of BERT embeddings
-        - predictor: Prosody predictor module
-        - decoder: Mel-spectrogram decoder (ISTFTNet or HifiGAN)
-        - text_encoder: Text encoding module
-        - predictor_encoder: Style encoder for prosody prediction
-        - style_encoder: Style encoder for acoustic features
-        - diffusion: Audio diffusion model for generating waveforms
-        - text_aligner: Module for aligning text with audio
-        - pitch_extractor: Module for extracting pitch information
-        - mpd: Multi-Period Discriminator for adversarial training
-        - msd: Multi-Resolution Spectrogram Discriminator
-        - wd: Waveform Discriminator for SLM
-    """
-    assert args.decoder.type in ["istftnet", "hifigan"], "Decoder type unknown"
-
-    if args.decoder.type == "istftnet":
-        decoder = ISTFTDecoder(
-            dim_in=args.hidden_dim,
-            # TODO: 2x means both acoustic and prosodic styles are computed
-            # (originally only acoustic)
-            style_dim=args.style_dim,
-            resblock_kernel_sizes=args.decoder.resblock_kernel_sizes,
-            upsample_rates=args.decoder.upsample_rates,
-            upsample_initial_channel=args.decoder.upsample_initial_channel,
-            resblock_dilation_sizes=args.decoder.resblock_dilation_sizes,
-            upsample_kernel_sizes=args.decoder.upsample_kernel_sizes,
-            gen_istft_n_fft=args.decoder.gen_istft_n_fft,
-            gen_istft_hop_size=args.decoder.gen_istft_hop_size,
-        )
-    else:
-        decoder = HifiDecoder(
-            dim_in=args.hidden_dim,
-            # TODO: 2x means both acoustic and prosodic styles are computed
-            # (originally only acoustic)
-            style_dim=args.style_dim,
-            resblock_kernel_sizes=args.decoder.resblock_kernel_sizes,
-            upsample_rates=args.decoder.upsample_rates,
-            upsample_initial_channel=args.decoder.upsample_initial_channel,
-            resblock_dilation_sizes=args.decoder.resblock_dilation_sizes,
-            upsample_kernel_sizes=args.decoder.upsample_kernel_sizes,
-        )
-
-    text_encoder = TextEncoder(
-        channels=args.hidden_dim,
-        kernel_size=5,
-        depth=args.n_layer,
-        n_symbols=args.n_token,
-    )
-
-    prosodic_predictor = ProsodyPredictor(
-        style_dim=args.style_dim,
-        d_hid=args.hidden_dim,
-        nlayers=args.n_layer,
-        max_dur=args.max_dur,
-        dropout=args.dropout,
-    )
-
-    # Acoustic style encoder
-    acoustic_style_encoder = AcousticStyleEncoder(
-        dim_in=args.dim_in,
-        spk_emb_dim=args.spk_emb_dim,
-        style_dim=args.style_dim,
-        max_conv_dim=args.max_conv_dim,
-        # Initial external/internal speaker embedding fusion weight
-        mix_weight=args.mix_weight,
-        learnable_gate=args.learnable_gate,
-        mode=args.mode,
-    )
-
-    # Prosodic style encoder
-    prosodic_style_encoder = StyleEncoder(
-        dim_in=args.dim_in,
-        style_dim=args.style_dim,
-        max_conv_dim=args.max_conv_dim,
-    )
-
-    # define diffusion model
-    if args.multispeaker:
-        transformer = StyleTransformer1d(
-            channels=args.style_dim * 2,
-            context_embedding_features=bert.config.hidden_size,
-            context_features=args.style_dim * 2,
-            **args.diffusion.transformer,
-        )
-    else:
-        transformer = Transformer1d(
-            channels=args.style_dim * 2,
-            context_embedding_features=bert.config.hidden_size,
-            **args.diffusion.transformer,
-        )
-
-    diffusion = AudioDiffusionConditional(
-        in_channels=1,
-        embedding_max_length=bert.config.max_position_embeddings,
-        embedding_features=bert.config.hidden_size,
-        # Conditional dropout of batch elements
-        embedding_mask_proba=args.diffusion.embedding_mask_proba,
-        channels=args.style_dim * 2,
-        context_features=args.style_dim * 2,
-    )
-
-    diffusion.diffusion = KDiffusion(
-        net=diffusion.unet,
-        sigma_distribution=LogNormalDistribution(
-            mean=args.diffusion.dist.mean, std=args.diffusion.dist.std
-        ),
-        # a placeholder, will be changed dynamically when start training diffusion model
-        sigma_data=args.diffusion.dist.sigma_data,
-        dynamic_threshold=0.0,
-    )
-    diffusion.diffusion.net = transformer
-    diffusion.unet = transformer
-
-    nets = Munch(
-        bert=bert,
-        bert_encoder=nn.Linear(bert.config.hidden_size, args.hidden_dim),
-        prosodic_predictor=prosodic_predictor,
-        decoder=decoder,
-        text_encoder=text_encoder,
-        prosodic_style_encoder=prosodic_style_encoder,
-        acoustic_style_encoder=acoustic_style_encoder,
-        diffusion=diffusion,
-        text_aligner=text_aligner,
-        pitch_extractor=pitch_extractor,
-        mpd=MultiPeriodDiscriminator(),
-        msd=MultiResSpecDiscriminator(),
-        # slm discriminator head
-        wd=WavDiscriminator(args.slm.hidden, args.slm.nlayers, args.slm.initial_channel),
-    )
-
-    return nets
-
-
 def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_modules=None):
     """
     Load model and optimizer states from a checkpoint file.
@@ -1321,77 +1147,277 @@ def save_checkpoint(
     return filepath
 
 
-def model2device(model, device="cpu"):
-    """
-    Move model parameters to the specified device.
-    Args:
-        model (dict): Dictionary of model components
-        device (torch.device): Device to move the model to (e.g., 'cuda' or 'cpu')
-    Returns:
-        dict: Model with parameters moved to the specified device
-    """
-    device = torch.device(device)  # Convert once
-    for key, module in model.items():  # .items() is faster
-        if hasattr(module, "to"):
-            model[key] = module.to(device, non_blocking=True)  # non_blocking for CUDA
-    return model
+class StyleTTS2:
+    def __init__(self, args, text_aligner, pitch_extractor, bert):
+        self._params = args
+        self.build(args, text_aligner, pitch_extractor, bert)
 
+    @property
+    def model(self):
+        return self._model
 
-def model2mode(model, mode="train", components=None):
-    """
-    Set model to training or evaluation mode.
-    Args:
-        model (dict): Dictionary of model components
-        mode (str): Mode to set the model to ('train' or 'eval')
-        components (list, optional): List of component names (keys) to set mode for.
-                                   If None, all components are set. Defaults to None.
-    Returns:
-        dict: Model with the specified mode set
-    """
-    if mode not in ["train", "eval"]:
-        raise ValueError("Mode must be either 'train' or 'eval'")
+    @model.setter
+    def model(self, value):
+        if not isinstance(value, (dict, Munch)):
+            raise TypeError("Model must be a dictionary or Munch of components")
+        self._model = Munch(value) if isinstance(value, dict) else value
 
-    # If no specific components specified, use all components
-    if components is None:
-        components = model.keys()
+    def __getitem__(self, key):
+        """
+        Enable dictionary-like access to model components using [] operator.
+        Args:
+            key: Key to access in the model dictionary
+        Returns:
+            The model component associated with the key
+        """
+        return self._model[key]
 
-    method_name = mode
-    for key in components:
-        if key in model:
-            module = model[key]
-            if hasattr(module, method_name):
-                try:
-                    getattr(module, method_name)()
-                    logger.debug("Component '%s' set to %s mode", key, mode)
-                except (RuntimeError, TypeError, AttributeError) as e:
-                    logger.warning("Failed to set %s to %s mode: %s", key, mode, e)
-            else:
-                logger.debug("Module '%s' does not have a .%s() method", key, method_name)
+    def __setitem__(self, key, value):
+        """
+        Enable dictionary-like assignment to model components using [] operator.
+        Args:
+            key: Key to set in the model dictionary
+            value: Value to assign to the key
+        """
+        self._model[key] = value
+
+    def build(self, args, text_aligner, pitch_extractor, bert):
+        """
+        Builds the StyleTTS2 model components.
+        This function constructs and configures all neural network components required for the
+        StyleTTS2 TTS system, including text encoding, style encoding, prosody prediction,
+        diffusion model, and waveform generation.
+        Parameters
+        ----------
+        args : object
+            Configuration object containing model hyperparameters:
+            - hidden_dim: Dimension of hidden layers
+            - style_dim: Dimension of style vectors
+            - n_mels: Number of mel spectrogram bins
+            - n_layer: Number of layers in various components
+            - max_dur: Maximum duration for prosody prediction
+            - dropout: Dropout rate for predictor
+            - dim_in: Input dimension for style encoders
+            - n_token: Number of tokens in the vocabulary
+            - multispeaker: Boolean flag for multispeaker model configuration
+            - diffusion: Configuration for diffusion model parameters
+            - slm: Configuration for SLM discriminator parameters
+            - decoder: Configuration for the decoder:
+            - type: Either "istftnet" or "hifigan"
+            - resblock_kernel_sizes: Kernel sizes for residual blocks
+            - upsample_rates: Rates for upsampling
+            - upsample_initial_channel: Initial channel count for upsampling
+            - resblock_dilation_sizes: Dilation sizes for residual blocks
+            - upsample_kernel_sizes: Kernel sizes for upsampling
+            - gen_istft_n_fft: FFT size for ISTFT (for istftnet only)
+            - gen_istft_hop_size: Hop size for ISTFT (for istftnet only)
+        text_aligner : nn.Module
+            Module that aligns text with audio features
+        pitch_extractor : nn.Module
+            Module that extracts pitch information from audio
+        bert : nn.Module
+            Pre-trained BERT model for extracting contextual text embeddings
+        Returns
+        -------
+        nets : Munch
+            A Munch object containing all model components:
+            - bert: BERT model for text embedding
+            - bert_encoder: Linear projection of BERT embeddings
+            - predictor: Prosody predictor module
+            - decoder: Mel-spectrogram decoder (ISTFTNet or HifiGAN)
+            - text_encoder: Text encoding module
+            - predictor_encoder: Style encoder for prosody prediction
+            - style_encoder: Style encoder for acoustic features
+            - diffusion: Audio diffusion model for generating waveforms
+            - text_aligner: Module for aligning text with audio
+            - pitch_extractor: Module for extracting pitch information
+            - mpd: Multi-Period Discriminator for adversarial training
+            - msd: Multi-Resolution Spectrogram Discriminator
+            - wd: Waveform Discriminator for SLM
+        """
+        assert args.decoder.type in ["istftnet", "hifigan"], "Decoder type unknown"
+
+        if args.decoder.type == "istftnet":
+            decoder = ISTFTDecoder(
+                dim_in=args.hidden_dim,
+                # TODO: 2x means both acoustic and prosodic styles are computed
+                # (originally only acoustic)
+                style_dim=args.style_dim,
+                resblock_kernel_sizes=args.decoder.resblock_kernel_sizes,
+                upsample_rates=args.decoder.upsample_rates,
+                upsample_initial_channel=args.decoder.upsample_initial_channel,
+                resblock_dilation_sizes=args.decoder.resblock_dilation_sizes,
+                upsample_kernel_sizes=args.decoder.upsample_kernel_sizes,
+                gen_istft_n_fft=args.decoder.gen_istft_n_fft,
+                gen_istft_hop_size=args.decoder.gen_istft_hop_size,
+            )
         else:
-            logger.warning("Component '%s' not found in model", key)
+            decoder = HifiDecoder(
+                dim_in=args.hidden_dim,
+                # TODO: 2x means both acoustic and prosodic styles are computed
+                # (originally only acoustic)
+                style_dim=args.style_dim,
+                resblock_kernel_sizes=args.decoder.resblock_kernel_sizes,
+                upsample_rates=args.decoder.upsample_rates,
+                upsample_initial_channel=args.decoder.upsample_initial_channel,
+                resblock_dilation_sizes=args.decoder.resblock_dilation_sizes,
+                upsample_kernel_sizes=args.decoder.upsample_kernel_sizes,
+            )
 
-    return model
+        text_encoder = TextEncoder(
+            channels=args.hidden_dim,
+            kernel_size=5,
+            depth=args.n_layer,
+            n_symbols=args.n_token,
+        )
 
+        prosodic_predictor = ProsodyPredictor(
+            style_dim=args.style_dim,
+            d_hid=args.hidden_dim,
+            nlayers=args.n_layer,
+            max_dur=args.max_dur,
+            dropout=args.dropout,
+        )
 
-def clone_model(model, device=None, freeze=False, eval_mode=False):
-    """
-    Returns a deep copy of a PyTorch model.
-    Args:
-        model:      model to be cloned
-        device:     torch.device (optional), target device for clone
-        freeze:     bool, if True sets requires_grad=False on all parameters
-        eval_mode:  bool, if True puts model in eval() mode
-    Returns:
-        model_clone: New instance, weights copied.
-    """
-    model_clone = copy.deepcopy(model)
-    if device is not None:
-        model_clone = model_clone.to(device)
-    else:
-        model_clone = model_clone.to(model.device)
-    if freeze:
-        for param in model_clone.parameters():
-            param.requires_grad = False
-    if eval_mode:
-        model_clone.eval()
-    return model_clone
+        # Acoustic style encoder
+        acoustic_style_encoder = AcousticStyleEncoder(
+            dim_in=args.dim_in,
+            spk_emb_dim=args.spk_emb_dim,
+            style_dim=args.style_dim,
+            max_conv_dim=args.max_conv_dim,
+            # Initial external/internal speaker embedding fusion weight
+            mix_weight=args.mix_weight,
+            learnable_gate=args.learnable_gate,
+            mode=args.mode,
+        )
+
+        # Prosodic style encoder
+        prosodic_style_encoder = StyleEncoder(
+            dim_in=args.dim_in,
+            style_dim=args.style_dim,
+            max_conv_dim=args.max_conv_dim,
+        )
+
+        # define diffusion model
+        if args.multispeaker:
+            transformer = StyleTransformer1d(
+                channels=args.style_dim * 2,
+                context_embedding_features=bert.config.hidden_size,
+                context_features=args.style_dim * 2,
+                **args.diffusion.transformer,
+            )
+        else:
+            transformer = Transformer1d(
+                channels=args.style_dim * 2,
+                context_embedding_features=bert.config.hidden_size,
+                **args.diffusion.transformer,
+            )
+
+        diffusion = AudioDiffusionConditional(
+            in_channels=1,
+            embedding_max_length=bert.config.max_position_embeddings,
+            embedding_features=bert.config.hidden_size,
+            # Conditional dropout of batch elements
+            embedding_mask_proba=args.diffusion.embedding_mask_proba,
+            channels=args.style_dim * 2,
+            context_features=args.style_dim * 2,
+        )
+
+        diffusion.diffusion = KDiffusion(
+            net=diffusion.unet,
+            sigma_distribution=LogNormalDistribution(
+                mean=args.diffusion.dist.mean, std=args.diffusion.dist.std
+            ),
+            # a placeholder, will be changed dynamically when start training diffusion model
+            sigma_data=args.diffusion.dist.sigma_data,
+            dynamic_threshold=0.0,
+        )
+        diffusion.diffusion.net = transformer
+        diffusion.unet = transformer
+
+        self._model = Munch(
+            bert=bert,
+            bert_encoder=nn.Linear(bert.config.hidden_size, args.hidden_dim),
+            prosodic_predictor=prosodic_predictor,
+            decoder=decoder,
+            text_encoder=text_encoder,
+            prosodic_style_encoder=prosodic_style_encoder,
+            acoustic_style_encoder=acoustic_style_encoder,
+            diffusion=diffusion,
+            text_aligner=text_aligner,
+            pitch_extractor=pitch_extractor,
+            mpd=MultiPeriodDiscriminator(),
+            msd=MultiResSpecDiscriminator(),
+            # slm discriminator head
+            wd=WavDiscriminator(args.slm.hidden, args.slm.nlayers, args.slm.initial_channel),
+        )
+
+    def to(self, device="cpu"):
+        """
+        Move model parameters to the specified device.
+        Args:
+            device (str or torch.device): Device to move the model to (e.g., 'cuda' or 'cpu')
+        Returns:
+            StyleTT2: Self with model parameters moved to the specified device
+        """
+        device = torch.device(device)  # Convert once
+        for key, module in self._model.items():  # .items() is faster
+            if hasattr(module, "to"):
+                self._model[key] = module.to(device, non_blocking=True)  # non_blocking for CUDA
+        return self
+
+    def set_mode(self, mode="train", components=None):
+        """
+        Set the model to training or evaluation mode.
+        Args:
+            mode (str): Mode to set the model to ('train' or 'eval')
+            components (list, optional): List of component names (keys) to set mode for.
+                                         If None, all components are set. Defaults to None.
+        Returns:
+            StyleTT2: Self with model components set to the specified mode
+        """
+        if mode not in ["train", "eval"]:
+            raise ValueError("Mode must be either 'train' or 'eval'")
+
+        # If no specific components specified, use all components
+        if components is None:
+            components = self._model.keys()
+
+        method_name = mode
+        for key in components:
+            if key in self._model:
+                module = self._model[key]
+                if hasattr(module, method_name):
+                    try:
+                        getattr(module, method_name)()
+                        logger.debug("Component '%s' set to %s mode", key, mode)
+                    except (RuntimeError, TypeError, AttributeError) as e:
+                        logger.warning("Failed to set %s to %s mode: %s", key, mode, e)
+                else:
+                    logger.debug("Module '%s' does not have a .%s() method", key, method_name)
+            else:
+                logger.warning("Component '%s' not found in model", key)
+
+        return self
+
+    def clone(self, freeze=False, eval_mode=False):
+        """
+        Clone the model with optional freezing parameters, and evaluation mode.
+        Args:
+            freeze (bool, optional): If True, sets requires_grad=False on all parameters.
+                Defaults to False.
+            eval_mode (bool, optional): If True, sets the model to evaluation mode.
+                Defaults to False.
+        Returns:
+            StyleTT2: A new instance of StyleTT2 with cloned model components.
+        """
+        model_clone = copy.deepcopy(self._model)
+        if freeze:
+            for param in model_clone.parameters():
+                param.requires_grad = False
+        if eval_mode:
+            model_clone.eval()
+        return model_clone
+
+    def is_warmup(self, epoch):
+        return self._params.mode == "mix" and epoch < self._params.warmup_epochs

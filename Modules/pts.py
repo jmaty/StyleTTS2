@@ -11,7 +11,7 @@ from scipy.io.wavfile import write
 
 from logger import get_logger
 from meldataset import AudioProcessor
-from models import build_model, load_ASR_models, load_F0_models
+from models import StyleTTS2, load_ASR_models, load_F0_models
 from Modules.diffusion.sampler import ADPM2Sampler, DiffusionSampler, KarrasSchedule
 from text_utils import TextCleaner
 from utils import length_to_mask, log_norm
@@ -184,7 +184,9 @@ class PTS:
 
         # Build StyleTTS2 model
         logger.info("Constructing StyleTTS2 model with components")
-        self._model = build_model(self._config.model_params, text_aligner, pitch_extractor, plbert)
+        self._model = StyleTTS2(
+            self._config.model_params, text_aligner, pitch_extractor, plbert
+        ).model
 
         self.to_eval()
         self.to_device()
