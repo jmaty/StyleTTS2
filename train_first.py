@@ -16,7 +16,7 @@ from accelerate import Accelerator, DistributedDataParallelKwargs
 
 # from accelerate.logging import get_logger
 from monotonic_align import mask_from_lens
-from munch import Munch
+from munch import munchify
 
 # from torch.utils.tensorboard import SummaryWriter
 
@@ -26,9 +26,7 @@ from meldataset import build_dataloader
 from models import (
     StyleTTS2,
     load_ASR_models,
-    load_checkpoint,
     load_F0_models,
-    save_checkpoint,
 )
 from Modules.pts import PTS
 from optimizers import build_optimizer
@@ -39,7 +37,6 @@ from utils import (
     length_to_mask,
     log_norm,
     maximum_path,
-    recursive_munch,
 )
 from Utils.PLBERT.util import load_plbert
 
@@ -141,9 +138,8 @@ def main():
         config["data_params"].get("test_audio_dir", "test_audios"),
     )
 
-    model_params = recursive_munch(config["model_params"])
-    multispeaker = model_params.multispeaker
-    loss_params = Munch(config["loss_params"])
+    model_params = munchify(config["model_params"])
+    loss_params = munchify(config["loss_params"])
 
     # Set up text cleaner and pre-processing function
     text_cleaner = TextCleaner(data_params["symbol_dict_path"], pad=data_params["pad"])
@@ -173,6 +169,7 @@ def main():
     acoustic_style_dim = model.acoustic_style_encoder.style_dim
     bert_size = model.bert.config.max_position_embeddings  # ALBERT config
 
+    # Prepare model for distributed training
     for k in model:
         model[k] = acc.prepare(model[k])
 
@@ -211,7 +208,7 @@ def main():
         num_workers=args.num_workers,
         device=device,
         dataset_config=dataset_config,
-        use_speaker_sampler=bool(multispeaker),
+        use_speaker_sampler=bool(model.multispeaker),
     )
     logger.info("Building validation dataloader...")
     val_dataloader = build_dataloader(
@@ -250,16 +247,17 @@ def main():
     lr = float(config["optimizer_params"].get("lr", 1e-4))
     optimizer = build_optimizer(parameters_dict, scheduler_params_dict, lr)
 
+    # Prepare optimizers and schedulers for distributed training
     for k, _ in optimizer.optimizers.items():
         optimizer.optimizers[k] = acc.prepare(optimizer.optimizers[k])
         optimizer.schedulers[k] = acc.prepare(optimizer.schedulers[k])
 
+    # Load model weights
     with acc.main_process_first():
         if config.get("pretrained_model", "") != "":
-            model, optimizer, start_epoch, iters = load_checkpoint(
-                model,
-                optimizer,
+            optimizer, start_epoch, iters = model.load(
                 config["pretrained_model"],
+                optimizer,
                 load_only_params=config.get("load_only_params", True),
             )
             # advance start epoch or we'd re-train and rewrite the last epoch file
@@ -286,7 +284,7 @@ def main():
     stft_loss = MultiResolutionSTFTLoss().to(device)
     gl = GeneratorLoss(model.mpd, model.msd).to(device)
     dl = DiscriminatorLoss(model.mpd, model.msd).to(device)
-    wl = create_slm_loss(model_params.slm, model.wd, sr).to(device)
+    wl = create_slm_loss(model.slm, model.wd, sr).to(device)
 
     # Create test audio dir under log/eval dir
     if (save_val_audio or save_test_audio) and not os.path.exists(test_audio_dir):
@@ -489,11 +487,11 @@ def main():
             # Style encoding:
             # - if not multispeaker, use the ground truth mel spectrogram
             # - if multispeaker, use other (style reference) mel spectrogram
-            mel4style = mel_st.unsqueeze(1) if multispeaker else mel_gt.unsqueeze(1)
+            mel4style = mel_st.unsqueeze(1) if model.multispeaker else mel_gt.unsqueeze(1)
             # Only (acoustic) style encoder is trained within 1st stage training
             style = model.acoustic_style_encoder(
                 mel4style,
-                spk_emb=spk_embs if multispeaker else None,
+                spk_emb=spk_embs if model.multispeaker else None,
                 is_warmup=model.is_warmup(epoch),
                 # if multispeaker and epoch >= tma_epoch else None
             )
@@ -766,7 +764,7 @@ def main():
                 style = model.acoustic_style_encoder(
                     # mel_gt.unsqueeze(1), spk_embs if multispeaker and epoch >= tma_epoch else None
                     mel_gt.unsqueeze(1),
-                    spk_emb=spk_embs if multispeaker else None,
+                    spk_emb=spk_embs if model.multispeaker else None,
                     is_warmup=model.is_warmup(epoch),
                     # if multispeaker and epoch >= tma_epoch else None
                 )
@@ -821,7 +819,7 @@ def main():
                         mels[idx, :, :mel_len].unsqueeze(0),  # Ground-truth mel spectrogram
                         # Ground-truth phoneme-audio alignment
                         h_algn[idx, :, : mel_len // 2].unsqueeze(0),
-                        spk_emb=spk_embs[idx].unsqueeze(0) if multispeaker else None,
+                        spk_emb=spk_embs[idx].unsqueeze(0) if model.multispeaker else None,
                         is_warmup=model.is_warmup(epoch),
                     )
 
@@ -838,8 +836,7 @@ def main():
                             pts.save_wav(wav_gt, os.path.join(test_audio_dir, outfile))
 
             if epoch % saving_epoch == 0:
-                save_checkpoint(
-                    model,
+                model.save(
                     optimizer,
                     epoch,
                     iters,
@@ -851,8 +848,7 @@ def main():
 
             # Save pre-TMA model
             if save_milestones and epoch == tma_epoch - 1:
-                save_checkpoint(
-                    model,
+                model.save(
                     optimizer,
                     epoch,
                     iters,
@@ -863,8 +859,7 @@ def main():
 
     if acc.is_main_process:
         # Save final 1st stage model
-        final_filepath = save_checkpoint(
-            model,
+        final_filepath = model.save(
             optimizer,
             epoch,
             iters,

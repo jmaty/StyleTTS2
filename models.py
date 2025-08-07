@@ -1572,78 +1572,6 @@ def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_module
     return model, optimizer, epoch, iters
 
 
-# JMa: Save model and delete old models
-def save_checkpoint(
-    model,
-    optimizer,
-    epoch,
-    iters,
-    loss,
-    basename,
-    save_dir,
-    max_saved_models=None,
-    use_epoch_in_name=True,
-):
-    """
-    Save model checkpoint to disk.
-    Args:
-        model (dict): Dictionary of network models to save
-        optimizer: Optimizer whose state will be saved
-        epoch (int): Current epoch number
-        iters (int): Current iteration count
-        loss (float): Current validation loss
-        basename (str): Base filename for the saved model
-        save_dir (str): Directory to save the model in
-        max_saved_models (int, optional): Maximum number of saved models to keep.
-            If exceeded, oldest models will be deleted. If None, all models are kept.
-        use_epoch_in_name (bool, optional): Whether to include epoch number in filename.
-            Defaults to True.
-    Returns:
-        str: Path to the saved checkpoint file
-    Notes:
-        - Creates save_dir if it doesn't exist
-        - Skips saving if the exact file already exists
-        - If max_saved_models is specified, maintains only the N most recent checkpoints
-    """
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
-
-    # Prepare model state for saving
-    state_dict = {
-        "net": {key: model[key].state_dict() for key in model},
-        "optimizer": optimizer.state_dict(),
-        "iters": iters,
-        "val_loss": loss,
-        "epoch": epoch,
-    }
-
-    # Save the model
-    filename = f"{basename}_{epoch:05d}.pth" if use_epoch_in_name else f"{basename}.pth"
-    filepath = os.path.join(save_dir, filename)
-    if os.path.isfile(filepath):
-        # Skip saving model when already exists
-        logger.warning("Model %s already exists => skipping", filepath)
-        return filepath
-    torch.save(state_dict, filepath)
-    logger.info("New model saved to %s", filepath)
-
-    if max_saved_models:
-        # Get list of all saved models and sort by epoch number
-        saved_models = sorted(
-            [f for f in os.listdir(save_dir) if f.startswith(f"{basename}") and f.endswith(".pth")],
-            key=lambda x: int(x.split("_")[2].split(".")[0]),
-        )
-
-        # Remove old models if exceeding max_saved_models
-        while len(saved_models) > max_saved_models:
-            old_model = saved_models.pop(0)
-            os.remove(os.path.join(save_dir, old_model))
-            logger.info("Old model %s removed", old_model)
-
-    # Return saved model's filepath
-    return filepath
-
-
 class StyleTTS2:
     """
     StyleTTS2 model class that encapsulates all components of the StyleTTS2 text-to-speech system.
@@ -1677,6 +1605,14 @@ class StyleTTS2:
     @property
     def model(self):
         return self._model
+
+    @property
+    def multispeaker(self):
+        return self._params.multispeaker
+
+    @property
+    def slm(self):
+        return self._params.slm
 
     @model.setter
     def model(self, value):
@@ -1979,3 +1915,148 @@ class StyleTTS2:
 
     def is_warmup(self, epoch):
         return self._params.mode == "mix" and epoch < self._params.warmup_epochs
+
+    def save(
+        self,
+        optimizer,
+        epoch,
+        iters,
+        loss,
+        basename,
+        save_dir,
+        max_saved_models=None,
+        use_epoch_in_name=True,
+    ):
+        """
+        Save a model checkpoint to disk with automatic cleanup of old checkpoints.
+
+        Args:
+            optimizer: The optimizer object whose state will be saved
+            epoch (int): Current training epoch number
+            iters (int): Current iteration number
+            loss (float): Validation loss value to save
+            basename (str): Base name for the checkpoint file
+            save_dir (str): Directory where the checkpoint will be saved
+            max_saved_models (int, optional): Maximum number of checkpoints to keep.
+                If specified, older checkpoints will be automatically deleted.
+            use_epoch_in_name (bool, optional): Whether to include epoch number in filename.
+                Defaults to True.
+
+        Returns:
+            str: Full filepath of the saved checkpoint
+
+        Note:
+            - Creates save_dir if it doesn't exist
+            - Skips saving if checkpoint file already exists
+            - Automatically removes oldest checkpoints when max_saved_models limit is exceeded
+            - Checkpoint contains model state_dict, optimizer state, iteration count, loss,
+              and epoch
+        """
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+
+        # Prepare model state for saving
+        state_dict = {
+            "net": {key: self._model[key].state_dict() for key in self._model},
+            "optimizer": optimizer.state_dict(),
+            "iters": iters,
+            "val_loss": loss,
+            "epoch": epoch,
+        }
+
+        # Save the model
+        filename = f"{basename}_{epoch:05d}.pth" if use_epoch_in_name else f"{basename}.pth"
+        filepath = os.path.join(save_dir, filename)
+        if os.path.isfile(filepath):
+            # Skip saving model when already exists
+            logger.warning("Model %s already exists => skipping", filepath)
+            return filepath
+        torch.save(state_dict, filepath)
+        logger.info("New model saved to %s", filepath)
+
+        if max_saved_models:
+            # Get list of all saved models and sort by epoch number
+            saved_models = sorted(
+                [
+                    f
+                    for f in os.listdir(save_dir)
+                    if f.startswith(f"{basename}") and f.endswith(".pth")
+                ],
+                key=lambda x: int(x.split("_")[2].split(".")[0]),
+            )
+
+            # Remove old models if exceeding max_saved_models
+            while len(saved_models) > max_saved_models:
+                old_model = saved_models.pop(0)
+                os.remove(os.path.join(save_dir, old_model))
+                logger.info("Old model %s removed", old_model)
+
+        # Return saved model's filepath
+        return filepath
+
+    def load(self, path, optimizer, load_only_params=True, ignore_modules=None):
+        """
+        Load model state from a checkpoint file.
+        This method handles inconsistent key names between first and second training stages
+        by attempting strict loading first, then falling back to a key-fixing approach
+        for DataParallel module mismatches.
+        Args:
+            path (str): Path to the checkpoint file to load from.
+            optimizer: The optimizer object to load state into (if load_only_params=False).
+            load_only_params (bool, optional): If True, only load model parameters and ignore
+                optimizer state and training metadata. Defaults to True.
+            ignore_modules (list, optional): List of module keys to skip during loading.
+                Defaults to None.
+        Returns:
+            tuple: A tuple containing (optimizer, epoch, iters) where:
+                - optimizer: The optimizer object (potentially with loaded state)
+                - epoch (int): Starting epoch number (0 if load_only_params=True, otherwise state["epoch"] + 1)
+                - iters (int): Starting iteration count (0 if load_only_params=True, otherwise state["iters"])
+        Note:
+            - Sets the model to evaluation mode after loading
+            - Handles DataParallel module key mismatches by removing the "module." prefix
+            - Logs successful loading of each module
+            - Uses non-strict loading as fallback for key mismatches
+        """
+        # Modified to deal with inconsistent key names between first and second training stages
+        # => see https://github.com/yl4579/StyleTTS2/issues/254,
+        # https://github.com/yl4579/StyleTTS2/issues/21#issue-1962579727
+        # https://github.com/pytorch/pytorch/issues/9176#issuecomment-403570715
+
+        if ignore_modules is None:
+            ignore_modules = []
+        state = torch.load(path, map_location="cpu")
+        params = state["net"]
+        for key in self._model:
+            if key in params and key not in ignore_modules:
+                logger.info("%s loaded", key)
+                try:
+                    self._model[key].load_state_dict(params[key], strict=True)
+                except RuntimeError:  # DataParallel module. mismatch
+                    state_dict = params[key]
+                    new_state_dict = OrderedDict()
+                    # print(f'{key} key length: {len(model[key].state_dict().keys())}, state_dict length: {len(state_dict.keys())}')
+                    # print("model", len(model[key].state_dict().items()))
+                    # print("state", len(state_dict.items()))
+                    for k_m, _ in self._model[key].state_dict().items():
+                        k_fix, v_c = None, None
+                        if k_m in state_dict:
+                            v_c = state_dict[k_m]
+                            k_fix = k_m[7:]
+                        if k_fix:
+                            new_state_dict[k_fix] = v_c
+                            # print(f'=> {k_m} => {k_fix}')
+                    self._model[key].load_state_dict(new_state_dict, strict=False)
+        # Set to eval mode
+        self.set_mode("eval")
+
+        if not load_only_params:
+            # advance start epoch or we'd re-train and rewrite the last epoch file
+            epoch = state["epoch"] + 1
+            iters = state["iters"]
+            optimizer.load_state_dict(state["optimizer"])
+        else:
+            epoch = 0
+            iters = 0
+
+        return optimizer, epoch, iters
