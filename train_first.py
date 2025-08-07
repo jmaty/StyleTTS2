@@ -38,8 +38,13 @@ def main():
     parser = argparse.ArgumentParser(description="StyleTTS2 stage 1 training")
     parser.add_argument("config_path", type=str, help="path to config")
     parser.add_argument("-w", "--num_workers", type=int, default=0, help="number of workers")
-    # parser.add_argument("-L", "--log_level", type=int, default=logging.INFO, help="log level")
-    parser.add_argument("-L", "--log_level", type=str, default="INFO", help="log level")
+    parser.add_argument(
+        "-L",
+        "--log_level",
+        type=str,
+        default="INFO",
+        help="log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)",
+    )
     args = parser.parse_args()
 
     # Load config
@@ -71,18 +76,20 @@ def main():
 
     # Configure logging only on main process to avoid duplicate output
     if acc.is_main_process:
-        # Initialize logger
+        # Initialize logger (Accelerate expects string log level)
         logger = get_logger(__name__, log_level=args.log_level)
+        # Convert string log level to numeric level for handlers
+        numeric_log_level = getattr(logging, args.log_level.upper())
 
         # Write logs to file
         file_handler = logging.FileHandler(osp.join(log_dir, "train.log"))
-        file_handler.setLevel(args.log_level)
+        file_handler.setLevel(numeric_log_level)
         file_handler.setFormatter(logging.Formatter("%(levelname)s:%(asctime)s: %(message)s"))
         logger.logger.addHandler(file_handler)
 
         # Write logs to console (stdout) - show log level for DEBUG visibility
         console_handler = logging.StreamHandler()
-        console_handler.setLevel(args.log_level)
+        console_handler.setLevel(numeric_log_level)
         console_handler.setFormatter(logging.Formatter("%(message)s"))
         logger.logger.addHandler(console_handler)
 
@@ -98,7 +105,7 @@ def main():
             dir=log_dir,
         )
     else:
-        # For non-main processes, create a basic logger without handlers
+        # For non-main processes, create a basic logger without handlers (Accelerate expects string)
         logger = get_logger(__name__, log_level=args.log_level)
 
     # Set up device
