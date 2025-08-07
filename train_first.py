@@ -13,31 +13,18 @@ import torch.nn.functional as F
 import wandb
 import yaml
 from accelerate import Accelerator, DistributedDataParallelKwargs
-
-# from accelerate.logging import get_logger
+from accelerate.logging import get_logger
 from monotonic_align import mask_from_lens
 from munch import munchify
 
-# from torch.utils.tensorboard import SummaryWriter
-
-from logger import get_logger, setup_logging
+# from logger import get_logger, setup_logging
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, create_slm_loss
 from meldataset import build_dataloader
-from models import (
-    StyleTTS2,
-    load_ASR_models,
-    load_F0_models,
-)
+from models import StyleTTS2, load_ASR_models, load_F0_models
 from Modules.pts import PTS
 from optimizers import build_optimizer
 from text_utils import TextCleaner
-from utils import (
-    get_data_path_list,
-    # get_image,
-    length_to_mask,
-    log_norm,
-    maximum_path,
-)
+from utils import get_data_path_list, length_to_mask, log_norm, maximum_path  # get_image,
 from Utils.PLBERT.util import load_plbert
 
 warnings.simplefilter("ignore")
@@ -51,7 +38,8 @@ def main():
     parser = argparse.ArgumentParser(description="StyleTTS2 stage 1 training")
     parser.add_argument("config_path", type=str, help="path to config")
     parser.add_argument("-w", "--num_workers", type=int, default=0, help="number of workers")
-    parser.add_argument("-L", "--log_level", type=int, default=logging.INFO, help="log level")
+    # parser.add_argument("-L", "--log_level", type=int, default=logging.INFO, help="log level")
+    parser.add_argument("-L", "--log_level", type=str, default="INFO", help="log level")
     args = parser.parse_args()
 
     # Load config
@@ -63,25 +51,41 @@ def main():
 
     # Set up logging
     log_dir = config["log_dir"]
-    # exp_label = config.get("label", "")  # Experiment label
-    formatter_file = logging.Formatter(
-        fmt="%(levelname)s:%(asctime)s: %(message)s",
-        datefmt="%y%m%d-%H:%M:%S",
-    )
-    setup_logging(
-        level=args.log_level,
-        file=osp.join(log_dir, "train.log"),
-        formatter_file=formatter_file,
-        level_file=args.log_level,
-    )
-    logger = get_logger(__name__)  # Get a logger
+    os.makedirs(log_dir, exist_ok=True)
+
+    # formatter_file = logging.Formatter(
+    #     fmt="%(levelname)s:%(asctime)s: %(message)s",
+    #     datefmt="%y%m%d-%H:%M:%S",
+    # )
+    # setup_logging(
+    #     level=args.log_level,
+    #     file=osp.join(log_dir, "train.log"),
+    #     formatter_file=formatter_file,
+    #     level_file=args.log_level,
+    # )
+    # logger = get_logger(__name__)  # Get a logger
 
     # Distributed computing
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     acc = Accelerator(project_dir=log_dir, split_batches=True, kwargs_handlers=[ddp_kwargs])
 
+    # Configure logging only on main process to avoid duplicate output
     if acc.is_main_process:
-        # writer = SummaryWriter(osp.join(log_dir, "tensorboard"))
+        # Initialize logger
+        logger = get_logger(__name__, log_level=args.log_level)
+
+        # Write logs to file
+        file_handler = logging.FileHandler(osp.join(log_dir, "train.log"))
+        file_handler.setLevel(args.log_level)
+        file_handler.setFormatter(logging.Formatter("%(levelname)s:%(asctime)s: %(message)s"))
+        logger.logger.addHandler(file_handler)
+
+        # Write logs to console (stdout) - show log level for DEBUG visibility
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(args.log_level)
+        console_handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.logger.addHandler(console_handler)
+
         # Initialize the wandb logger and name wandb project and run
         wb_logger = wandb.init(
             # Set the wandb project where this run will be logged.
@@ -93,6 +97,9 @@ def main():
             config=config,
             dir=log_dir,
         )
+    else:
+        # For non-main processes, create a basic logger without handlers
+        logger = get_logger(__name__, log_level=args.log_level)
 
     # Set up device
     device = acc.device
