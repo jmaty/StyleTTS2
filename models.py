@@ -32,6 +32,31 @@ logger = get_logger(__name__)
 
 
 class LearnedDownSample(nn.Module):
+    """
+    A learnable downsampling module that applies different types of convolutions based on the specified layer type.
+
+    This module implements three different downsampling strategies:
+    - "none": Identity mapping (no downsampling)
+    - "timepreserve": Downsamples only in the frequency dimension while preserving time
+    - "half": Downsamples both time and frequency dimensions by half
+
+    Args:
+        layer_type (str): Type of downsampling to apply. Must be one of ["none", "timepreserve", "half"]
+        dim_in (int): Number of input channels
+
+    Raises:
+        RuntimeError: If layer_type is not one of the supported options
+
+    Forward Args:
+        x (torch.Tensor): Input tensor of shape (batch_size, dim_in, height, width)
+
+    Returns:
+        torch.Tensor: Downsampled tensor with dimensions depending on layer_type:
+            - "none": Same shape as input
+            - "timepreserve": (batch_size, dim_in, height//2, width)
+            - "half": (batch_size, dim_in, height//2, width//2)
+    """
+
     def __init__(self, layer_type, dim_in):
         super().__init__()
         self.layer_type = layer_type
@@ -60,6 +85,34 @@ class LearnedDownSample(nn.Module):
 
 
 class LearnedUpSample(nn.Module):
+    """
+    Learned upsampling module for neural networks.
+
+    This module provides different types of learned upsampling operations using transposed convolutions,
+    allowing for trainable upsampling instead of fixed interpolation methods.
+
+    Args:
+        layer_type (str): Type of upsampling to perform. Options are:
+            - "none": Identity operation (no upsampling)
+            - "timepreserve": Upsamples only in the time dimension (height) by factor of 2,
+                             preserving the frequency dimension using depthwise convolution
+            - "half": Upsamples both dimensions by factor of 2 using depthwise convolution
+        dim_in (int): Number of input channels
+
+    Raises:
+        RuntimeError: If layer_type is not one of the supported options
+
+    Forward:
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, dim_in, height, width)
+
+        Returns:
+            torch.Tensor: Upsampled tensor with dimensions depending on layer_type:
+                - "none": Same shape as input
+                - "timepreserve": (batch_size, dim_in, height*2, width)
+                - "half": (batch_size, dim_in, height*2, width*2)
+    """
+
     def __init__(self, layer_type, dim_in):
         super().__init__()
         self.layer_type = layer_type
@@ -96,6 +149,30 @@ class LearnedUpSample(nn.Module):
 
 
 class DownSample(nn.Module):
+    """
+    A downsampling module that applies different pooling strategies based on the specified layer type.
+
+    This module provides three different downsampling approaches:
+    - "none": No downsampling, returns input unchanged
+    - "timepreserve": Downsamples only the frequency dimension while preserving time
+    - "half": Downsamples both dimensions by half
+
+    Args:
+        layer_type (str): The type of downsampling to apply. Must be one of:
+            - "none": No downsampling
+            - "timepreserve": Average pool with kernel (2, 1) to preserve time dimension
+            - "half": Average pool with kernel 2x2, padding input if needed
+
+    Forward Args:
+        x (torch.Tensor): Input tensor to be downsampled
+
+    Returns:
+        torch.Tensor: Downsampled tensor according to the specified layer_type
+
+    Raises:
+        RuntimeError: If layer_type is not one of the supported values
+    """
+
     def __init__(self, layer_type):
         super().__init__()
         self.layer_type = layer_type
@@ -116,6 +193,25 @@ class DownSample(nn.Module):
 
 
 class UpSample(nn.Module):
+    """
+    A neural network module for upsampling tensors with different strategies.
+
+    This module provides flexible upsampling functionality with three different modes:
+    - 'none': No upsampling, returns input tensor unchanged
+    - 'timepreserve': Upsamples only the spatial dimension while preserving time dimension (scale factor 2x1)
+    - 'half': Upsamples both dimensions equally (scale factor 2x2)
+
+    Args:
+        layer_type (str): The type of upsampling to perform. Must be one of 'none', 'timepreserve', or 'half'.
+
+    Raises:
+        RuntimeError: If an unsupported layer_type is provided.
+
+    Example:
+        >>> upsampler = UpSample('timepreserve')
+        >>> output = upsampler(input_tensor)
+    """
+
     def __init__(self, layer_type):
         super().__init__()
         self.layer_type = layer_type
@@ -134,6 +230,39 @@ class UpSample(nn.Module):
 
 
 class ResBlk(nn.Module):
+    """
+    Residual Block with optional normalization and downsampling.
+
+    A convolutional residual block that implements skip connections with learnable shortcuts
+    when input and output dimensions differ. Supports various downsampling strategies and
+    optional instance normalization.
+
+    Args:
+        dim_in (int): Number of input channels
+        dim_out (int): Number of output channels
+        actv (nn.Module, optional): Activation function. Defaults to nn.LeakyReLU(0.2)
+        normalize (bool, optional): Whether to apply instance normalization. Defaults to False
+        downsample (str, optional): Downsampling strategy. Defaults to "none"
+
+    Attributes:
+        actv: Activation function used in the residual path
+        normalize: Flag indicating whether normalization is applied
+        downsample: Downsampling module for the shortcut path
+        downsample_res: Learned downsampling module for the residual path
+        learned_sc: Flag indicating whether a learned shortcut connection is needed
+        conv1: First convolutional layer with spectral normalization
+        conv2: Second convolutional layer with spectral normalization
+        norm1: First instance normalization layer (if normalize=True)
+        norm2: Second instance normalization layer (if normalize=True)
+        conv1x1: 1x1 convolutional layer for learned shortcut (if dim_in != dim_out)
+
+    Returns:
+        torch.Tensor: Output tensor with unit variance scaling (divided by sqrt(2))
+
+    Note:
+        The output is scaled by 1/sqrt(2) to maintain unit variance in the residual network.
+    """
+
     def __init__(self, dim_in, dim_out, actv=nn.LeakyReLU(0.2), normalize=False, downsample="none"):
         super().__init__()
         self.actv = actv
@@ -177,6 +306,35 @@ class ResBlk(nn.Module):
 
 
 class AcousticStyleEncoder(nn.Module):
+    """
+    Acoustic Style Encoder that combines internal style encoding with external speaker embeddings.
+
+    This module provides flexible style encoding capabilities with three operational modes:
+    - 'internal': Uses only the internal style encoder based on acoustic features
+    - 'external': Uses only external speaker embeddings
+    - 'mix': Combines both internal and external representations with learnable or fixed weights
+
+    The encoder supports both learnable and fixed gating mechanisms for mixing internal
+    and external style representations, allowing for adaptive or predetermined blending
+    strategies during training and inference.
+
+    Attributes:
+        spk_proj (nn.Module): Projects speaker embeddings to style dimension when needed
+        style_encoder (StyleEncoder): Internal style encoder for acoustic features
+        gate_param (nn.Parameter or torch.Tensor): Mixing weight parameter for blending modes
+
+    Properties:
+        style_dim (int): Output dimension of the style embeddings
+        mode (str): Current operational mode ('internal', 'external', or 'mix')
+        learnable_gate (bool): Whether the mixing gate is trainable
+
+    Methods:
+        forward(x, spk_emb, is_warmup): Main forward pass with mode-dependent processing
+        forward_internal(x): Internal style encoding only
+        forward_external(spk_emb): External speaker embedding processing only
+        forward_mix(x, spk_emb, is_warmup): Mixed internal and external processing
+    """
+
     def __init__(
         self,
         dim_in=48,
@@ -352,6 +510,36 @@ class AcousticStyleEncoder(nn.Module):
 
 
 class StyleEncoder(nn.Module):
+    """
+    A neural network module for encoding style information from spectrograms.
+
+    The StyleEncoder processes 2D input spectrograms through a series of convolutional layers
+    with residual blocks and downsampling to extract style embeddings. The architecture
+    consists of shared convolutional layers followed by an unshared linear projection.
+
+    Args:
+        dim_in (int, optional): Initial input dimension for the first convolutional layer.
+            Defaults to 48.
+        style_dim (int, optional): Output dimension of the style embedding. Defaults to 48.
+        max_conv_dim (int, optional): Maximum number of convolutional channels to prevent
+            excessive memory usage. Defaults to 384.
+
+    Architecture:
+        - Initial 3x3 convolution with spectral normalization
+        - 4 residual blocks with downsampling and channel doubling (up to max_conv_dim)
+        - LeakyReLU activation
+        - 5x5 convolution with spectral normalization
+        - Adaptive average pooling to 1x1
+        - Final LeakyReLU and linear projection to style_dim
+
+    Forward:
+        Args:
+            x (torch.Tensor): Input spectrogram tensor of shape (batch_size, 1, height, width)
+
+        Returns:
+            torch.Tensor: Style embedding tensor of shape (batch_size, style_dim)
+    """
+
     def __init__(self, dim_in=48, style_dim=48, max_conv_dim=384):
         super().__init__()
         blocks = [spectral_norm(nn.Conv2d(1, dim_in, 3, 1, 1))]
@@ -379,6 +567,28 @@ class StyleEncoder(nn.Module):
 
 
 class LinearNorm(torch.nn.Module):
+    """
+    A linear transformation layer with Xavier uniform weight initialization.
+
+    This module wraps a standard PyTorch Linear layer and applies Xavier uniform
+    initialization to the weights based on the specified activation function gain.
+
+    Args:
+        in_dim (int): Size of input features.
+        out_dim (int): Size of output features.
+        bias (bool, optional): If set to False, the layer will not learn an additive bias.
+            Defaults to True.
+        w_init_gain (str, optional): Name of the nonlinearity used to calculate the gain
+            for Xavier initialization. Defaults to "linear".
+
+    Attributes:
+        linear_layer (torch.nn.Linear): The underlying linear transformation layer.
+
+    Example:
+        >>> linear = LinearNorm(256, 128, w_init_gain='relu')
+        >>> output = linear(input_tensor)
+    """
+
     def __init__(self, in_dim, out_dim, bias=True, w_init_gain="linear"):
         super(LinearNorm, self).__init__()
         self.linear_layer = torch.nn.Linear(in_dim, out_dim, bias=bias)
@@ -392,6 +602,36 @@ class LinearNorm(torch.nn.Module):
 
 
 class Discriminator2d(nn.Module):
+    """
+    A 2D discriminator network for adversarial training.
+
+    This discriminator processes 2D spectral representations (e.g., spectrograms) and outputs
+    discrimination scores along with intermediate features. It uses spectral normalization
+    and residual blocks with downsampling to progressively reduce spatial dimensions while
+    increasing feature depth.
+
+    Args:
+        dim_in (int, optional): Initial number of input channels/features. Defaults to 48.
+        num_domains (int, optional): Number of output domains for discrimination. Defaults to 1.
+        max_conv_dim (int, optional): Maximum number of convolutional channels. Defaults to 384.
+        repeat_num (int, optional): Number of residual blocks to repeat. Defaults to 4.
+
+    Architecture:
+        - Initial 2D convolution from 1 to dim_in channels
+        - Sequence of ResBlk layers with progressive downsampling and channel doubling
+        - Final layers: LeakyReLU -> Conv2d -> LeakyReLU -> AdaptiveAvgPool2d -> Conv2d
+        - All convolutions use spectral normalization for training stability
+
+    Methods:
+        get_feature(x): Returns final output and all intermediate features from each layer.
+        forward(x): Returns squeezed output and intermediate features for adversarial loss computation.
+
+    Returns:
+        tuple: (discrimination_scores, intermediate_features)
+            - discrimination_scores: Tensor of shape (batch,) for single domain or (batch, num_domains)
+            - intermediate_features: List of tensors from each network layer
+    """
+
     def __init__(self, dim_in=48, num_domains=1, max_conv_dim=384, repeat_num=4):
         super().__init__()
         blocks = []
@@ -425,6 +665,43 @@ class Discriminator2d(nn.Module):
 
 
 class ResBlk1d(nn.Module):
+    """
+    A 1D residual block module for neural networks.
+
+    This module implements a residual block with 1D convolutions, featuring optional
+    normalization, downsampling, and dropout for regularization. The block follows
+    the residual learning framework where the output is the sum of a shortcut
+    connection and a residual path, scaled for unit variance.
+
+    Args:
+        dim_in (int): Number of input channels.
+        dim_out (int): Number of output channels.
+        actv (nn.Module, optional): Activation function. Defaults to nn.LeakyReLU(0.2).
+        normalize (bool, optional): Whether to apply instance normalization. Defaults to False.
+        downsample (str, optional): Downsampling method. Can be "none" or other values
+            for downsampling. Defaults to "none".
+        dropout_p (float, optional): Dropout probability for regularization. Defaults to 0.2.
+
+    Attributes:
+        actv (nn.Module): Activation function used in the block.
+        normalize (bool): Flag indicating whether normalization is applied.
+        downsample_type (str): Type of downsampling applied.
+        learned_sc (bool): Whether a learned shortcut connection is used (when input
+            and output dimensions differ).
+        dropout_p (float): Dropout probability.
+        pool (nn.Module): Pooling layer for downsampling or identity.
+        conv1 (nn.Conv1d): First 1D convolution layer with weight normalization.
+        conv2 (nn.Conv1d): Second 1D convolution layer with weight normalization.
+        norm1 (nn.InstanceNorm1d, optional): First instance normalization layer.
+        norm2 (nn.InstanceNorm1d, optional): Second instance normalization layer.
+        conv1x1 (nn.Conv1d, optional): 1x1 convolution for learned shortcut connection.
+
+    Returns:
+        torch.Tensor: Output tensor with the same spatial dimensions as input
+            (or downsampled if downsample != "none"), with dim_out channels,
+            scaled by 1/sqrt(2) for unit variance.
+    """
+
     def __init__(
         self,
         dim_in,
@@ -495,6 +772,31 @@ class ResBlk1d(nn.Module):
 
 
 class LayerNorm(nn.Module):
+    """
+    Custom LayerNorm module that applies layer normalization along the channel dimension.
+
+    This implementation transposes the input tensor to apply standard layer normalization
+    and then transposes back to maintain the original tensor shape. It's designed to work
+    with tensors where the channel dimension is not the last dimension.
+
+    Args:
+        channels (int): Number of channels (features) to normalize over
+        eps (float, optional): Small value added to denominator for numerical stability.
+                              Defaults to 1e-5.
+
+    Attributes:
+        channels (int): Number of channels
+        eps (float): Epsilon value for numerical stability
+        gamma (nn.Parameter): Learnable scale parameter initialized to ones
+        beta (nn.Parameter): Learnable shift parameter initialized to zeros
+
+    Forward Args:
+        x (torch.Tensor): Input tensor to normalize
+
+    Returns:
+        torch.Tensor: Layer normalized tensor with same shape as input
+    """
+
     def __init__(self, channels, eps=1e-5):
         super().__init__()
         self.channels = channels
@@ -510,6 +812,39 @@ class LayerNorm(nn.Module):
 
 
 class TextEncoder(nn.Module):
+    """
+    Text encoder module for sequence-to-sequence models using CNN and xLSTM layers.
+
+    This module processes text token sequences through embedding, convolutional layers, and
+    transformer-like xLSTM blocks to generate encoded representations suitable for downstream
+    tasks like text-to-speech synthesis.
+
+    Args:
+        channels (int): Number of channels/dimensions for embeddings and hidden representations
+        kernel_size (int): Kernel size for convolutional layers
+        depth (int): Number of convolutional layers to stack
+        n_symbols (int): Size of the vocabulary/symbol set for embedding layer
+        actv (nn.Module, optional): Activation function. Defaults to nn.LeakyReLU(0.2)
+
+    Attributes:
+        embedding (nn.Embedding): Token embedding layer mapping symbols to dense vectors
+        prepare_projection (LinearNorm): Linear layer projecting to reduced dimensionality for xLSTM
+        post_projection (LinearNorm): Linear layer projecting back to original dimensionality
+        cfg (xLSTMBlockStackConfig): Configuration for xLSTM block stack
+        cnn (nn.ModuleList): Stack of convolutional layers with normalization and dropout
+        lstm (xLSTMBlockStack): xLSTM transformer-like blocks for sequence modeling
+
+    Methods:
+        forward(x, input_lengths, m): Full forward pass with masking for training
+        inference(x): Simplified forward pass for inference without masking
+        length_to_mask(lengths): Utility method to create boolean masks from sequence lengths
+
+    Note:
+        The model uses xLSTM (extended LSTM) architecture which combines advantages of
+        LSTMs and Transformers. Masking is applied throughout to handle variable-length
+        sequences properly.
+    """
+
     def __init__(self, channels, kernel_size, depth, n_symbols, actv=nn.LeakyReLU(0.2)):
         super().__init__()
         self.embedding = nn.Embedding(n_symbols, channels)  # [n_symbols, channels]
@@ -593,6 +928,25 @@ class TextEncoder(nn.Module):
 
 
 class AdaIN1d(nn.Module):
+    """
+    Adaptive Instance Normalization 1D module.
+
+    This module applies adaptive instance normalization to 1D input tensors using style vectors.
+    It first normalizes the input using instance normalization without learnable parameters,
+    then applies style-dependent affine transformation with learned gamma and beta parameters.
+
+    Args:
+        style_dim (int): Dimensionality of the input style vector.
+        num_features (int): Number of features/channels in the input tensor to be normalized.
+
+    Forward Args:
+        x (torch.Tensor): Input tensor of shape (batch_size, num_features, sequence_length).
+        s (torch.Tensor): Style vector of shape (batch_size, style_dim).
+
+    Returns:
+        torch.Tensor: Style-modulated normalized tensor with the same shape as input x.
+    """
+
     def __init__(self, style_dim, num_features):
         super().__init__()
         self.norm = nn.InstanceNorm1d(num_features, affine=False)
@@ -606,6 +960,25 @@ class AdaIN1d(nn.Module):
 
 
 class UpSample1d(nn.Module):
+    """
+    A 1D upsampling module that can either pass input unchanged or upsample by factor of 2.
+
+    This module provides conditional upsampling functionality based on the specified layer type.
+    When layer_type is "none", the input is returned unchanged. For any other layer_type value,
+    the input is upsampled by a factor of 2 using nearest neighbor interpolation.
+
+    Args:
+        layer_type (str): Type of upsampling to perform. If "none", no upsampling is applied.
+                         Any other value will trigger 2x upsampling.
+
+    Forward Args:
+        x (torch.Tensor): Input tensor of shape (batch_size, channels, length) to be upsampled.
+
+    Returns:
+        torch.Tensor: Output tensor. Same shape as input if layer_type is "none", otherwise
+                      upsampled by factor of 2 in the last dimension.
+    """
+
     def __init__(self, layer_type):
         super().__init__()
         self.layer_type = layer_type
@@ -618,6 +991,46 @@ class UpSample1d(nn.Module):
 
 
 class AdainResBlk1d(nn.Module):
+    """
+    Adaptive Instance Normalization Residual Block for 1D convolutions.
+
+    This module implements a residual block with Adaptive Instance Normalization (AdaIN)
+    for style transfer in 1D signals. It combines residual connections with style-based
+    normalization to enable style conditioning in neural networks.
+
+    Args:
+        dim_in (int): Number of input channels.
+        dim_out (int): Number of output channels.
+        style_dim (int, optional): Dimensionality of the style vector. Defaults to 64.
+        actv (nn.Module, optional): Activation function. Defaults to nn.LeakyReLU(0.2).
+        upsample (str, optional): Upsampling type. Can be "none" or other upsampling modes.
+            Defaults to "none".
+        dropout_p (float, optional): Dropout probability. Defaults to 0.0.
+
+    Attributes:
+        actv (nn.Module): Activation function used in the block.
+        upsample_type (str): Type of upsampling applied.
+        upsample (UpSample1d): Upsampling layer.
+        learned_sc (bool): Whether to use learned shortcut connection when input and output
+            dimensions differ.
+        dropout (nn.Dropout): Dropout layer for regularization.
+        pool (nn.Module): Pooling/transpose convolution layer for upsampling.
+        conv1 (nn.Conv1d): First convolution layer.
+        conv2 (nn.Conv1d): Second convolution layer.
+        norm1 (AdaIN1d): First adaptive instance normalization layer.
+        norm2 (AdaIN1d): Second adaptive instance normalization layer.
+        conv1x1 (nn.Conv1d, optional): 1x1 convolution for shortcut connection when
+            input and output dimensions differ.
+
+    Forward Args:
+        x (torch.Tensor): Input tensor of shape (batch_size, dim_in, sequence_length).
+        s (torch.Tensor): Style vector of shape (batch_size, style_dim).
+
+    Returns:
+        torch.Tensor: Output tensor of shape (batch_size, dim_out, sequence_length).
+            The output sequence length may change depending on the upsampling configuration.
+    """
+
     def __init__(
         self, dim_in, dim_out, style_dim=64, actv=nn.LeakyReLU(0.2), upsample="none", dropout_p=0.0
     ):
@@ -675,6 +1088,30 @@ class AdainResBlk1d(nn.Module):
 
 
 class AdaLayerNorm(nn.Module):
+    """
+    Adaptive Layer Normalization module that applies style-conditional normalization.
+
+    This module performs layer normalization with learnable affine parameters (gamma and beta)
+    that are predicted from a style vector, enabling style-dependent feature normalization.
+
+    Args:
+        style_dim (int): Dimensionality of the input style vector.
+        channels (int): Number of channels in the input feature tensor.
+        eps (float, optional): Small value added to denominator for numerical stability.
+            Defaults to 1e-5.
+
+    Forward Args:
+        x (torch.Tensor): Input feature tensor of shape (batch_size, channels, seq_len).
+        s (torch.Tensor): Style vector of shape (batch_size, style_dim).
+
+    Returns:
+        torch.Tensor: Style-conditioned normalized tensor with same shape as input x.
+
+    Note:
+        The input tensor undergoes multiple transpose operations to ensure proper dimension
+        alignment for layer normalization and style conditioning operations.
+    """
+
     def __init__(self, style_dim, channels, eps=1e-5):
         super().__init__()
         self.channels = channels
@@ -697,6 +1134,37 @@ class AdaLayerNorm(nn.Module):
 
 
 class ProsodyPredictor(nn.Module):
+    """A neural network module for predicting prosodic features including duration, F0, and energy.
+
+    This module uses xLSTM (extended Long Short-Term Memory) blocks to process text and style
+    inputs for prosody prediction in text-to-speech synthesis. It can operate in two modes:
+    duration prediction mode and F0/energy prediction mode.
+
+    The architecture consists of:
+    - Text encoder for processing input text with style conditioning
+    - xLSTM blocks for sequence modeling
+    - Separate prediction heads for duration, F0, and normalized energy
+    - AdaIN residual blocks for style-conditioned feature processing
+
+    Attributes:
+        cfg (xLSTMBlockStackConfig): Configuration for the main xLSTM stack
+        cfg_pred (xLSTMBlockStackConfig): Configuration for the prediction xLSTM stack
+        text_encoder (DurationEncoder): Encoder for text input with style conditioning
+        lstm (xLSTMBlockStack): Main xLSTM processing stack
+        prepare_projection (nn.Linear): Linear layer for feature projection
+        duration_proj (LinearNorm): Projection layer for duration prediction
+        shared (xLSTMBlockStack): Shared xLSTM stack for F0/energy prediction
+        f0 (nn.ModuleList): Sequential AdaIN residual blocks for F0 prediction
+        n (nn.ModuleList): Sequential AdaIN residual blocks for energy prediction
+        f0_proj (nn.Conv1d): Final projection layer for F0 output
+        n_proj (nn.Conv1d): Final projection layer for energy output
+
+        style_dim (int): Dimension of the style embedding
+        d_hid (int): Hidden dimension size for the model
+        nlayers (int): Number of layers in the text encoder
+        max_dur (int, optional): Maximum duration value for prediction. Defaults to 50.
+        dropout (float, optional): Dropout probability. Defaults to 0.1.
+    """
 
     def __init__(self, style_dim, d_hid, nlayers, max_dur=50, dropout=0.1):
         super().__init__()
@@ -859,6 +1327,34 @@ class ProsodyPredictor(nn.Module):
 
 
 class DurationEncoder(nn.Module):
+    """
+    A neural network module for encoding duration information in text-to-speech synthesis.
+
+    This encoder uses bidirectional LSTM layers with adaptive layer normalization to process
+    text features along with style embeddings to predict duration patterns for speech synthesis.
+
+    Args:
+        sty_dim (int): Dimension of the style embedding vector.
+        d_model (int): Hidden dimension of the model.
+        nlayers (int): Number of LSTM layers to stack.
+        dropout (float, optional): Dropout probability. Defaults to 0.1.
+
+    Attributes:
+        lstms (nn.ModuleList): List of LSTM layers and AdaLayerNorm modules.
+        dropout (float): Dropout probability used during training.
+        d_model (int): Hidden dimension of the model.
+        sty_dim (int): Dimension of the style embedding vector.
+
+    Methods:
+        forward(x, style, text_lengths, m):
+            Forward pass for training with text lengths and masking.
+
+        inference(x, style):
+            Inference pass for generating duration predictions.
+
+        length_to_mask(lengths):
+            Utility method to create attention masks from sequence lengths.
+    """
 
     def __init__(self, sty_dim, d_model, nlayers, dropout=0.1):
         super().__init__()
