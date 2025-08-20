@@ -7,6 +7,9 @@ import time
 import traceback
 import warnings
 
+# from logger import get_logger, setup_logging
+from logging import getLogger, StreamHandler, FileHandler, Formatter
+
 import numpy as np
 import nvidia_smi
 import torch
@@ -18,20 +21,9 @@ from monotonic_align import mask_from_lens
 from munch import munchify
 from torch import nn
 
-# from torch.utils.tensorboard import SummaryWriter
-
-from logger import get_logger, setup_logging
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, create_slm_loss
 from meldataset import build_dataloader
-from models import (
-    build_model,
-    load_ASR_models,
-    load_checkpoint,
-    load_F0_models,
-    save_checkpoint,
-    model2device,
-    model2mode,
-)
+from models import StyleTTS2, load_ASR_models, load_F0_models
 from Modules.diffusion.sampler import ADPM2Sampler, DiffusionSampler, KarrasSchedule
 from Modules.pts import PTS
 from Modules.slmadv import SLMAdversarialLoss
@@ -60,7 +52,13 @@ def main():
     parser = argparse.ArgumentParser(description="StyleTTS2 stage 2 training")
     parser.add_argument("config_path", type=str, help="path to config")
     parser.add_argument("-w", "--num_workers", type=int, default=0, help="number of workers")
-    parser.add_argument("-L", "--log_level", type=int, default=logging.INFO, help="log level")
+    parser.add_argument(
+        "-L",
+        "--log_level",
+        type=str,
+        default="INFO",
+        help="log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)",
+    )
     args = parser.parse_args()
 
     # Load config
@@ -71,18 +69,35 @@ def main():
 
     # Set up logging
     log_dir = config.log_dir
-    # exp_label = config.get("label", "")  # Experiment label
-    formatter_file = logging.Formatter(
-        fmt="%(levelname)s:%(asctime)s: %(message)s",
-        datefmt="%y%m%d-%H:%M:%S",
-    )
-    setup_logging(
-        level=args.log_level,
-        file=osp.join(log_dir, "train.log"),
-        formatter_file=formatter_file,
-        level_file=args.log_level,
-    )
-    logger = get_logger(__name__)  # Get a logger
+    logger = getLogger(__name__)
+    # Convert string log level to numeric level for handlers
+    numeric_log_level = getattr(logging, args.log_level.upper())
+    logger.setLevel(numeric_log_level)
+
+    # Write logs to file
+    file_handler = FileHandler(osp.join(log_dir, "train.log"))
+    file_handler.setLevel(numeric_log_level)
+    file_handler.setFormatter(Formatter("%(levelname)s:%(asctime)s: %(message)s"))
+    logger.addHandler(file_handler)
+
+    # Write logs to console (stdout) - show log level for DEBUG visibility
+    console_handler = StreamHandler()
+    console_handler.setLevel(numeric_log_level)
+    console_handler.setFormatter(Formatter("%(message)s"))
+    logger.addHandler(console_handler)
+
+    # formatter_file = logging.Formatter(
+    #     fmt="%(levelname)s:%(asctime)s: %(message)s",
+    #     datefmt="%y%m%d-%H:%M:%S",
+    # )
+    # setup_logging(
+    #     level=args.log_level,
+    #     file=osp.join(log_dir, "train.log"),
+    #     formatter_file=formatter_file,
+    #     level_file=args.log_level,
+    # )
+    # logger = get_logger(__name__)  # Get a logger
+
     wb_logger = wandb.init(
         # Set the wandb project where this run will be logged.
         project="StyleTTS2+spkenc",
@@ -163,7 +178,7 @@ def main():
 
     # Build model
     model_params = config.model_params
-    model = build_model(model_params, text_aligner, pitch_extractor, plbert)
+    model = StyleTTS2(model_params, text_aligner, pitch_extractor, plbert)
 
     # Set up single/multi-speaker training
     multispeaker = model_params.multispeaker
@@ -200,6 +215,7 @@ def main():
         num_workers=args.num_workers,
         device=device,
         dataset_config=dataset_config,
+        use_speaker_sampler=bool(model.multispeaker),
     )
     logger.info("Building validation dataloader...")
     val_dataloader = build_dataloader(
@@ -212,13 +228,14 @@ def main():
         num_workers=0,
         device=device,
         dataset_config=dataset_config,
+        use_speaker_sampler=False,
     )
     wb_logger.summary["n_train_samples"] = len(train_dataloader.dataset)
     wb_logger.summary["n_valid_samples"] = len(val_dataloader.dataset)
     wb_logger.summary["n_ood_texts"] = train_dataloader.dataset.number_ood_texts()
 
     # Move models to device (cuda)
-    model = model2device(model, device)
+    model.to(device)
 
     # DP
     for key in model:
@@ -236,10 +253,9 @@ def main():
         if config.get("first_stage_path", "") != "":
             first_stage_path = osp.join(log_dir, config.get("first_stage_path", "first_stage.pth"))
             logger.info("Loading the first stage model at %s ...", first_stage_path)
-            model, _, start_epoch, _ = load_checkpoint(
-                model,
-                None,
+            _, start_epoch, _ = model.load(
                 first_stage_path,
+                None,
                 load_only_params=True,
                 # keep starting epoch for tensorboard log
                 ignore_modules=[
@@ -289,11 +305,9 @@ def main():
     scheduler_params_dict["acoustic_style_encoder"]["max_lr"] = optimizer_params.ft_lr * 2
     scheduler_params_dict["prosodic_style_encoder"]["max_lr"] = optimizer_params.ft_lr * 2
 
-    optimizer = build_optimizer(
-        {key: model[key].parameters() for key in model},
-        scheduler_params_dict=scheduler_params_dict,
-        lr=optimizer_params.lr,
-    )
+    # Build parameter groups for optimizer
+    parameters_dict = {key: model[key].parameters() for key in model}
+    optimizer = build_optimizer(parameters_dict, scheduler_params_dict, optimizer_params.lr)
 
     # adjust BERT learning rate
     for g in optimizer.optimizers["bert"].param_groups:
@@ -312,12 +326,11 @@ def main():
             g["min_lr"] = 0
             g["weight_decay"] = 1e-4
 
-    # load models if there is a model
+    # Load models if there is a model
     if load_pretrained:
-        model, optimizer, start_epoch, iters = load_checkpoint(
-            model,
-            optimizer,
+        optimizer, start_epoch, iters = model.load(
             config.pretrained_model,
+            optimizer,
             load_only_params=config.get("load_only_params", True),
         )
         # # advance start epoch or we'd re-train and rewrite the last epoch file
@@ -387,7 +400,7 @@ def main():
         start_time = time.time()
 
         # Set all models to eval mode
-        model = model2mode(model, "eval")
+        model.set_mode("eval")
 
         # Models in train mode from the beginning
         train_components = [
@@ -403,7 +416,7 @@ def main():
             train_components.extend(["decoder", "acoustic_style_encoder", "wd"])
 
         # Set models to train mode
-        model = model2mode(model, "train", train_components)
+        model.set_mode("train", train_components)
 
         # Train loop for each epoch
         for batch_idx, batch in enumerate(train_dataloader):
@@ -1240,8 +1253,7 @@ def main():
 
         # Save progress
         if epoch % saving_epoch == 0:
-            save_checkpoint(
-                model,
+            model.save(
                 optimizer,
                 epoch,
                 iters,
@@ -1292,8 +1304,7 @@ def main():
         # Save milestone models
         if save_milestones:
             if epoch == diff_epoch - 1:
-                save_checkpoint(
-                    model,
+                model.save(
                     optimizer,
                     epoch,
                     iters,
@@ -1303,8 +1314,7 @@ def main():
                     use_epoch_in_name=False,
                 )
             if epoch == joint_epoch - 1:
-                save_checkpoint(
-                    model,
+                model.save(
                     optimizer,
                     epoch,
                     iters,
@@ -1321,8 +1331,7 @@ def main():
     # === Final model saving ==================================================
 
     # Save the final checkpoint
-    final_filepath = save_checkpoint(
-        model,
+    final_filepath = model.save(
         optimizer,
         epoch,
         iters,
