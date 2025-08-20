@@ -1653,6 +1653,14 @@ class StyleTTS2:
         """
         self._model[key] = value
 
+    def __delitem__(self, key):
+        """
+        Enable dictionary-like deletion of model components using [] operator.
+        Args:
+            key: Key to delete from the model dictionary
+        """
+        del self._model[key]
+
     def __iter__(self):
         """
         Enable iteration over model components.
