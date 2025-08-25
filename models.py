@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import yaml
-from munch import munchify, Munch
+from munch import Munch, munchify
 from torch.nn.utils import spectral_norm, weight_norm
 from xlstm import mLSTMBlockConfig, mLSTMLayerConfig, xLSTMBlockStack, xLSTMBlockStackConfig
 
@@ -414,12 +414,13 @@ class AcousticStyleEncoder(nn.Module):
                 ),
             )
 
-    def forward(self, x, spk_emb=None, is_warmup=False):
+    def forward(self, x, spk_emb=None, warmup_coef=None):
         """
         Forward pass of the module.
         Args:
             x (torch.Tensor): Internal style embedding.
             spk_emb (torch.Tensor): External speaker embedding.
+            warmup_coef (float): Current warmup coefficient.
         Returns:
             torch.Tensor: The output style tensor.
         """
@@ -431,7 +432,7 @@ class AcousticStyleEncoder(nn.Module):
             return self.forward_external(spk_emb)
 
         # Both internal and external style encodings are used => style will be mixed
-        return self.forward_mix(x, spk_emb, is_warmup)
+        return self.forward_mix(x, spk_emb, warmup_coef)
 
     def forward_internal(self, x):
         """
@@ -456,32 +457,52 @@ class AcousticStyleEncoder(nn.Module):
         # normalized = F.normalize(projected, p=2, dim=-1)
         return self.spk_proj(spk_emb)
 
-    def forward_mix(self, x, spk_emb, is_warmup=False):
+    def forward_mix(self, x, spk_emb, warmup_coef=1.0):
         """
-        Forward pass for mixing internal and external style embeddings.
+        Forward pass for mixing internal and external style embeddings with warmup scheduling.
+
+        This method combines internal style embeddings (derived from input features) with
+        external style embeddings (derived from speaker embeddings) using a progressive
+        warmup schedule and a learnable or fixed gate parameter.
         Args:
-            x (torch.Tensor): Internal style embedding.
-            spk_emb (torch.Tensor): External speaker embedding.
-            is_warmup (bool, optional): If True, only use the internal style encoder output.
+            x (torch.Tensor): Input tensor for internal style embedding computation.
+            spk_emb (torch.Tensor): External speaker embedding tensor.
+            warmup_coef (float): Current warmup coefficient, typically between 0 and 1.
         Returns:
-            torch.Tensor: The output style tensor after mixing.
+            torch.Tensor: Mixed style embedding tensor with shape (batch, style_dim).
+                         The output is a weighted combination of internal and external
+                         style embeddings, where the mixing ratio depends on the warmup
+                         progress and gate parameter.
+
+        Notes:
+            - Before warmup_beg: Only internal style embedding is used.
+            - During warmup (warmup_beg <= step < warmup_end): Progressive mixing based
+              on linear interpolation of the warmup progress.
+            - After warmup_end: Full mixing with final gate parameter value.
+            - The gate parameter can be learnable (with sigmoid activation) or fixed.
+            - Final mixing formula: (1 - alpha) * style_intern + alpha * style_extern,
+              where alpha = progress * gate_param.
         """
         style_intern = self.forward_internal(x)
-        if is_warmup:
-            # During warmup, use the internal style encoder output only
+
+        # No time to start warmup yet => use internal style only
+        if not warmup_coef:
             return style_intern
-        style_extern = self.forward_external(spk_emb)
+
+        style_extern = warmup_coef * self.forward_external(spk_emb)
         # Setup gate parameter:
         # - If learnable, use sigmoid activation to ensure it is between 0 and 1
         #   with a default value of `mix_weight=0` being 0.5 after sigmoid activation.
         # - If not learnable, use the fixed value of `mix_weight`.
-        g = torch.sigmoid(self.gate_param) if self._learnable_gate else self.gate_param
+        g = torch.sigmoid(self.gate_param) if self._learnable_gate else self.gate_param  # ∈ (0,1)
+
+        alpha = warmup_coef * g  #  # alpha ∈ [0, g]
         # Fusion: (1 - g) * style_intern + g * style_extern
         # g: shape (style_dim,) or (batch, style_dim) (broadcasted to match batch)
         # style_intern: shape (batch, style_dim)
         # style_extern: shape (batch, style_dim)
         # Broadcasting ensures elementwise mixing per style dimension.
-        return (1 - g) * style_intern + g * style_extern
+        return (1 - alpha) * style_intern + alpha * style_extern
 
     @property
     def style_dim(self):
@@ -1498,78 +1519,78 @@ def load_ASR_models(ASR_MODEL_PATH, ASR_MODEL_CONFIG):
     return asr_model
 
 
-def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_modules=None):
-    """
-    Load model and optimizer states from a checkpoint file.
-    This function handles loading model parameters with special handling for
-    DataParallel modules that might have key name inconsistencies between
-    training stages.
-    Parameters
-    ----------
-    model : dict
-        Dictionary of model components to load
-    optimizer : torch.optim.Optimizer
-        Optimizer to load state
-    path : str
-        Path to the checkpoint file
-    load_only_params : bool, default=True
-        If True, only loads model parameters without optimizer state,
-        and resets epoch/iters to 0. If False, loads optimizer state
-        and continues from saved epoch/iters.
-    ignore_modules : list, optional
-        List of module names to ignore during loading
-    Returns
-    -------
-    tuple
-        (model, optimizer, epoch, iters) - The loaded model, optimizer,
-        current epoch, and iteration count
-    Notes
-    -----
-    This function includes handling for inconsistent key names between first
-    and second training stages as noted in StyleTTS2 GitHub issues.
-    """
-    # Modified to deal with inconsistent key names between first and second training stages
-    # => see https://github.com/yl4579/StyleTTS2/issues/254,
-    # https://github.com/yl4579/StyleTTS2/issues/21#issue-1962579727
-    # https://github.com/pytorch/pytorch/issues/9176#issuecomment-403570715
+# def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_modules=None):
+#     """
+#     Load model and optimizer states from a checkpoint file.
+#     This function handles loading model parameters with special handling for
+#     DataParallel modules that might have key name inconsistencies between
+#     training stages.
+#     Parameters
+#     ----------
+#     model : dict
+#         Dictionary of model components to load
+#     optimizer : torch.optim.Optimizer
+#         Optimizer to load state
+#     path : str
+#         Path to the checkpoint file
+#     load_only_params : bool, default=True
+#         If True, only loads model parameters without optimizer state,
+#         and resets epoch/iters to 0. If False, loads optimizer state
+#         and continues from saved epoch/iters.
+#     ignore_modules : list, optional
+#         List of module names to ignore during loading
+#     Returns
+#     -------
+#     tuple
+#         (model, optimizer, epoch, iters) - The loaded model, optimizer,
+#         current epoch, and iteration count
+#     Notes
+#     -----
+#     This function includes handling for inconsistent key names between first
+#     and second training stages as noted in StyleTTS2 GitHub issues.
+#     """
+#     # Modified to deal with inconsistent key names between first and second training stages
+#     # => see https://github.com/yl4579/StyleTTS2/issues/254,
+#     # https://github.com/yl4579/StyleTTS2/issues/21#issue-1962579727
+#     # https://github.com/pytorch/pytorch/issues/9176#issuecomment-403570715
 
-    if ignore_modules is None:
-        ignore_modules = []
-    state = torch.load(path, map_location="cpu")
-    params = state["net"]
-    for key in model:
-        if key in params and key not in ignore_modules:
-            logger.info("%s loaded", key)
-            try:
-                model[key].load_state_dict(params[key], strict=True)
-            except RuntimeError:  # DataParallel module. mismatch
-                state_dict = params[key]
-                new_state_dict = OrderedDict()
-                # print(f'{key} key length: {len(model[key].state_dict().keys())}, state_dict length: {len(state_dict.keys())}')
-                # print("model", len(model[key].state_dict().items()))
-                # print("state", len(state_dict.items()))
-                for k_m, _ in model[key].state_dict().items():
-                    k_fix, v_c = None, None
-                    if k_m in state_dict:
-                        v_c = state_dict[k_m]
-                        k_fix = k_m[7:]
-                    if k_fix:
-                        new_state_dict[k_fix] = v_c
-                        # print(f'=> {k_m} => {k_fix}')
-                model[key].load_state_dict(new_state_dict, strict=False)
-    # Set to eval mode
-    _ = [model[key].eval() for key in model]
+#     if ignore_modules is None:
+#         ignore_modules = []
+#     state = torch.load(path, map_location="cpu")
+#     params = state["net"]
+#     for key in model:
+#         if key in params and key not in ignore_modules:
+#             logger.info("%s loaded", key)
+#             try:
+#                 model[key].load_state_dict(params[key], strict=True)
+#             except RuntimeError:  # DataParallel module. mismatch
+#                 state_dict = params[key]
+#                 new_state_dict = OrderedDict()
+#                 # print(f'{key} key length: {len(model[key].state_dict().keys())}, state_dict length: {len(state_dict.keys())}')
+#                 # print("model", len(model[key].state_dict().items()))
+#                 # print("state", len(state_dict.items()))
+#                 for k_m, _ in model[key].state_dict().items():
+#                     k_fix, v_c = None, None
+#                     if k_m in state_dict:
+#                         v_c = state_dict[k_m]
+#                         k_fix = k_m[7:]
+#                     if k_fix:
+#                         new_state_dict[k_fix] = v_c
+#                         # print(f'=> {k_m} => {k_fix}')
+#                 model[key].load_state_dict(new_state_dict, strict=False)
+#     # Set to eval mode
+#     _ = [model[key].eval() for key in model]
 
-    if not load_only_params:
-        # advance start epoch or we'd re-train and rewrite the last epoch file
-        epoch = state["epoch"] + 1
-        iters = state["iters"]
-        optimizer.load_state_dict(state["optimizer"])
-    else:
-        epoch = 0
-        iters = 0
+#     if not load_only_params:
+#         # advance start epoch or we'd re-train and rewrite the last epoch file
+#         epoch = state["epoch"] + 1
+#         iters = state["iters"]
+#         optimizer.load_state_dict(state["optimizer"])
+#     else:
+#         epoch = 0
+#         iters = 0
 
-    return model, optimizer, epoch, iters
+#     return model, optimizer, epoch, iters
 
 
 class StyleTTS2:
@@ -1609,6 +1630,10 @@ class StyleTTS2:
     @property
     def multispeaker(self):
         return self._params.multispeaker
+
+    @property
+    def mix_mode(self):
+        return self._params.mode
 
     @property
     def slm(self):
@@ -1921,8 +1946,8 @@ class StyleTTS2:
             model_clone.eval()
         return model_clone
 
-    def is_warmup(self, epoch):
-        return self._params.mode == "mix" and epoch < self._params.warmup_epochs
+    # def is_warmup(self, epoch):
+    #     return self._params.mode == "mix" and epoch < self._params.warmup_epochs
 
     def save(
         self,

@@ -25,7 +25,7 @@ from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, cr
 from meldataset import build_dataloader
 from models import StyleTTS2, load_ASR_models, load_F0_models
 from Modules.diffusion.sampler import ADPM2Sampler, DiffusionSampler, KarrasSchedule
-from Modules.pts import PTS
+from Modules.pts import PTS, set_random_seed
 from Modules.slmadv import SLMAdversarialLoss
 from optimizers import build_optimizer
 from text_utils import TextCleaner
@@ -63,11 +63,11 @@ def main():
 
     # Load config
     with open(args.config_path, encoding="utf-8") as fr:
-        config = yaml.safe_load(fr)
+        config = munchify(yaml.safe_load(fr))
     cfg_name, cfg_ext = osp.splitext(osp.basename(args.config_path))
-    config = munchify(config)  # Convert to Munch for easier access
 
     # Set up logging
+    set_random_seed(config.seed)
     log_dir = config.log_dir
     logger = getLogger(__name__)
     # Convert string log level to numeric level for handlers
@@ -389,6 +389,12 @@ def main():
     logger.info(" | > Total epochs:     %d", epochs)
     logger.info(" | > Steps per epoch:  %d", steps_per_epoch)
     logger.info(" | > Input iterations: %d", iters)
+    logger.info(" | > Train data:       %s", data_params.train_data)
+    logger.info(" | > Valid data:       %s", data_params.val_data)
+    logger.info(" | > Batch size:          %d", batch_size)
+    logger.info(" | > Max len:             %d", max_len)
+    logger.info(" | > SLM loss:            %s", model_params.slm.model)
+    logger.info(" | > Style mix mode:      %s", model_params.mode)
     logger.info(" | > Sigma data:       %f", inp_sigma_data)
     logger.info("")
 
@@ -1179,6 +1185,7 @@ def main():
                         spk_embs[idx].unsqueeze(0) if multispeaker else None,
                         # Predicted phonemes-audio alignment encoding
                         p_algn[idx, :, : mel_len // 2].unsqueeze(0),
+                        warmup_coef=1.0,
                     )
 
                     # Write and save val audio

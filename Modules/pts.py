@@ -561,14 +561,14 @@ class PTS:
             return out.squeeze().cpu().numpy()[self.offset_beg : -self.offset_end], pred_style
             # return out.squeeze().cpu().numpy()[..., :-50], s_pred
 
-    def reconstruct(self, mel_gt, en, spk_emb=None, p_en=None, is_warmup=False):
+    def reconstruct(self, mel_gt, en, spk_emb=None, p_en=None, warmup_coef=1.0):
         """Reconstruct the waveform from the mel spectrogram.
         This method uses the decoder of the model to generate the waveform
         Args:
             mel_gt (torch.Tensor): Mel spectrogram.
             en (torch.Tensor): Encoded phonetic audio-aligned features.
-            is_warmup (bool): Whether the model is in warmup mode.
             p_en (torch.Tensor): Predicted phonetic audio-aligned features.
+            warmup_coef (float): Coefficient for warmup.
 
         Returns:
             torch.Tensor: Reconstructed waveform.
@@ -590,7 +590,7 @@ class PTS:
             acoust_style = self.model.acoustic_style_encoder(
                 mel_gt.unsqueeze(1),
                 spk_emb=spk_emb,
-                is_warmup=is_warmup,
+                warmup_coef=warmup_coef,
             )
             # Decode the waveform
             y_pred = self.model.decoder(en, f0, n, acoust_style)
@@ -633,11 +633,11 @@ class PTS:
             # Load speaker embedding
             spk_emb = torch.load(spk_emb_path)
 
-            # Compute style embedding
-            ref_acoust_style = self.model.acoustic_style_encoder(spk_emb)  # style = timbre
-            ref_pros_style = self.model.prosodic_style_encoder(
-                mel_tensor.unsqueeze(1)
-            )  # style = prosody
+            # Compute style embedding:
+            # style = timbre
+            ref_acoust_style = self.model.acoustic_style_encoder(spk_emb)
+            # style = prosody
+            ref_pros_style = self.model.prosodic_style_encoder(mel_tensor.unsqueeze(1))
 
         return torch.cat([ref_acoust_style, ref_pros_style], dim=1)
 

@@ -74,3 +74,13 @@ def recursive_munch(d):
 def log_print(message, logger):
     logger.info(message)
     print(message)
+
+
+def warmup_scheduler(step, beg, end):
+    # Compute warmup progress
+    if step >= end:
+        progress = 1.0
+    else:
+        progress = (step - beg) / float(end - beg)
+        progress = 1.0 if progress >= 1.0 else (0.0 if progress <= 0.0 else progress)
+    return progress

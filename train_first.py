@@ -21,10 +21,10 @@ from munch import munchify
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, create_slm_loss
 from meldataset import build_dataloader
 from models import StyleTTS2, load_ASR_models, load_F0_models
-from Modules.pts import PTS
+from Modules.pts import PTS, set_random_seed
 from optimizers import build_optimizer
 from text_utils import TextCleaner
-from utils import get_data_path_list, length_to_mask, log_norm, maximum_path  # get_image,
+from utils import get_data_path_list, length_to_mask, log_norm, maximum_path, warmup_scheduler
 from Utils.PLBERT.util import load_plbert
 
 warnings.simplefilter("ignore")
@@ -49,13 +49,14 @@ def main():
 
     # Load config
     with open(args.config_path, encoding="utf-8") as fr:
-        config = yaml.safe_load(fr)
+        config = munchify(yaml.safe_load(fr))
 
     # writer = None
     wb_logger = None  # WandB logger
 
     # Set up logging
-    log_dir = config["log_dir"]
+    set_random_seed(config.seed)
+    log_dir = config.log_dir
     os.makedirs(log_dir, exist_ok=True)
 
     # formatter_file = logging.Formatter(
@@ -152,8 +153,8 @@ def main():
         config["data_params"].get("test_audio_dir", "test_audios"),
     )
 
-    model_params = munchify(config["model_params"])
-    loss_params = munchify(config["loss_params"])
+    model_params = config.model_params
+    loss_params = config.loss_params
 
     # Set up text cleaner and pre-processing function
     text_cleaner = TextCleaner(data_params["symbol_dict_path"], pad=data_params["pad"])
@@ -310,15 +311,38 @@ def main():
 
     # Number of steps per epoch for the current process
     steps_per_epoch = len(train_dataloader)
+    # Warmup iterations (valid for mode="mix")
+    warmup_beg_iters = int(steps_per_epoch * model_params.warmup_beg_epoch)
+    warmup_end_iters = int(steps_per_epoch * model_params.warmup_end_epoch)
 
     best_loss = float("inf")  # best test loss
 
     if acc.is_main_process:
         logger.info(" > Start training cycles:")
-        logger.info(" | > Starting epoch:   %d", start_epoch)
-        logger.info(" | > Total epochs:     %d", epochs)
-        logger.info(" | > Steps per epoch:  %d", steps_per_epoch)
-        logger.info(" | > Input iterations: %d\n", iters)
+        logger.info(" | > Random seed:         %s", config.seed)
+        logger.info(" | > Experiment label:    %s", config.label)
+        logger.info(" | > Starting epoch:      %d", start_epoch)
+        logger.info(" | > Total epochs:        %d", epochs)
+        logger.info(
+            " | > Warmup (epochs/it.): %d-%d / %d-%d",
+            model_params.warmup_beg_epoch,
+            model_params.warmup_end_epoch,
+            warmup_beg_iters,
+            warmup_end_iters,
+        )
+        logger.info(" | > Steps per epoch:     %d", steps_per_epoch)
+        logger.info(" | > Input iterations:    %d", iters)
+        logger.info(" | > Train data:          %s", data_params.train_data)
+        logger.info(" | > Valid data:          %s", data_params.val_data)
+        logger.info(" | > Pretrained model:    %s", config.pretrained_model)
+        logger.info(" | > Text aligner:        %s", config.ASR_path)
+        logger.info(" | > F0 model:            %s", config.F0_path)
+        logger.info(" | > PL-BERT:             %s", config.PLBERT_dir)
+        logger.info(" | > Batch size:          %d", batch_size)
+        logger.info(" | > Max len:             %d", max_len)
+        logger.info(" | > SLM loss:            %s", model_params.slm.model)
+        logger.info(" | > Style mix mode:      %s", model_params.mode)
+        logger.info("")
 
     # === Start of training loop ==============================================
     model.set_mode("eval")
@@ -343,9 +367,6 @@ def main():
 
         # JMa: Zero gradients of all optimizers at each epoch start
         optimizer.zero_grad()
-
-        # Check if warmup is to be applied
-        logger.debug("Epoch %d, warmup: %s", epoch, model.is_warmup(epoch))
 
         # Train loop for each epoch
         for batch_idx, batch in enumerate(train_dataloader):
@@ -502,12 +523,15 @@ def main():
             # - if not multispeaker, use the ground truth mel spectrogram
             # - if multispeaker, use other (style reference) mel spectrogram
             mel4style = mel_st.unsqueeze(1) if model.multispeaker else mel_gt.unsqueeze(1)
+            # Compute warmup coefficient
+            warmup_coef = (
+                warmup_scheduler(iters + 1, warmup_beg_iters, warmup_end_iters)
+                if model.multispeaker and model.mix_mode == "mix"
+                else None
+            )
             # Only (acoustic) style encoder is trained within 1st stage training
             style = model.acoustic_style_encoder(
-                mel4style,
-                spk_emb=spk_embs if model.multispeaker else None,
-                is_warmup=model.is_warmup(epoch),
-                # if multispeaker and epoch >= tma_epoch else None
+                mel4style, spk_emb=spk_embs if model.multispeaker else None, warmup_coef=warmup_coef
             )
 
             # Reconstruct the audio from the text-audio aligned encoded features, predicted style,
@@ -608,7 +632,7 @@ def main():
                 # Zero all gradients
                 optimizer.zero_grad()
 
-            iters += 1
+            iters += 1  # Increment iteration counter
 
             # Log training progress
             if (batch_idx + 1) % log_interval == 0 and acc.is_main_process:
@@ -779,12 +803,11 @@ def main():
                     # mel_gt.unsqueeze(1), spk_embs if multispeaker and epoch >= tma_epoch else None
                     mel_gt.unsqueeze(1),
                     spk_emb=spk_embs if model.multispeaker else None,
-                    is_warmup=model.is_warmup(epoch),
-                    # if multispeaker and epoch >= tma_epoch else None
+                    warmup_coef=warmup_coef,
                 )
 
-                # Reconstruct the audio from the text-audio aligned encoded features, predicted style,
-                # and ground truth pitch and norm
+                # Reconstruct the audio from the text-audio aligned encoded features,
+                # predicted style, and ground truth pitch and norm
                 y_rec = model.decoder(ph_algn, f0_real, norm_real, style)
 
                 # Compute mel-spectrogram loss
@@ -808,11 +831,12 @@ def main():
                 else gate_param
             )
             logger.info(
-                "Epoch [%3d/%d]: Validation loss: %.3f (best: %.3f), Gate weights: %.6f±%.6f (%.6f-%.6f)",
+                "Epoch [%3d/%d]: Validation loss: %.3f (best: %.3f), Warmup: %.6f, Gate weights: %.6f±%.6f (%.6f-%.6f)",
                 epoch + 1,
                 epochs,
                 curr_loss,
                 best_loss,
+                warmup_coef,
                 gate_values.mean().item(),
                 gate_values.std().item(),
                 gate_values.min().item(),
@@ -834,7 +858,7 @@ def main():
                         # Ground-truth phoneme-audio alignment
                         h_algn[idx, :, : mel_len // 2].unsqueeze(0),
                         spk_emb=spk_embs[idx].unsqueeze(0) if model.multispeaker else None,
-                        is_warmup=model.is_warmup(epoch),
+                        warmup_coef=warmup_coef,
                     )
 
                     # Write and save val audio
