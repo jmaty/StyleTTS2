@@ -344,6 +344,7 @@ class AcousticStyleEncoder(nn.Module):
         mode="internal",
         mix_weight=0.0,
         learnable_gate=True,
+        warmup_mode="internal",
     ):
         """Initialize the Acoustic Style Encoder.
         Args:
@@ -366,6 +367,7 @@ class AcousticStyleEncoder(nn.Module):
         self._learnable_gate = learnable_gate
         self._mode = mode
         self._style_dim = style_dim
+        self._warmup_mode = warmup_mode
 
         # self.spk_proj = nn.Sequential(
         #     nn.Linear(spk_emb_dim, style_dim),  # Reduce the dimension of the speaker embedding
@@ -484,12 +486,17 @@ class AcousticStyleEncoder(nn.Module):
               where alpha = progress * gate_param.
         """
         style_intern = self.forward_internal(x)
+        if self._warmup_mode == "internal":
+            style_intern *= warmup_coef
 
         # No time to start warmup yet => use internal style only
         if not warmup_coef:
             return style_intern
 
-        style_extern = warmup_coef * self.forward_external(spk_emb)
+        style_extern = self.forward_external(spk_emb)
+        if self._warmup_mode == "external":
+            style_extern *= warmup_coef
+
         # Setup gate parameter:
         # - If learnable, use sigmoid activation to ensure it is between 0 and 1
         #   with a default value of `mix_weight=0` being 0.5 after sigmoid activation.
@@ -497,12 +504,16 @@ class AcousticStyleEncoder(nn.Module):
         g = torch.sigmoid(self.gate_param) if self._learnable_gate else self.gate_param  # ∈ (0,1)
 
         alpha = warmup_coef * g  #  # alpha ∈ [0, g]
+        if self._warmup_mode == "external":
+            return (1 - g) * style_intern + alpha * style_extern
+        else:
+            return (1 - alpha) * style_intern + g * style_extern
+
         # Fusion: (1 - g) * style_intern + g * style_extern
         # g: shape (style_dim,) or (batch, style_dim) (broadcasted to match batch)
         # style_intern: shape (batch, style_dim)
         # style_extern: shape (batch, style_dim)
         # Broadcasting ensures elementwise mixing per style dimension.
-        return (1 - alpha) * style_intern + alpha * style_extern
 
     @property
     def style_dim(self):
@@ -1814,6 +1825,7 @@ class StyleTTS2:
             mix_weight=args.mix_weight,
             learnable_gate=args.learnable_gate,
             mode=args.mode,
+            warmup_mode=args.warmup_mode,
         )
 
         # Prosodic style encoder

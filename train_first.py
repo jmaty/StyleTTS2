@@ -323,6 +323,7 @@ def main():
         logger.info(" | > Experiment label:    %s", config.label)
         logger.info(" | > Starting epoch:      %d", start_epoch)
         logger.info(" | > Total epochs:        %d", epochs)
+        logger.info(" | > Warmup mode:         %d", model_params.warmup_mode)
         logger.info(
             " | > Warmup (epochs/it.): %d-%d / %d-%d",
             model_params.warmup_beg_epoch,
@@ -531,7 +532,9 @@ def main():
             )
             # Only (acoustic) style encoder is trained within 1st stage training
             style = model.acoustic_style_encoder(
-                mel4style, spk_emb=spk_embs if model.multispeaker else None, warmup_coef=warmup_coef
+                mel4style,
+                spk_emb=spk_embs if model.multispeaker else None,
+                warmup_coef=warmup_coef,
             )
 
             # Reconstruct the audio from the text-audio aligned encoded features, predicted style,
