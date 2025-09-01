@@ -77,22 +77,25 @@ def main():
 
     # Configure logging only on main process to avoid duplicate output
     if acc.is_main_process:
+
         # Initialize logger (Accelerate expects string log level)
         logger = get_logger(__name__, log_level=args.log_level)
         # Convert string log level to numeric level for handlers
         numeric_log_level = getattr(logging, args.log_level.upper())
 
-        # Write logs to file
-        file_handler = logging.FileHandler(osp.join(log_dir, "train.log"))
-        file_handler.setLevel(numeric_log_level)
-        file_handler.setFormatter(logging.Formatter("%(levelname)s:%(asctime)s: %(message)s"))
-        logger.logger.addHandler(file_handler)
+        # Přidat handlery pouze pokud ještě nejsou žádné
+        if not logger.logger.handlers:
+            # Write logs to file
+            file_handler = logging.FileHandler(osp.join(log_dir, "train.log"))
+            file_handler.setLevel(numeric_log_level)
+            file_handler.setFormatter(logging.Formatter("%(levelname)s:%(asctime)s: %(message)s"))
+            logger.logger.addHandler(file_handler)
 
-        # Write logs to console (stdout) - show log level for DEBUG visibility
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(numeric_log_level)
-        console_handler.setFormatter(logging.Formatter("%(message)s"))
-        logger.logger.addHandler(console_handler)
+            # Write logs to console (stdout) - show log level for DEBUG visibility
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(numeric_log_level)
+            console_handler.setFormatter(logging.Formatter("%(message)s"))
+            logger.logger.addHandler(console_handler)
 
         # Initialize the wandb logger and name wandb project and run
         wb_logger = wandb.init(
@@ -323,7 +326,7 @@ def main():
         logger.info(" | > Experiment label:    %s", config.label)
         logger.info(" | > Starting epoch:      %d", start_epoch)
         logger.info(" | > Total epochs:        %d", epochs)
-        logger.info(" | > Warmup mode:         %d", model_params.warmup_mode)
+        logger.info(" | > Warmup mode:         %s", model_params.warmup_mode)
         logger.info(
             " | > Warmup (epochs/it.): %d-%d / %d-%d",
             model_params.warmup_beg_epoch,
@@ -839,11 +842,11 @@ def main():
                 epochs,
                 curr_loss,
                 best_loss,
-                warmup_coef,
-                gate_values.mean().item(),
-                gate_values.std().item(),
-                gate_values.min().item(),
-                gate_values.max().item(),
+                warmup_coef if model.mode == "mix" else 0,
+                gate_values.mean().item() if model_params.mode == "mix" else 0,
+                gate_values.std().item() if model_params.mode == "mix" else 0,
+                gate_values.min().item() if model_params.mode == "mix" else 0,
+                gate_values.max().item() if model_params.mode == "mix" else 0,
             )
             wb_logger.log(
                 {"eval/mel_loss": curr_loss, "eval/best_mel_loss": best_loss},

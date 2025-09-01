@@ -385,17 +385,26 @@ def main():
     steps_per_epoch = len(train_dataloader)
 
     logger.info(" > Start training cycles:")
+    logger.info(" | > Random seed:      %s", config.seed)
+    logger.info(" | > Experiment label: %s", config.label)
     logger.info(" | > Starting epoch:   %d", start_epoch)
     logger.info(" | > Total epochs:     %d", epochs)
     logger.info(" | > Steps per epoch:  %d", steps_per_epoch)
     logger.info(" | > Input iterations: %d", iters)
     logger.info(" | > Train data:       %s", data_params.train_data)
     logger.info(" | > Valid data:       %s", data_params.val_data)
-    logger.info(" | > Batch size:          %d", batch_size)
-    logger.info(" | > Max len:             %d", max_len)
-    logger.info(" | > SLM loss:            %s", model_params.slm.model)
-    logger.info(" | > Style mix mode:      %s", model_params.mode)
+    logger.info(" | > Pretrained model: %s", config.pretrained_model)
+    logger.info(" | > Text aligner:     %s", config.ASR_path)
+    logger.info(" | > F0 model:         %s", config.F0_path)
+    logger.info(" | > PL-BERT:          %s", config.PLBERT_dir)
+    logger.info(" | > Batch size:       %d", batch_size)
+    logger.info(" | > Max len:          %d", max_len)
     logger.info(" | > Sigma data:       %f", inp_sigma_data)
+    logger.info(" | > SLM loss:         %s", model_params.slm.model)
+    logger.info(" | > SLM adv training: %s", slmadv_params.batch_percentage is not None)
+    logger.info(" | > SLM min len:      %d", slmadv_params.min_len)
+    logger.info(" | > SLM max len:      %d", slmadv_params.max_len)
+    logger.info(" | > Style mix mode:   %s", model_params.mode)
     logger.info("")
 
     # === Start of training loop ==============================================
@@ -1151,10 +1160,10 @@ def main():
             best_loss,
             avg_loss_align,
             avg_loss_f,
-            gate_values.mean().item(),
-            gate_values.std().item(),
-            gate_values.min().item(),
-            gate_values.max().item(),
+            gate_values.mean().item() if model_params.mode == "mix" else 0,
+            gate_values.std().item() if model_params.mode == "mix" else 0,
+            gate_values.min().item() if model_params.mode == "mix" else 0,
+            gate_values.max().item() if model_params.mode == "mix" else 0,
         )
         wb_logger.log(
             {
@@ -1185,7 +1194,6 @@ def main():
                         spk_embs[idx].unsqueeze(0) if multispeaker else None,
                         # Predicted phonemes-audio alignment encoding
                         p_algn[idx, :, : mel_len // 2].unsqueeze(0),
-                        warmup_coef=1.0,
                     )
 
                     # Write and save val audio

@@ -385,7 +385,7 @@ class AcousticStyleEncoder(nn.Module):
             max_conv_dim=max_conv_dim,
         )
 
-        if learnable_gate:
+        if learnable_gate and mode == "mix":
             # Initialize the gate parameter as a trainable parameter
             # The gate parameter is initialized to a value close to 0.5 (after sigmoid activation)
             # to allow for a balanced mix between the internal style encoder output and
@@ -432,9 +432,14 @@ class AcousticStyleEncoder(nn.Module):
         elif self._mode == "external":
             # External speaker embedding is provided, project it and normalize
             return self.forward_external(spk_emb)
-
-        # Both internal and external style encodings are used => style will be mixed
-        return self.forward_mix(x, spk_emb, warmup_coef)
+        elif self._mode == "concat":
+            # Both internal and external style encodings are used => style will be concatenated
+            return self.forward_concat(x, spk_emb)
+        elif self._mode == "mix":
+            # Both internal and external style encodings are used => style will be mixed
+            return self.forward_mix(x, spk_emb, warmup_coef)
+        else:
+            raise ValueError(f"Unsupported style mixing mode: {self._mode}")
 
     def forward_internal(self, x):
         """
@@ -515,13 +520,31 @@ class AcousticStyleEncoder(nn.Module):
         # style_extern: shape (batch, style_dim)
         # Broadcasting ensures elementwise mixing per style dimension.
 
+    def forward_concat(self, x, spk_emb):
+        """
+        Forward pass for concatenating internal and external style embeddings.
+
+        This method combines internal style embeddings (derived from input features)
+        with external style embeddings (derived from speaker embeddings) by concatenation.
+
+        Args:
+            x (torch.Tensor): Input tensor for internal style embedding computation.
+            spk_emb (torch.Tensor): External speaker embedding tensor.
+
+        Returns:
+            torch.Tensor: Concatenated style embedding tensor with shape (batch, style_dim * 2).
+        """
+        style_intern = self.forward_internal(x)
+        style_extern = self.forward_external(spk_emb)
+        return torch.cat([style_extern, style_intern], dim=1)
+
     @property
     def style_dim(self):
         """
         Returns the style dimension of the encoder.
         This is the output dimension of the style encoder.
         """
-        return self._style_dim
+        return self._style_dim if self._mode != "concat" else self._style_dim * 2
 
     @property
     def mode(self):
@@ -1778,7 +1801,7 @@ class StyleTTS2:
                 dim_in=args.hidden_dim,
                 # TODO: 2x means both acoustic and prosodic styles are computed
                 # (originally only acoustic)
-                style_dim=args.style_dim,
+                style_dim=args.style_dim if args.mode != "concat" else args.style_dim * 2,
                 resblock_kernel_sizes=args.decoder.resblock_kernel_sizes,
                 upsample_rates=args.decoder.upsample_rates,
                 upsample_initial_channel=args.decoder.upsample_initial_channel,
@@ -1792,7 +1815,7 @@ class StyleTTS2:
                 dim_in=args.hidden_dim,
                 # TODO: 2x means both acoustic and prosodic styles are computed
                 # (originally only acoustic)
-                style_dim=args.style_dim,
+                style_dim=args.style_dim if args.mode != "concat" else args.style_dim * 2,
                 resblock_kernel_sizes=args.decoder.resblock_kernel_sizes,
                 upsample_rates=args.decoder.upsample_rates,
                 upsample_initial_channel=args.decoder.upsample_initial_channel,
@@ -1838,14 +1861,14 @@ class StyleTTS2:
         # define diffusion model
         if args.multispeaker:
             transformer = StyleTransformer1d(
-                channels=args.style_dim * 2,
+                channels=args.style_dim * 2 if args.mode != "concat" else args.style_dim * 3,
                 context_embedding_features=bert.config.hidden_size,
                 context_features=args.style_dim * 2,
                 **args.diffusion.transformer,
             )
         else:
             transformer = Transformer1d(
-                channels=args.style_dim * 2,
+                channels=args.style_dim * 2 if args.mode != "concat" else args.style_dim * 3,
                 context_embedding_features=bert.config.hidden_size,
                 **args.diffusion.transformer,
             )
@@ -1856,8 +1879,8 @@ class StyleTTS2:
             embedding_features=bert.config.hidden_size,
             # Conditional dropout of batch elements
             embedding_mask_proba=args.diffusion.embedding_mask_proba,
-            channels=args.style_dim * 2,
-            context_features=args.style_dim * 2,
+            channels=args.style_dim * 2 if args.mode != "concat" else args.style_dim * 3,
+            context_features=args.style_dim * 2 if args.mode != "concat" else args.style_dim * 3,
         )
 
         diffusion.diffusion = KDiffusion(
