@@ -26,9 +26,7 @@ class LogNormalDistribution(Distribution):
         self.mean = mean
         self.std = std
 
-    def __call__(
-        self, num_samples: int, device: torch.device = torch.device("cpu")
-    ) -> Tensor:
+    def __call__(self, num_samples: int, device: torch.device = torch.device("cpu")) -> Tensor:
         normal = self.mean + self.std * torch.randn((num_samples,), device=device)
         return normal.exp()
 
@@ -49,9 +47,7 @@ class VKDistribution(Distribution):
         self.max_value = max_value
         self.sigma_data = sigma_data
 
-    def __call__(
-        self, num_samples: int, device: torch.device = torch.device("cpu")
-    ) -> Tensor:
+    def __call__(self, num_samples: int, device: torch.device = torch.device("cpu")) -> Tensor:
         sigma_data = self.sigma_data
         min_cdf = atan(self.min_value / sigma_data) * 2 / pi
         max_cdf = atan(self.max_value / sigma_data) * 2 / pi
@@ -185,9 +181,9 @@ class KDiffusion(Diffusion):
         sigma_data = self.sigma_data
         c_noise = torch.log(sigmas) * 0.25
         sigmas = rearrange(sigmas, "b -> b 1 1")
-        c_skip = (sigma_data ** 2) / (sigmas ** 2 + sigma_data ** 2)
-        c_out = sigmas * sigma_data * (sigma_data ** 2 + sigmas ** 2) ** -0.5
-        c_in = (sigmas ** 2 + sigma_data ** 2) ** -0.5
+        c_skip = (sigma_data**2) / (sigmas**2 + sigma_data**2)
+        c_out = sigmas * sigma_data * (sigma_data**2 + sigmas**2) ** -0.5
+        c_in = (sigmas**2 + sigma_data**2) ** -0.5
         return c_skip, c_out, c_in, c_noise
 
     def denoise_fn(
@@ -209,7 +205,7 @@ class KDiffusion(Diffusion):
 
     def loss_weight(self, sigmas: Tensor) -> Tensor:
         # Computes weight depending on data distribution
-        return (sigmas ** 2 + self.sigma_data ** 2) * (sigmas * self.sigma_data) ** -2
+        return (sigmas**2 + self.sigma_data**2) * (sigmas * self.sigma_data) ** -2
 
     def forward(self, x: Tensor, noise: Tensor = None, **kwargs) -> Tensor:
         batch_size, device = x.shape[0], x.device
@@ -222,7 +218,7 @@ class KDiffusion(Diffusion):
         # Add noise to input
         noise = default(noise, lambda: torch.randn_like(x))
         x_noisy = x + sigmas_padded * noise
-        
+
         # Compute denoised values
         x_denoised = self.denoise_fn(x_noisy, sigmas=sigmas, **kwargs)
 
@@ -246,9 +242,9 @@ class VKDiffusion(Diffusion):
     def get_scale_weights(self, sigmas: Tensor) -> Tuple[Tensor, ...]:
         sigma_data = 1.0
         sigmas = rearrange(sigmas, "b -> b 1 1")
-        c_skip = (sigma_data ** 2) / (sigmas ** 2 + sigma_data ** 2)
-        c_out = -sigmas * sigma_data * (sigma_data ** 2 + sigmas ** 2) ** -0.5
-        c_in = (sigmas ** 2 + sigma_data ** 2) ** -0.5
+        c_skip = (sigma_data**2) / (sigmas**2 + sigma_data**2)
+        c_out = -sigmas * sigma_data * (sigma_data**2 + sigmas**2) ** -0.5
+        c_in = (sigmas**2 + sigma_data**2) ** -0.5
         return c_skip, c_out, c_in
 
     def sigma_to_t(self, sigmas: Tensor) -> Tensor:
@@ -329,9 +325,8 @@ class KarrasSchedule(Schedule):
         rho_inv = 1.0 / self.rho
         steps = torch.arange(num_steps, device=device, dtype=torch.float32)
         sigmas = (
-            self.sigma_max ** rho_inv
-            + (steps / (num_steps - 1))
-            * (self.sigma_min ** rho_inv - self.sigma_max ** rho_inv)
+            self.sigma_max**rho_inv
+            + (steps / (num_steps - 1)) * (self.sigma_min**rho_inv - self.sigma_max**rho_inv)
         ) ** self.rho
         sigmas = F.pad(sigmas, pad=(0, 1), value=0.0)
         return sigmas
@@ -344,9 +339,7 @@ class Sampler(nn.Module):
 
     diffusion_types: List[Type[Diffusion]] = []
 
-    def forward(
-        self, noise: Tensor, fn: Callable, sigmas: Tensor, num_steps: int
-    ) -> Tensor:
+    def forward(self, noise: Tensor, fn: Callable, sigmas: Tensor, num_steps: int) -> Tensor:
         raise NotImplementedError()
 
     def inpaint(
@@ -371,9 +364,7 @@ class VSampler(Sampler):
         beta = sin(angle)
         return alpha, beta
 
-    def forward(
-        self, noise: Tensor, fn: Callable, sigmas: Tensor, num_steps: int
-    ) -> Tensor:
+    def forward(self, noise: Tensor, fn: Callable, sigmas: Tensor, num_steps: int) -> Tensor:
         x = sigmas[0] * noise
         alpha, beta = self.get_alpha_beta(sigmas[0].item())
 
@@ -417,7 +408,7 @@ class KarrasSampler(Sampler):
         sigma_hat = sigma + gamma * sigma
         # Add noise to move from sigma to sigma_hat
         epsilon = self.s_noise * torch.randn_like(x)
-        x_hat = x + sqrt(sigma_hat ** 2 - sigma ** 2) * epsilon
+        x_hat = x + sqrt(sigma_hat**2 - sigma**2) * epsilon
         # Evaluate ∂x/∂sigma at sigma_hat
         d = (x_hat - fn(x_hat, sigma=sigma_hat)) / sigma_hat
         # Take euler step from sigma_hat to sigma_next
@@ -429,9 +420,7 @@ class KarrasSampler(Sampler):
             x_next = x_hat + 0.5 * (sigma - sigma_hat) * (d + d_prime)
         return x_next
 
-    def forward(
-        self, noise: Tensor, fn: Callable, sigmas: Tensor, num_steps: int
-    ) -> Tensor:
+    def forward(self, noise: Tensor, fn: Callable, sigmas: Tensor, num_steps: int) -> Tensor:
         x = sigmas[0] * noise
         # Compute gammas
         gammas = torch.where(
@@ -453,8 +442,8 @@ class AEulerSampler(Sampler):
     diffusion_types = [KDiffusion, VKDiffusion]
 
     def get_sigmas(self, sigma: float, sigma_next: float) -> Tuple[float, float]:
-        sigma_up = sqrt(sigma_next ** 2 * (sigma ** 2 - sigma_next ** 2) / sigma ** 2)
-        sigma_down = sqrt(sigma_next ** 2 - sigma_up ** 2)
+        sigma_up = sqrt(sigma_next**2 * (sigma**2 - sigma_next**2) / sigma**2)
+        sigma_down = sqrt(sigma_next**2 - sigma_up**2)
         return sigma_up, sigma_down
 
     def step(self, x: Tensor, fn: Callable, sigma: float, sigma_next: float) -> Tensor:
@@ -468,9 +457,7 @@ class AEulerSampler(Sampler):
         x_next = x_next + torch.randn_like(x) * sigma_up
         return x_next
 
-    def forward(
-        self, noise: Tensor, fn: Callable, sigmas: Tensor, num_steps: int
-    ) -> Tensor:
+    def forward(self, noise: Tensor, fn: Callable, sigmas: Tensor, num_steps: int) -> Tensor:
         x = sigmas[0] * noise
         # Denoise to sample
         for i in range(num_steps - 1):
@@ -489,8 +476,8 @@ class ADPM2Sampler(Sampler):
 
     def get_sigmas(self, sigma: float, sigma_next: float) -> Tuple[float, float, float]:
         r = self.rho
-        sigma_up = sqrt(sigma_next ** 2 * (sigma ** 2 - sigma_next ** 2) / sigma ** 2)
-        sigma_down = sqrt(sigma_next ** 2 - sigma_up ** 2)
+        sigma_up = sqrt(sigma_next**2 * (sigma**2 - sigma_next**2) / sigma**2)
+        sigma_down = sqrt(sigma_next**2 - sigma_up**2)
         sigma_mid = ((sigma ** (1 / r) + sigma_down ** (1 / r)) / 2) ** r
         return sigma_up, sigma_down, sigma_mid
 
@@ -509,9 +496,7 @@ class ADPM2Sampler(Sampler):
         x_next = x + torch.randn_like(x) * sigma_up
         return x_next
 
-    def forward(
-        self, noise: Tensor, fn: Callable, sigmas: Tensor, num_steps: int
-    ) -> Tensor:
+    def forward(self, noise: Tensor, fn: Callable, sigmas: Tensor, num_steps: int) -> Tensor:
         x = sigmas[0] * noise
         # Denoise to sample
         for i in range(num_steps - 1):
@@ -570,9 +555,7 @@ class DiffusionSampler(nn.Module):
         message = f"{sampler_class} incompatible with {diffusion_class}"
         assert diffusion.alias in [t.alias for t in sampler.diffusion_types], message
 
-    def forward(
-        self, noise: Tensor, num_steps: Optional[int] = None, **kwargs
-    ) -> Tensor:
+    def forward(self, noise: Tensor, num_steps: Optional[int] = None, **kwargs) -> Tensor:
         device = noise.device
         num_steps = default(num_steps, self.num_steps)  # type: ignore
         assert exists(num_steps), "Parameter `num_steps` must be provided"

@@ -416,13 +416,13 @@ class AcousticStyleEncoder(nn.Module):
                 ),
             )
 
-    def forward(self, x, spk_emb=None, warmup_coef=None):
+    def forward(self, x, spk_emb=None, warmup_coef=1.0):
         """
         Forward pass of the module.
         Args:
             x (torch.Tensor): Internal style embedding.
             spk_emb (torch.Tensor): External speaker embedding.
-            warmup_coef (float): Current warmup coefficient.
+            warmup_coef (float): Current warmup coefficient (1 = no warmup).
         Returns:
             torch.Tensor: The output style tensor.
         """
@@ -542,7 +542,8 @@ class AcousticStyleEncoder(nn.Module):
     def style_dim(self):
         """
         Returns the style dimension of the encoder.
-        This is the output dimension of the style encoder.
+        This is the output dimension of the style encoder
+        (in concat mode sum of internal and external style dimensions).
         """
         return self._style_dim if self._mode != "concat" else self._style_dim * 2
 
@@ -1863,7 +1864,9 @@ class StyleTTS2:
             transformer = StyleTransformer1d(
                 channels=args.style_dim * 2 if args.mode != "concat" else args.style_dim * 3,
                 context_embedding_features=bert.config.hidden_size,
-                context_features=args.style_dim * 2,
+                context_features=(
+                    args.style_dim * 2 if args.mode != "concat" else args.style_dim * 3
+                ),
                 **args.diffusion.transformer,
             )
         else:

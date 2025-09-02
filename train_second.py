@@ -481,7 +481,8 @@ def main():
                     ref_mels_batch = ref_mels.unsqueeze(1)  # Shape: [B, 1, n_mels, max_ref_len]
                     ref_acoust_style = model.acoustic_style_encoder(
                         ref_mels_batch,
-                        ref_spk_embs if multispeaker else None,
+                        spk_emb=ref_spk_embs if multispeaker else None,
+                        warmup_coef=1.0,  # no warmup
                     )
                     ref_pros_style = model.prosodic_style_encoder(ref_mels_batch)
                     ref_style = torch.cat([ref_acoust_style, ref_pros_style], dim=1)
@@ -503,7 +504,8 @@ def main():
                 # )
                 acoust_style[bidx, :] = model.acoustic_style_encoder(
                     mels_ok.unsqueeze(0).unsqueeze(1),
-                    spk_embs[bidx].unsqueeze(0) if multispeaker else None,
+                    spk_emb=spk_embs[bidx].unsqueeze(0) if multispeaker else None,
+                    warmup_coef=1.0,  # no warmup
                 )
             # Set ground truth style for denoiser
             target_style = torch.cat([acoust_style, pros_style], dim=-1).detach()
@@ -665,7 +667,11 @@ def main():
             style_input_mel_batch = style_input_mel.unsqueeze(1)
             # Compute styles for the extracted segments
             pros_style = model.prosodic_style_encoder(style_input_mel_batch)
-            acoust_style = model.acoustic_style_encoder(style_input_mel_batch, spk_emb=spk_embs)
+            acoust_style = model.acoustic_style_encoder(
+                style_input_mel_batch,
+                spk_emb=spk_embs,
+                warmup_coef=1.0,  # no warmup
+            )
 
             with torch.no_grad():
                 # Extract F0 and normalization from the ground truth segment [B, 1, n_mels, mel_len * 2]
@@ -1116,6 +1122,7 @@ def main():
                     acoust_style = model.acoustic_style_encoder(
                         mel_gt.unsqueeze(1),
                         spk_emb=spk_embs,
+                        warmup_coef=1.0,  # no warmup
                     )
 
                     y_rec = model.decoder(ph_algn, f0_fake, n_fake, acoust_style)
@@ -1229,6 +1236,7 @@ def main():
                     ref_acoust_style = model.acoustic_style_encoder(
                         ref_mels_val,
                         spk_emb=ref_spk_embs_val,
+                        warmup_coef=1.0,  # no warmup
                     )
                     # Shape: [ref_mels_val, style_dim]
                     ref_pros_style = model.prosodic_style_encoder(ref_mels_val)

@@ -270,7 +270,8 @@ class PTS:
         Returns:
             tensor: Noise for diffusion.
         """
-        return torch.randn(1, 1, 2 * self.style_dim, device=self.device)
+        # return torch.randn(1, 1, 2 * self.style_dim, device=self.device)
+        return torch.randn(1, 1, self._acoustic_style_dim + self.style_dim, device=self.device)
 
     def _setup_sampler(self):
         """Setup diffusion sampler."""
