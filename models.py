@@ -2065,7 +2065,7 @@ class StyleTTS2:
         # Return saved model's filepath
         return filepath
 
-    def load(self, path, optimizer, load_only_params=True, ignore_modules=None):
+    def load(self, path, optimizer=None, load_only_params=True, ignore_modules=None):
         """
         Load model state from a checkpoint file.
         This method handles inconsistent key names between first and second training stages
@@ -2122,6 +2122,9 @@ class StyleTTS2:
         self.set_mode("eval")
 
         if not load_only_params:
+            if optimizer is None:
+                raise ValueError("optimizer must be provided when load_only_params is False")
+
             # advance start epoch or we'd re-train and rewrite the last epoch file
             epoch = state["epoch"] + 1
             iters = state["iters"]

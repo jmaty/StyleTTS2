@@ -64,13 +64,21 @@ class PTS:
         Note:
             If `use_glob_noise` is True, `fix_noise_in_ph_string` is automatically set to True.
         """
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info("Using device: %s", self.device)
+
         self._model = None
         self._config = None
         self._sampler = None
+
+        # Set up model
+        self.setup_config(config)
+        self.setup_model(model)
+
         self._acoustic_style_dim = (
-            model.acoustic_style_encoder.module.style_dim
-            if hasattr(model.acoustic_style_encoder, "module")
-            else model.acoustic_style_encoder.style_dim
+            self._model.acoustic_style_encoder.module.style_dim
+            if hasattr(self._model.acoustic_style_encoder, "module")
+            else self._model.acoustic_style_encoder.style_dim
         )
 
         self.t = t
@@ -79,13 +87,6 @@ class PTS:
         self.diffusion_steps = diffusion_steps
         self.embedding_scale = embedding_scale
         self.speech_rate = speech_rate
-
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info("Using device: %s", self.device)
-
-        # Set up model
-        self.setup_config(config)
-        self.setup_model(model)
 
         self.text_cleaner = TextCleaner(
             self._config.data_params.symbol_dict_path,
@@ -617,7 +618,7 @@ class PTS:
         # TODO: Change loading wav to torchaudio
         with torch.no_grad():
             logger.debug("Computing style from wav file: %s", wavpath)
-            wav, sr = librosa.load(wavpath, sr=self._config.preprocess_params.sr)
+            wav, sr = librosa.load(wavpath, sr=None)
 
             if top_db is not None:
                 # Trim silence
@@ -625,20 +626,27 @@ class PTS:
                 wav, _ = librosa.effects.trim(wav, top_db=top_db)
             if sr != self._config.preprocess_params.sr:
                 # Resample if necessary
-                logger.debug("Resampling wav from %d to %d", sr, self._config.preprocess_params.sr)
+                logger.warning(
+                    "Resampling wav from %d to %d", sr, self._config.preprocess_params.sr
+                )
                 wav = librosa.resample(wav, sr, self._config.preprocess_params.sr)
 
             wave_tensor = torch.from_numpy(wav).float()
-            mel_tensor = self.audio_processor(wave_tensor).to(self.device)
+            mel = self.audio_processor(wave_tensor).to(self.device)
 
             # Load speaker embedding
-            spk_emb = torch.load(spk_emb_path)
+            spk_emb = torch.load(spk_emb_path).to(self.device)
+
+            # Prepare inputs for style encoders
+            # - simpler indexing instead of unsqueeze-unsqueeze
+            mel_in = mel[None, None]  # (1,1,T,F)
+            spk_in = spk_emb[None]  # (1,C)
 
             # Compute style embedding:
             # style = timbre
-            ref_acoust_style = self.model.acoustic_style_encoder(spk_emb)
+            ref_acoust_style = self.model.acoustic_style_encoder(mel_in, spk_in)
             # style = prosody
-            ref_pros_style = self.model.prosodic_style_encoder(mel_tensor.unsqueeze(1))
+            ref_pros_style = self.model.prosodic_style_encoder(mel_in)
 
         return torch.cat([ref_acoust_style, ref_pros_style], dim=1)
 
