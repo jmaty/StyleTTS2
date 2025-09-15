@@ -461,7 +461,10 @@ def main():
                 )
                 attn_mask = attn_mask < 1  # Convert to boolean tensor
 
-            d_algn.masked_fill_(attn_mask, 0.0)  # Apply attention mask to the attention matrix
+            # d_algn.masked_fill_(attn_mask, 0.0)  # Apply attention mask to the attention matrix
+            d_algn = d_algn.masked_fill(
+                attn_mask, 0.0
+            )  # Apply attention mask to the attention matrix
 
             with torch.no_grad():
                 # Create monotonic attention
@@ -591,11 +594,15 @@ def main():
             with context:
                 # Get speaker embeddings for the style reference segment
                 spk_embs_st = model.speaker_encoder(seg4style)
+            # Preserve target speaker embedding before any possible in-place use
+            spk_embs_tgt = spk_embs_st.detach() if model.multispeaker else None
 
             # Only (acoustic) style encoder is trained within 1st stage training
             style = model.acoustic_style_encoder(
                 mel4style,
-                spk_emb=spk_embs_st if model.multispeaker else None,
+                # spk_emb=spk_embs_st if model.multispeaker else None,
+                # Pass a clone to avoid potential in-place modifications affecting SCL target
+                spk_emb=spk_embs_st.clone() if model.multispeaker else None,
                 warmup_coef=warmup_coef,
             )
 
@@ -661,7 +668,8 @@ def main():
 
                 # Speaker Consistency Loss (SCL)
                 # target = embeddings from style reference (detach to avoid gradients)
-                spk_embs_tgt = spk_embs_st.detach()
+                # target prepared earlier (detached)
+                # spk_embs_tgt = spk_embs_st.detach()
                 # reconstructed = embeddings from the reconstructed audio
                 # (leave gradients for decoder update)
                 seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
@@ -836,7 +844,9 @@ def main():
                         .float()
                     )
                     attn_mask = attn_mask < 1
-                    d_algn.masked_fill_(attn_mask, 0.0)
+                    # d_algn.masked_fill_(attn_mask, 0.0)
+                    # Out-of-place to avoid autograd version bumps issues
+                    d_algn = d_algn.masked_fill(attn_mask, 0.0)
 
                 # Encode phonemes
                 h_ph = model.text_encoder(phonemes, ph_inp_lens, ph_mask)
