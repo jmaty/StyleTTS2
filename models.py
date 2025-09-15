@@ -1,5 +1,6 @@
 # coding:utf-8
 
+import logging
 import copy
 import math
 import os
@@ -13,7 +14,7 @@ from munch import Munch, munchify
 from torch.nn.utils import spectral_norm, weight_norm
 from xlstm import mLSTMBlockConfig, mLSTMLayerConfig, xLSTMBlockStack, xLSTMBlockStackConfig
 
-from logger import get_logger
+# from logger import get_logger
 from Modules.diffusion.diffusion import AudioDiffusionConditional
 from Modules.diffusion.modules import StyleTransformer1d, Transformer1d
 from Modules.diffusion.sampler import KDiffusion, LogNormalDistribution
@@ -26,9 +27,21 @@ from Modules.hifigan import Decoder as HifiDecoder
 from Modules.istftnet import Decoder as ISTFTDecoder
 from Utils.ASR.models import ASRCNN
 from Utils.JDC.model import JDCNet
+from Utils.speaker_encoder.models import HASPSpeakerEncoder
 
 # Setup logger
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+if not logger.handlers:  # ensure handler only once
+    _h = logging.StreamHandler()
+    _h.setLevel(logging.INFO)
+    # _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    _h.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(_h)
+    logger.propagate = False
+
+# # Setup logger
+# logger = get_logger(__name__)
 
 
 class LearnedDownSample(nn.Module):
@@ -364,6 +377,10 @@ class AcousticStyleEncoder(nn.Module):
                 If False, it is a fixed value `mix_weight`. Defaults to True.
         """
         super().__init__()
+        logger.debug("Initializing AcousticStyleEncoder...")
+        logger.debug("Style mixing mode: %s", mode)
+        logger.debug("Projecting speaker embedding from %d to %d", spk_emb_dim, style_dim)
+
         self._learnable_gate = learnable_gate
         self._mode = mode
         self._style_dim = style_dim
@@ -1554,6 +1571,43 @@ def load_ASR_models(ASR_MODEL_PATH, ASR_MODEL_CONFIG):
     return asr_model
 
 
+def load_spkenc_model(model_path, freeze=False):
+    """
+    Load a speaker encoder model from a specified path.
+    This function initializes the speaker encoder model with the given configuration,
+    loads the state dictionary from the checkpoint, and sets the model to training mode.
+    Parameters
+    ----------
+    model_path : str
+        The file path to the saved speaker encoder model checkpoint.
+    Returns
+    -------
+    spkenc_model : SpeakerEncoder
+        The loaded speaker encoder model instance ready for use.
+    """
+    logger.info("Loading speaker encoder model from %s", model_path)
+
+    # Set up speaker encoder parameters as they were used for training
+    model_params = {"input_dim": 64, "proj_dim": 512}
+    audio_config = {
+        "fft_size": 512,
+        "win_length": 400,
+        "hop_length": 160,
+        "sample_rate": 16000,
+        "preemphasis": 0.97,
+        "num_mels": 64,
+    }
+
+    model = HASPSpeakerEncoder(**model_params, audio_config=audio_config)
+    model.load_checkpoint(checkpoint_path=model_path)
+
+    if freeze:
+        for param in model.parameters():
+            param.requires_grad = False
+
+    return model
+
+
 # def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_modules=None):
 #     """
 #     Load model and optimizer states from a checkpoint file.
@@ -1643,7 +1697,7 @@ class StyleTTS2:
         A Munch object containing all model components.
     """
 
-    def __init__(self, args, text_aligner, pitch_extractor, bert):
+    def __init__(self, args, text_aligner, pitch_extractor, bert, speaker_encoder):
         """
         Initializes the StyleTTS2 model with the provided arguments and components.
         This constructor sets up the model parameters and builds the model components.
@@ -1654,9 +1708,10 @@ class StyleTTS2:
             pitch_extractor (nn.Module): Module that extracts pitch information from audio.
             bert (nn.Module): Pre-trained BERT model for extracting contextual text embeddings.
         """
+        logger.debug("Initializing StyleTTS2 model...")
         self._model = Munch()
         self._params = args
-        self._build(args, text_aligner, pitch_extractor, bert)
+        self._build(args, text_aligner, pitch_extractor, bert, speaker_encoder)
 
     @property
     def model(self):
@@ -1668,7 +1723,7 @@ class StyleTTS2:
 
     @property
     def mix_mode(self):
-        return self._params.mode
+        return self._params.style_mix.mode
 
     @property
     def slm(self):
@@ -1741,7 +1796,7 @@ class StyleTTS2:
         """
         return key in self._model
 
-    def _build(self, args, text_aligner, pitch_extractor, bert):
+    def _build(self, args, text_aligner, pitch_extractor, bert, speaker_encoder):
         """
         Builds the StyleTTS2 model components.
         This function constructs and configures all neural network components required for the
@@ -1777,6 +1832,8 @@ class StyleTTS2:
             Module that extracts pitch information from audio
         bert : nn.Module
             Pre-trained BERT model for extracting contextual text embeddings
+        speaker_encoder : nn.Module
+            Pre-trained speaker encoder model for extracting speaker embeddings
         Returns
         -------
         nets : Munch
@@ -1795,6 +1852,7 @@ class StyleTTS2:
             - msd: Multi-Resolution Spectrogram Discriminator
             - wd: Waveform Discriminator for SLM
         """
+        logger.debug("Building StyleTTS2 model: %s", args)
         assert args.decoder.type in ["istftnet", "hifigan"], "Decoder type unknown"
 
         if args.decoder.type == "istftnet":
@@ -1802,7 +1860,7 @@ class StyleTTS2:
                 dim_in=args.hidden_dim,
                 # TODO: 2x means both acoustic and prosodic styles are computed
                 # (originally only acoustic)
-                style_dim=args.style_dim if args.mode != "concat" else args.style_dim * 2,
+                style_dim=args.style_dim if args.style_mix.mode != "concat" else args.style_dim * 2,
                 resblock_kernel_sizes=args.decoder.resblock_kernel_sizes,
                 upsample_rates=args.decoder.upsample_rates,
                 upsample_initial_channel=args.decoder.upsample_initial_channel,
@@ -1816,7 +1874,7 @@ class StyleTTS2:
                 dim_in=args.hidden_dim,
                 # TODO: 2x means both acoustic and prosodic styles are computed
                 # (originally only acoustic)
-                style_dim=args.style_dim if args.mode != "concat" else args.style_dim * 2,
+                style_dim=args.style_dim if args.style_mix.mode != "concat" else args.style_dim * 2,
                 resblock_kernel_sizes=args.decoder.resblock_kernel_sizes,
                 upsample_rates=args.decoder.upsample_rates,
                 upsample_initial_channel=args.decoder.upsample_initial_channel,
@@ -1842,14 +1900,14 @@ class StyleTTS2:
         # Acoustic style encoder
         acoustic_style_encoder = AcousticStyleEncoder(
             dim_in=args.dim_in,
-            spk_emb_dim=args.spk_emb_dim,
+            spk_emb_dim=args.spkenc_params.dim_in,
             style_dim=args.style_dim,
             max_conv_dim=args.max_conv_dim,
             # Initial external/internal speaker embedding fusion weight
-            mix_weight=args.mix_weight,
-            learnable_gate=args.learnable_gate,
-            mode=args.mode,
-            warmup_mode=args.warmup_mode,
+            mix_weight=args.style_mix.weight,
+            learnable_gate=args.style_mix.learnable_gate,
+            mode=args.style_mix.mode,
+            warmup_mode=args.style_mix.warmup_mode,
         )
 
         # Prosodic style encoder
@@ -1862,16 +1920,20 @@ class StyleTTS2:
         # define diffusion model
         if args.multispeaker:
             transformer = StyleTransformer1d(
-                channels=args.style_dim * 2 if args.mode != "concat" else args.style_dim * 3,
+                channels=(
+                    args.style_dim * 2 if args.style_mix.mode != "concat" else args.style_dim * 3
+                ),
                 context_embedding_features=bert.config.hidden_size,
                 context_features=(
-                    args.style_dim * 2 if args.mode != "concat" else args.style_dim * 3
+                    args.style_dim * 2 if args.style_mix.mode != "concat" else args.style_dim * 3
                 ),
                 **args.diffusion.transformer,
             )
         else:
             transformer = Transformer1d(
-                channels=args.style_dim * 2 if args.mode != "concat" else args.style_dim * 3,
+                channels=(
+                    args.style_dim * 2 if args.style_mix.mode != "concat" else args.style_dim * 3
+                ),
                 context_embedding_features=bert.config.hidden_size,
                 **args.diffusion.transformer,
             )
@@ -1882,8 +1944,10 @@ class StyleTTS2:
             embedding_features=bert.config.hidden_size,
             # Conditional dropout of batch elements
             embedding_mask_proba=args.diffusion.embedding_mask_proba,
-            channels=args.style_dim * 2 if args.mode != "concat" else args.style_dim * 3,
-            context_features=args.style_dim * 2 if args.mode != "concat" else args.style_dim * 3,
+            channels=args.style_dim * 2 if args.style_mix.mode != "concat" else args.style_dim * 3,
+            context_features=(
+                args.style_dim * 2 if args.style_mix.mode != "concat" else args.style_dim * 3
+            ),
         )
 
         diffusion.diffusion = KDiffusion(
@@ -1910,6 +1974,7 @@ class StyleTTS2:
                 "diffusion": diffusion,
                 "text_aligner": text_aligner,
                 "pitch_extractor": pitch_extractor,
+                "speaker_encoder": speaker_encoder,
                 "mpd": MultiPeriodDiscriminator(),
                 "msd": MultiResSpecDiscriminator(),
                 # slm discriminator head

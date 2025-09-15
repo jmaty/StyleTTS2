@@ -10,13 +10,61 @@ import torch
 import torchaudio
 from torch.utils.data import DataLoader, Sampler
 
-from logger import get_logger
+# from logger import get_logger
 
 # Setup logger
-logger = get_logger(__name__)
+# logger = get_logger(__name__)
+import logging
 
-np.random.seed(1)
-random.seed(1)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+if not logger.handlers:  # ensure handler only once
+    _h = logging.StreamHandler()
+    _h.setLevel(logging.INFO)
+    # _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    _h.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(_h)
+    logger.propagate = False
+
+np.random.seed(3407)
+random.seed(3407)
+
+
+def seconds2mel_length(seconds, sample_rate=24000, hop_length=300):
+    """Converts seconds to the number of mel frames.
+    Args:
+        seconds (float): Duration in seconds.
+        sample_rate (int): Sample rate of the audio. Defaults to 24000.
+        hop_length (int): Hop length for STFT. Defaults to 300.
+    Returns:
+        int: Number of mel frames corresponding to the given duration.
+    """
+    # Calculate the number of mel frames: samples / hop_length
+    return int(seconds * sample_rate / hop_length)
+
+
+def samples2mel_length(samples, hop_length):
+    """Converts number of samples to the number of mel frames.
+    Args:
+        samples (int): Number of audio samples.
+        hop_length (int): Hop length for STFT. Defaults to 300.
+    Returns:
+        int: Number of mel frames corresponding to the given number of samples.
+    """
+    # Calculate the number of mel frames: samples / hop_length
+    return int(samples / hop_length)
+
+
+def mel2samples_length(mel_frames, hop_length):
+    """Converts number of mel frames to the number of samples.
+    Args:
+        mel_frames (int): Number of mel frames.
+        hop_length (int): Hop length for STFT. Defaults to 300.
+    Returns:
+        int: Number of audio samples corresponding to the given number of mel frames.
+    """
+    # Calculate the number of samples: mel_frames * hop_length
+    return int(mel_frames * hop_length - 1)
 
 
 class AudioProcessor:
@@ -143,11 +191,6 @@ class FilePathDataset(torch.utils.data.Dataset):
         ood_data=None,
         **kwargs,
     ):
-        self.data_augmentation = data_augmentation and (not validation)  # not used
-        self.max_ref_mel_length = 192  # Corresponds to 2.4 seconds of audio at 24000 Hz
-        self.root_path = root_path  # Set up path to waveform directory
-        self.ptexts = []  # Initialize list of OOD texts
-
         # Get parameters from kwargs (config)
         self.sr = kwargs.get("sr", 24000)
         self.min_length = kwargs.get("min_length", 50)
@@ -162,6 +205,14 @@ class FilePathDataset(torch.utils.data.Dataset):
         self.mean = kwargs.get("mean", -4)
         self.std = kwargs.get("std", 4)
         self.use_ref_sample = kwargs.get("use_ref_sample", True)
+        # 2.4s at 24000 Hz (192 mel frames * 300 hop length - 1)
+        self.max_ref_wave_length = mel2samples_length(
+            kwargs.get("max_ref_mel_length", 192), self.spect_params["hop_length"]
+        )
+
+        self.data_augmentation = data_augmentation and (not validation)  # not used
+        self.root_path = root_path  # Set up path to waveform directory
+        self.ptexts = []  # Initialize list of OOD texts
 
         logger.info("%s dataset config: %s", "validation" if validation else "training", kwargs)
 
@@ -281,11 +332,16 @@ class FilePathDataset(torch.utils.data.Dataset):
             Warning: Logs a warning if resampling is performed.
         """
         wave_path, ph_string, speaker_id = data
+        speaker_id = int(speaker_id)  # Ensure speaker_id is an integer
+
         # Load waveform directly into a tensor
         wave, sr = torchaudio.load(osp.join(self.root_path, wave_path))
         # Handle stereo audio by taking the first channel
         if wave.shape[0] > 1:
             wave = wave[0, :].unsqueeze(0)  # Keep it as a 2D tensor [1, n_samples]
+
+        logger.debug("| > id: %d: | wav=%s | ph=%s", speaker_id, wave.shape, ph_string)
+
         # Resample if necessary
         if sr != self.sr:
             resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=self.sr)
@@ -297,10 +353,12 @@ class FilePathDataset(torch.utils.data.Dataset):
         silence_end_tensor = torch.zeros((1, self.silence_end), dtype=wave.dtype)
         wave = torch.cat([silence_beg_tensor, wave, silence_end_tensor], dim=1)
 
+        logger.debug("| > silence padding: wav=%s", wave.shape)
+
         return (
             wave.squeeze(0),  # raw waveform as 1D tensor
             torch.LongTensor(self.text_cleaner(ph_string, pad=True)),  # phone IDs with padding
-            int(speaker_id),  # speaker ID
+            speaker_id,  # speaker ID
         )
 
     def _load_speaker_embedding(self, spk_emb_path):
@@ -313,39 +371,45 @@ class FilePathDataset(torch.utils.data.Dataset):
         return torch.load(osp.join(self.root_path, spk_emb_path))
 
     def _load_ref_data(self, data):
-        """Takes a tuple containing the relative path to a waveform file,
-        a string of phonemes, and a speaker ID. It loads the waveform, processes
-        it into a mel spectrogram, and crops it to a maximum length if necessary.
+        """
+        Load and process reference audio data for style transfer.
+
+        This method loads reference audio waveform data, processes it into mel-spectrogram
+        features, and resamples the audio to the target sample rate. If the audio is longer
+        than the maximum allowed reference length, it randomly crops a segment.
+
         Args:
-            data (tuple): A tuple containing:
-                - wave_path (str): Relative path to the waveform file.
-                - ph_string (str): String representation of phonemes.
-                - speaker_id (str or int): The speaker identifier.
+            data: Input data containing audio file information or path
+
         Returns:
             tuple: A tuple containing:
-                - mel_tensor (torch.Tensor): The processed mel spectrogram.
-                - speaker_id (int): The integer speaker identifier.
+                - wave_tensor_resampled (torch.Tensor): Resampled audio waveform tensor
+                - mel_tensor (torch.Tensor): Mel-spectrogram features with shape [n_mels, n_frames]
+                - speaker_id: Speaker identification information
+
         Note:
             - Audio longer than max_ref_wave_length is randomly cropped
             - Mel-spectrogram is computed using the configured audio processor
+            - Audio is resampled to match the target sample rate
         """
         # Loads the reference audio waveform
-        wave_path = data[0]
-        wave, _, speaker_id = self._load_tensor(data)
+        wave_tensor, _, speaker_id = self._load_tensor(data)
+        logger.debug("| > Ref: %s |shape=%s", data[0], wave_tensor.shape)
+        wave_len = wave_tensor.size(0)
+        if wave_len > self.max_ref_wave_length:
+            # Randomly crop a wave segment with length self.max_ref_wave_length
+            random_start = np.random.randint(0, wave_len - self.max_ref_wave_length)
+            wave_tensor = wave_tensor[random_start : random_start + self.max_ref_wave_length]
+
         # Process audio
-        mel_tensor = self.audio_processor(wave)  # Output: [n_mels, n_frames]
+        # Output: [n_mels, n_frames]
+        mel_tensor = self.audio_processor(wave_tensor)
+        logger.debug("| > Cropping: wav=%s, mel=%s", wave_tensor.shape, mel_tensor.shape)
 
-        mel_length = mel_tensor.size(1)
-        if mel_length > self.max_ref_mel_length:
-            # Randomly crop a segment of the mel spectrogram with length self.max_ref_mel_length
-            random_start = np.random.randint(0, mel_length - self.max_ref_mel_length)
-            mel_tensor = mel_tensor[:, random_start : random_start + self.max_ref_mel_length]
+        # # Resample to target sample rate
+        # wave_tensor_resampled = self.resampler(wave_tensor.unsqueeze(0)).squeeze(0)
 
-        # Load speaker embedding (data[0] is the path to the waveform)
-        spk_emb_path = wave_path.replace("/wavs/", "/hasp/").replace(".wav", ".pt")
-        spk_emb = self._load_speaker_embedding(spk_emb_path)
-
-        return mel_tensor, spk_emb, speaker_id
+        return wave_tensor, mel_tensor, speaker_id
 
     def __getitem__(self, idx):
         """
@@ -378,15 +442,15 @@ class FilePathDataset(torch.utils.data.Dataset):
         """
         data = self.data_list[idx]  # [wavfile, phone IDs, speaker_id]
 
+        logger.debug("> %s (%d):", data[0], idx)
+
         # Load the waveform, phonetic string, and speaker ID
         wave, text_tensor, speaker_id = self._load_tensor(data)
 
-        # Load speaker embedding (data[0] is the path to the waveform)
-        spk_emb_path = data[0].replace("/wavs/", "/hasp/").replace(".wav", ".pt")
-        spk_emb = self._load_speaker_embedding(spk_emb_path)
-
         # Process audio: output [n_mels, n_frames]
         mel_normalized = self.audio_processor(wave)
+
+        logger.debug("| > mel=%s", mel_normalized.shape)
 
         # acoustic_feature = mel_tensor.squeeze()
         acoustic_feature = mel_normalized
@@ -398,10 +462,10 @@ class FilePathDataset(torch.utils.data.Dataset):
         if self.use_ref_sample:
             ref_data = (self.df[self.df[2] == str(speaker_id)]).sample(n=1).iloc[0].tolist()
             # ref_label is speaker ID
-            ref_mel_tensor, ref_spk_emb, ref_label = self._load_ref_data(ref_data[:3])
+            ref_wave_tensor, ref_mel_tensor, ref_label = self._load_ref_data(ref_data[:3])
         else:
+            ref_wave_tensor = torch.tensor([], dtype=torch.float)  # Empty tensor
             ref_mel_tensor = torch.tensor([])  # Empty tensor
-            ref_spk_emb = torch.tensor([])  # Empty tensor
             ref_label = 0
 
         # Randomly select a phonetic sentence from the OOD texts if available
@@ -418,12 +482,11 @@ class FilePathDataset(torch.utils.data.Dataset):
             acoustic_feature,  # mel spectrogram of input waveform
             text_tensor,  # phoneme IDs of input text
             ref_ph_ids,  # phone IDs of OOD text with padding or empty tensor
+            ref_wave_tensor,  # reference waveform tensor of the given speaker
             ref_mel_tensor,  # reference mel vector of the given speaker
-            ref_spk_emb,  # reference speaker embedding tensor
             ref_label,  # reference speaker ID
             data[0],  # wavfile path
             wave,  # raw waveform tensor
-            spk_emb,  # speaker embedding tensor
         )
 
 
@@ -446,48 +509,60 @@ class Collater(object):
         data samples.
     """
 
-    def __init__(self, return_wave=False):
-        self.text_pad_index = 0
-        self.max_ref_mel_length = 192
+    def __init__(self, return_wave=False, **kwargs):
         self.return_wave = return_wave
+
+        # Processing parameters from kwargs (config)
+        self.sr = kwargs.get("sr", 24000)
+        self.hop_length = kwargs.get("hop_length", 300)
+        self.max_ref_mel_length = kwargs.get("max_ref_mel_length", 192)
+        self.max_ref_wave_length = mel2samples_length(self.max_ref_mel_length, self.hop_length)
+
+        logger.info("collate config: %s", kwargs)
 
     def __call__(self, batch):
         """
-        Collate function for batching mel dataset items.
-        Sorts batch by mel spectrogram length (descending) and pads all tensors to
-        uniform dimensions within the batch for efficient processing.
+        Collate function for batching dataset samples with padding and sorting.
+
+        This method processes a batch of samples by sorting them by acoustic feature length
+        (descending order) and padding all sequences to match the maximum length within
+        the batch. It handles multiple types of data including mel spectrograms, text
+        phoneme IDs, reference audio, and raw waveforms.
+
         Args:
-            batch (list): List of tuples from dataset __getitem__, where each tuple contains:
-            - [0] speaker_id (int): Speaker identifier (not used in output)
-            - [1] mel (torch.Tensor): Mel spectrogram [n_mels, T_mel]
-            - [2] text (torch.Tensor): Input phoneme IDs [T_text]
-            - [3] ref_text (torch.Tensor): Reference/OOD text phoneme IDs [T_ref_text]
-            - [4] ref_mel (torch.Tensor): Reference mel spectrogram [n_mels, T_ref_mel]
-            - [5] ref_spk_emb (torch.Tensor): Reference speaker embedding [spk_emb_dim]
-            - [6] ref_label (int): Reference speaker ID (not used)
-            - [7] path (str): Wave file path (not used)
-            - [8] wave (torch.Tensor): Raw waveform tensor
-            - [9] spk_emb (torch.Tensor): Speaker embedding [spk_emb_dim]
+            batch (list): List of tuples, where each tuple contains:
+                - [0] label (int): Speaker ID
+                - [1] mel (torch.Tensor): Acoustic features/mel spectrogram [n_mels, T_mel]
+                - [2] text (torch.Tensor): Input phoneme IDs [T_text]
+                - [3] ref_text (torch.Tensor): Reference/OOD text phoneme IDs [T_ref_text]
+                - [4] ref_wave (torch.Tensor): Reference waveform [1, T_ref_wave]
+                - [5] ref_mel (torch.Tensor): Reference mel spectrogram [n_mels, T_ref_mel]
+                - [6] ref_label (int): Reference speaker ID (unused)
+                - [7] wavfile_path (str): Path to wave file (unused)
+                - [8] wave (torch.Tensor): Raw waveform tensor [T_samples]
+
         Returns:
-            tuple: Collated batch containing:
-            - [0] waves (list): Raw waveform tensors (unpadded list)
-            - [1] spk_embs (torch.Tensor): Speaker embeddings [B, spk_emb_dim]
-            - [2] phonemes (torch.Tensor): Padded input phoneme IDs [B, max_text_length]
-            - [3] input_lengths (torch.Tensor): Input phoneme sequence lengths [B]
-            - [4] ref_phonemes (torch.Tensor): Padded reference phoneme IDs [B, max_rtext_length]
-            - [5] ref_lengths (torch.Tensor): Reference phoneme sequence lengths [B]
-            - [6] mels (torch.Tensor): Padded mel spectrograms [B, n_mels, max_mel_length]
-            - [7] output_lengths (torch.Tensor): Mel spectrogram lengths [B]
-            - [8] ref_mels (torch.Tensor): Padded reference mel spectrograms [B, n_mels, max_ref_mel_length]
-            - [9] ref_spk_embs (torch.Tensor): Reference speaker embeddings [B, spk_emb_dim]
+            tuple: A tuple containing:
+                - waves (list): List of raw waveform tensors, length B
+                - texts (torch.Tensor): Padded input phoneme IDs [B, max_text_length]
+                - input_lengths (torch.Tensor): Actual lengths of input texts [B]
+                - ref_texts (torch.Tensor): Padded reference phoneme IDs [B, max_rtext_length]
+                - ref_lengths (torch.Tensor): Actual lengths of reference texts [B]
+                - mels (torch.Tensor): Padded mel spectrograms [B, n_mels, max_mel_length]
+                - output_lengths (torch.Tensor): Actual lengths of mel spectrograms [B]
+                - ref_waves (torch.Tensor): Padded reference waveforms [B, 1, max_ref_wave_length]
+                                           or empty tensor if no valid reference waves
+                - ref_mels (torch.Tensor): Padded reference mel spectrograms [B, n_mels, max_mel_length]
+                                          or empty tensor if no valid reference mels
+
         Note:
-            - Batch is sorted by mel spectrogram length in descending order
-            - Reference mel tensors are only created if at least one item has valid reference mel
-            - All tensors except waves are zero-padded to maximum length in batch
-            - Uses self.max_ref_mel_length for reference mel padding (from config)
+            - Batch is sorted by mel spectrogram length in descending order for efficient training
+            - Reference waves and mels are conditionally initialized based on availability
+            - Raw waves are kept as a list to manage memory constraints
+            - Padding is applied to ensure all sequences in batch have uniform dimensions
         """
-        # batch[0] = wave, mel, text, f0, speakerid
-        batch_size = len(batch)
+
+        bsize = len(batch)  # Number of samples in the batch
 
         # Sort batch by acoustic feature (mel) length (descending)
         # b[1] is acoustic_feature from __getitem__
@@ -498,45 +573,47 @@ class Collater(object):
         # Determine max lengths for padding within this batch
         nmels = batch[0][1].size(0)
         # Max length of acoustic_feature in this batch
-        max_mel_length = max([b[1].shape[1] for b in batch])
+        max_mel_length = max(b[1].shape[1] for b in batch)
         # b[2] is text_tensor
-        max_text_length = max([b[2].shape[0] for b in batch])
+        max_text_length = max(b[2].shape[0] for b in batch)
         # b[3] is ref_ph_ids (OOD text)
-        max_rtext_length = max([b[3].shape[0] for b in batch])
-        spk_emb_dim = batch[0][9].size(0)  # Assuming speaker embedding is 1D
+        max_rtext_length = max(b[3].shape[0] for b in batch)
 
-        # Check if batch has valid reference mel tensors
-        # b[4] is ref_mel_tensor from __getitem__
-        has_valid_ref_sample = batch[0][4].numel() != 0 and batch[0][5].numel() != 0
+        # # Check if batch has valid reference mel tensors
+        # # b[5] is ref_mel_tensor from __getitem__
+        # has_valid_ref_mel = batch[0][5].numel() != 0
 
         # Initialize padded tensors
         # b[0] is speaker_id (integer)
-        # labels = torch.zeros((batch_size)).long()
+        labels = torch.zeros((bsize)).long()
         # b[1] is acoustic_feature (mel spectrogram)
-        mels = torch.zeros((batch_size, nmels, max_mel_length)).float()
+        mels = torch.zeros((bsize, nmels, max_mel_length)).float()
         # b[2] is text_tensor (input phoneme IDs)
-        phonemes = torch.zeros((batch_size, max_text_length)).long()
+        texts = torch.zeros((bsize, max_text_length)).long()
         # b[3] is ref_ph_ids (OOD text phoneme IDs)
-        ref_phonemes = torch.zeros((batch_size, max_rtext_length)).long()
+        ref_texts = torch.zeros((bsize, max_rtext_length)).long()
 
-        input_lengths = torch.zeros(batch_size).long()
-        ref_lengths = torch.zeros(batch_size).long()
-        output_lengths = torch.zeros(batch_size).long()
+        input_lengths = torch.zeros(bsize).long()
+        ref_lengths = torch.zeros(bsize).long()
+        output_lengths = torch.zeros(bsize).long()
 
-        # Initialize ref_mels conditionally
-        # b[4] is ref_mel_tensor, use self.max_ref_mel_length (fixed size from config)
-        ref_mels = (
-            torch.zeros((batch_size, nmels, self.max_ref_mel_length)).float()
-            if has_valid_ref_sample
-            else torch.tensor([])  # Return empty tensor if no item has ref_mel
+        # Initialize ref wave tensors conditionally
+        # b[4] is ref_wave_tensor, use `self.max_ref_wave_length` (fixed length)
+        # Check if batch has valid reference mel tensors
+        # b[4] is ref_wave_tensor from __getitem__
+        has_valid_ref_wave = batch[0][4].numel() != 0
+        ref_waves = (
+            torch.zeros((bsize, 1, self.max_ref_wave_length)).float()
+            if has_valid_ref_wave
+            else torch.tensor([], dtype=torch.float)  # Return None if no item has ref_wave
         )
 
-        # Initialize ref_spk_embs conditionally
-        # b[5] is speaker embedding
-        ref_spk_embs = (
-            torch.zeros((batch_size, spk_emb_dim)).float()
-            if has_valid_ref_sample
-            else torch.tensor([])
+        # Initialize ref_mels conditionally
+        # b[5] is ref_mel_tensor, use `self.max_mel_length`
+        ref_mels = (
+            torch.zeros((bsize, nmels, self.max_ref_mel_length)).float()
+            if has_valid_ref_wave
+            else torch.tensor([], dtype=torch.float)  # Return None if no item has ref_mel
         )
 
         # b[6] is ref_label (reference speaker ID) - not used
@@ -547,59 +624,54 @@ class Collater(object):
 
         # b[8] is raw wave tensor
         # Due to memory constraints, it is better to keep it as a list
-        waves = [None for _ in range(batch_size)]
+        waves = [None for _ in range(bsize)]
 
-        # b[9] is speaker embedding
-        spk_embs = torch.zeros((batch_size, spk_emb_dim)).float()
-
-        # Rearrange batch data according to mel length
-        for bid, (
-            _,  # speaker_id label not used
-            mel,
-            text,
-            ref_text,
-            ref_mel,
-            ref_spk_emb,
-            _,
-            _,
-            wave,
-            spk_emb,
-        ) in enumerate(batch):
+        # Re-arrange batch data according to mel length
+        for bid, (label, mel, text, ref_text, ref_wave, ref_mel, _, _, wave) in enumerate(batch):
             mel_size = mel.size(1)  # Get sizes of current item
             text_size = text.size(0)
             rtext_size = ref_text.size(0)
+            ref_wave_size = ref_wave.size(0) if has_valid_ref_wave else 0
+            ref_mel_size = ref_mel.size(1) if has_valid_ref_wave else 0
 
             # Fill tensors
-            # labels[bid] = label
+            labels[bid] = label
             mels[bid, :, :mel_size] = mel
-            phonemes[bid, :text_size] = text
-            ref_phonemes[bid, :rtext_size] = ref_text
+            texts[bid, :text_size] = text
+            ref_texts[bid, :rtext_size] = ref_text
             input_lengths[bid] = text_size
             ref_lengths[bid] = rtext_size
             output_lengths[bid] = mel_size
-            # paths[bid] = path
 
-            # Only assign if reference samples are provided
-            # Otherwise, reference tensors remain empty (as initialized)
-            if has_valid_ref_sample > 0:
-                ref_mels[bid, :, : ref_mel.size(1)] = ref_mel
-                ref_spk_embs[bid, : ref_spk_emb.size(0)] = ref_spk_emb
+            # Only assign if ref_wave is not None and size > 0
+            # Otherwise, it remains empty (as initialized)
+            if ref_wave_size > 0:
+                # Ensure we don't try to assign beyond the bounds of ref_waves
+                ref_waves[bid, :, :ref_wave_size] = ref_wave
+
+            # Only assign if ref_mel is not None and size > 0
+            if ref_mel_size > 0:
+                # Ensure we don't try to assign beyond the bounds of ref_mels
+                ref_mels[bid, :, :ref_mel_size] = ref_mel
+            # If ref_mel_size is 0, ref_mels[bid] remains empty (as initialized)
 
             # ref_labels[bid] = ref_label  # not used anymore
             waves[bid] = wave
-            spk_embs[bid, :spk_emb_dim] = spk_emb
+            # spkenc_segment_begs[bid] = self._get_segment_start_for_speaker_encoder(
+            #     wave,
+            #     spkenc_segment_len,
+            # )
 
         return (
-            waves,  # List of raw waveform tensors (or None)
-            spk_embs,  # Speaker embedding tensors [B, spk_emb_dim]
-            phonemes,  # Padded input phoneme IDs [B, T_text]
+            waves,  # List of raw waveform tensors [T_samples] (or None)
+            texts,  # Padded input phoneme IDs [B, T_text]
             input_lengths,  # Input phoneme lengths [B]
-            ref_phonemes,  # Padded OOD text phoneme IDs [B, T_ref_text]
+            ref_texts,  # Padded OOD text phoneme IDs [B, T_ref_text]
             ref_lengths,  # OOD texts phoneme lengths [B]
             mels,  # Padded mel spectrograms [B, n_mels, T_mel]
             output_lengths,  # Mel spectrogram lengths [B]
+            ref_waves,  # Padded reference waveforms [B, 1, max_ref_wave_length]
             ref_mels,  # Padded reference mel spectrograms [B, n_mels, max_mel_length]
-            ref_spk_embs,  # Reference speaker embedding tensors [B, spk_emb_dim]
         )
 
 
@@ -646,7 +718,7 @@ class BalancedSpeakerSampler(Sampler):
         dataset,
         batch_size,
         drop_last,
-        seed=42,
+        seed=3407,
         rank=0,
         world_size=1,
     ):
@@ -842,6 +914,14 @@ def build_dataloader(
     """
     collate_config = collate_config or {}
     dataset_config = dataset_config or {}
+
+    # Propagate selected params from dataset_config to collate_config if missing
+    if "sr" not in collate_config and "sr" in dataset_config:
+        collate_config["sr"] = dataset_config["sr"]
+    if "hop_length" not in collate_config and "hop_length" in dataset_config["spect_params"]:
+        collate_config["hop_length"] = dataset_config["spect_params"]["hop_length"]
+    if "max_ref_mel_length" not in collate_config and "max_ref_mel_length" in dataset_config:
+        collate_config["max_ref_mel_length"] = dataset_config["max_ref_mel_length"]
 
     dataset = FilePathDataset(
         path_list,

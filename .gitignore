@@ -20,6 +20,7 @@ output_logs
 output_notebooks
 *.wav
 *.pth
+*.pth.tar
 *.t7
 tts_tool
 Utils/**/config.yml

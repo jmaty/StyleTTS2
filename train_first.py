@@ -20,11 +20,18 @@ from munch import munchify
 # from logger import get_logger, setup_logging
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, create_slm_loss
 from meldataset import build_dataloader
-from models import StyleTTS2, load_ASR_models, load_F0_models
+from models import StyleTTS2, load_ASR_models, load_F0_models, load_spkenc_model
 from Modules.pts import PTS, set_random_seed
 from optimizers import build_optimizer
 from text_utils import TextCleaner
-from utils import get_data_path_list, length_to_mask, log_norm, maximum_path, warmup_scheduler
+from utils import (
+    get_data_path_list,
+    length_to_mask,
+    log_norm,
+    maximum_path,
+    warmup_scheduler,
+    Resampler,
+)
 from Utils.PLBERT.util import load_plbert
 
 warnings.simplefilter("ignore")
@@ -156,8 +163,10 @@ def main():
         config["data_params"].get("test_audio_dir", "test_audios"),
     )
 
+    # Shortcuts to access parameters
     model_params = config.model_params
     loss_params = config.loss_params
+    spkenc_params = config.model_params.spkenc_params
 
     # Set up text cleaner and pre-processing function
     text_cleaner = TextCleaner(data_params["symbol_dict_path"], pad=data_params["pad"])
@@ -170,20 +179,26 @@ def main():
 
     # Load utility models
     with acc.main_process_first():
-        # load pretrained ASR model
+        # Load pretrained ASR model
         asr_config = config.get("ASR_config", False)
         asr_path = config.get("ASR_path", False)
         text_aligner = load_ASR_models(asr_path, asr_config)
 
-        # load pretrained F0 model
+        # Load pretrained F0 model
         f0_path = config.get("F0_path", False)
         pitch_extractor = load_F0_models(f0_path)
 
-        # load BERT model
+        # Load BERT model
         bert_path = config.get("PLBERT_dir", False)
         plbert = load_plbert(bert_path)
 
-    model = StyleTTS2(model_params, text_aligner, pitch_extractor, plbert)
+        # Load speaker encoder model
+        speaker_encoder = load_spkenc_model(spkenc_params.model, spkenc_params.freeze)
+
+    # Initialize StyleTTS2 model
+    logger.info("Building StyleTTS2 model...")
+    model = StyleTTS2(model_params, text_aligner, pitch_extractor, plbert, speaker_encoder)
+    # The following parameters must be set before accelerator.prepare()
     acoustic_style_dim = model.acoustic_style_encoder.style_dim
     bert_size = model.bert.config.max_position_embeddings  # ALBERT config
 
@@ -191,26 +206,28 @@ def main():
     for k in model:
         model[k] = acc.prepare(model[k])
 
+    # # Create inference copy of speaker encoder (for speaker consistency loss)
+    # speaker_encoder_infer = clone_model(
+    #     model.speaker_encoder,
+    #     device=device,
+    #     freeze=True,
+    #     eval_mode=True,
+    # )
+
     # Load data
     train_list, val_list = get_data_path_list(train_path, val_path)
 
     # Set up dataset parameters (from config)
     dataset_config = {
         "sr": sr,
-        "min_length": data_params["min_length"],
+        "min_length": data_params.min_length,
         # limit max length of the input sequence to the max length of the BERT model
-        "max_length": bert_size,
-        "silence_beg": config["preprocess_params"].get("silence_beg", 4800),
-        "silence_end": config["preprocess_params"].get("silence_end", 4800),
-        "n_mels": config["model_params"].get("n_mels", 80),
-        "spect_params": config["preprocess_params"].get(
-            "spect_params",
-            {
-                "n_fft": 2048,
-                "win_length": 1024,
-                "hop_length": 300,
-            },
-        ),
+        "max_length": bert_size,  # ALBERT config
+        "silence_beg": config.preprocess_params.silence_beg,
+        "silence_end": config.preprocess_params.silence_end,
+        "n_mels": config.model_params.n_mels,
+        "spect_params": config.preprocess_params.spect_params,
+        "max_ref_mel_length": config.preprocess_params.max_ref_mel_length,
         "use_ref_sample": False,
     }
 
@@ -259,11 +276,25 @@ def main():
     # Move models to device (cuda)
     model.to(device)
 
-    # initialize optimizers after preparing models for compatibility with FSDP
-    parameters_dict = {key: model[key].parameters() for key in model}
-    scheduler_params_dict = {key: scheduler_params.copy() for key in model}
+    # Initialize optimizers after preparing models for compatibility with FSDP
     lr = float(config["optimizer_params"].get("lr", 1e-4))
+    raw_param_groups = {k: list(model[k].parameters()) for k in model}
+    not_trainable_modules = [k for k, v in raw_param_groups.items() if len(v) == 0]
+    parameters_dict = {k: v for k, v in raw_param_groups.items() if v}
+
+    if acc.is_main_process:
+        logger.info("Optimizer groups: %s", list(parameters_dict.keys()))
+        if not_trainable_modules:
+            logger.info("Not trainable modules: %s", not_trainable_modules)
+    scheduler_params_dict = {k: scheduler_params.copy() for k in parameters_dict}
     optimizer = build_optimizer(parameters_dict, scheduler_params_dict, lr)
+
+    # parameters_dict = {key: model[key].parameters() for key in model}
+    # print("parameters_dict:", parameters_dict)
+    # scheduler_params_dict = {key: scheduler_params.copy() for key in model}
+    # print("scheduler_params_dict:", scheduler_params_dict)
+    # lr = float(config["optimizer_params"].get("lr", 1e-4))
+    # optimizer = build_optimizer(parameters_dict, scheduler_params_dict, lr)
 
     # Prepare optimizers and schedulers for distributed training
     for k, _ in optimizer.optimizers.items():
@@ -287,8 +318,6 @@ def main():
         else:
             start_epoch = 0
             iters = 0
-        # Log model parameters
-        logger.info("Acoustic style dimension: %d", acoustic_style_dim)
         logger.info("")
 
     # in case not distributed computing
@@ -308,6 +337,11 @@ def main():
     if (save_val_audio or save_test_audio) and not os.path.exists(test_audio_dir):
         os.makedirs(test_audio_dir, exist_ok=True)
 
+    # Create resampler for speaker encoder
+    spkenc_resampler = (
+        Resampler(sr, spkenc_params.get("sr", 16000), device=device) if model.multispeaker else None
+    )
+
     # Create phoneme-to-speech object for synthesizing validation sentences
     # - use global noise for speed
     pts = PTS(config, model, use_glob_noise=True)
@@ -315,8 +349,8 @@ def main():
     # Number of steps per epoch for the current process
     steps_per_epoch = len(train_dataloader)
     # Warmup iterations (valid for mode="mix")
-    warmup_beg_iters = int(steps_per_epoch * model_params.warmup_beg_epoch)
-    warmup_end_iters = int(steps_per_epoch * model_params.warmup_end_epoch)
+    warmup_beg_iters = int(steps_per_epoch * model_params.style_mix.warmup_beg_epoch)
+    warmup_end_iters = int(steps_per_epoch * model_params.style_mix.warmup_end_epoch)
 
     best_loss = float("inf")  # best test loss
 
@@ -326,11 +360,11 @@ def main():
         logger.info(" | > Experiment label:    %s", config.label)
         logger.info(" | > Starting epoch:      %d", start_epoch)
         logger.info(" | > Total epochs:        %d", epochs)
-        logger.info(" | > Warmup mode:         %s", model_params.warmup_mode)
+        logger.info(" | > Warmup mode:         %s", model_params.style_mix.warmup_mode)
         logger.info(
             " | > Warmup (epochs/it.): %d-%d / %d-%d",
-            model_params.warmup_beg_epoch,
-            model_params.warmup_end_epoch,
+            model_params.style_mix.warmup_beg_epoch,
+            model_params.style_mix.warmup_end_epoch,
             warmup_beg_iters,
             warmup_end_iters,
         )
@@ -345,7 +379,9 @@ def main():
         logger.info(" | > Batch size:          %d", batch_size)
         logger.info(" | > Max len:             %d", max_len)
         logger.info(" | > SLM loss:            %s", model_params.slm.model)
-        logger.info(" | > Style mix mode:      %s", model_params.mode)
+        logger.info(" | > Inp. spk. emb. dim:  %d", model_params.spkenc_params.dim_in)
+        logger.info(" | > Acoust style dim:    %d", acoustic_style_dim)
+        logger.info(" | > Pros. style dim:     %d", model_params.style_dim)
         logger.info("")
 
     # === Start of training loop ==============================================
@@ -361,11 +397,16 @@ def main():
         train_components = [
             "decoder",
             "text_encoder",
-            "acoustic_style_encoder",
         ]
+        # Append acoustic style encoder if it is trainable
+        if "acoustic_style_encoder" not in not_trainable_modules:
+            train_components.append("acoustic_style_encoder")
+
         # Models in train mode based on the epoch
         if epoch >= tma_epoch:
             train_components.extend(["msd", "mpd", "text_aligner"])
+            if not spkenc_params.freeze:
+                train_components.append("speaker_encoder")
         # Set models to train mode
         model.set_mode("train", train_components)
 
@@ -379,15 +420,14 @@ def main():
             batch = [b.to(device) for b in batch[1:]]
             # Keep individual batch tensors
             (
-                spk_embs,  # Speaker embeddings [B, spk_emd_dim]
                 phonemes,  # Padded input phoneme IDs [B, T_text]
                 ph_inp_lens,  # Input phoneme lengths [B]
                 _,  # OOD texts not used in 1st stage training
                 _,  # OOD phoneme lengths not used in 1st stage training
                 mels,  # Padded mel spectrograms [B, n_mels, T_mel]
                 mel_inp_len,  # Mel spectrogram lengths [B]
+                _,  # Reference waveforms not used in 1st stage
                 _,  # Reference mel spectrograms not used in 1st stage
-                _,  # Reference speaker embeddings not used in 1st stage
             ) = batch
 
             # Generate masks for text and mel spectrograms
@@ -461,6 +501,7 @@ def main():
 
             bsize = mel_inp_len.shape[0]  # Use current batch size
             wav_len = (mel_len_gt * 2) * hop_length  # Calculate fixed waveform segment length
+            wav_st_len = (mel_len_st * 2) * hop_length  # Calculate fixed style segment length
 
             # Pre-allocate tensors with the calculated fixed length
             ph_algn = torch.empty(
@@ -485,6 +526,7 @@ def main():
                 dtype=mels.dtype,
             )
             wav_gt = torch.empty(bsize, wav_len, device=device, dtype=torch.float)
+            wav_st = torch.empty(bsize, wav_st_len, device=device, dtype=torch.float)
 
             # Iterate through the batch samples
             for bidx in range(bsize):
@@ -509,12 +551,17 @@ def main():
                 beg_st = np.random.randint(0, mel_len - mel_len_st)
                 # Extract style reference mel spectrogram for style conditioning and assign to tensor
                 mel_st[bidx] = mels[bidx, :, (beg_st * 2) : ((beg_st + mel_len_st) * 2)]
+                # Extract corresponding ground-truth audio and assign to tensor
+                beg_idx_wav = (beg_st * 2) * hop_length
+                end_idx_wav = beg_idx_wav + wav_st_len  # Use pre-calculated length
+                wav_st[bidx] = waves[bidx][beg_idx_wav:end_idx_wav]
 
             # Detach tensors to avoid unnecessary gradient tracking
             # `h_algn_seg` is not detached as it is used for gradient computation
             mel_gt = mel_gt.detach()
             mel_st = mel_st.detach()
             wav_gt = wav_gt.detach()
+            wav_st = wav_st.detach()
 
             # --- End of Pre-allocated tensors ---
 
@@ -533,10 +580,22 @@ def main():
                 if model.multispeaker and model.mix_mode == "mix"
                 else None
             )
+
+            # Speaker encoding:
+            spk_embs_st = None
+            # Resample ground-truth segments for speaker encoder
+            seg4style = spkenc_resampler(wav_st) if model.multispeaker else spkenc_resampler(wav_gt)
+
+            # Conditionally use no_grad based on freeze setting
+            context = torch.no_grad() if spkenc_params.freeze else torch.enable_grad()
+            with context:
+                # Get speaker embeddings for the style reference segment
+                spk_embs_st = model.speaker_encoder(seg4style)
+
             # Only (acoustic) style encoder is trained within 1st stage training
             style = model.acoustic_style_encoder(
                 mel4style,
-                spk_emb=spk_embs if model.multispeaker else None,
+                spk_emb=spk_embs_st if model.multispeaker else None,
                 warmup_coef=warmup_coef,
             )
 
@@ -589,6 +648,26 @@ def main():
                 # SLM loss to ensure the generated audio follows natural speech patterns
                 loss_slm = wl(wav_gt.detach(), y_rec).mean()
 
+                # # Calculate speaker consistency loss
+                # with torch.no_grad():
+                #     ## Sync speaker encoder weights
+                #     # speaker_encoder_infer.load_state_dict(model.speaker_encoder.state_dict())
+                #     # Calculate speaker embeddings for the reconstructed audio
+                #     seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
+                #     # spk_embs_rec = speaker_encoder_infer(seg_rec_for_spkenc)
+                #     spk_embs_rec = speaker_encoder(seg_rec_for_spkenc)
+                # # Compute loss: use embeddings form style waves as target speaker embeddings
+                # loss_scl = 1 - F.cosine_similarity(spk_embs_st, spk_embs_rec).mean()
+
+                # Speaker Consistency Loss (SCL)
+                # target = embeddings from style reference (detach to avoid gradients)
+                spk_embs_tgt = spk_embs_st.detach()
+                # reconstructed = embeddings from the reconstructed audio
+                # (leave gradients for decoder update)
+                seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
+                spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc)
+                loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec).mean()
+
                 # Final generator loss is a weighted sum of the above losses
                 g_loss = (
                     loss_params.lambda_mel * loss_mel
@@ -596,6 +675,7 @@ def main():
                     + loss_params.lambda_s2s * loss_s2s
                     + loss_params.lambda_gen * loss_gen_all
                     + loss_params.lambda_slm * loss_slm
+                    + loss_params.lambda_scl * loss_scl
                 )
 
             else:
@@ -603,17 +683,24 @@ def main():
                 loss_mono = 0
                 loss_gen_all = 0
                 loss_slm = 0
+                loss_scl = 0
                 g_loss = loss_mel
 
             g_loss /= grad_accum_steps  # JMa: normalize loss
             # JMa: Compute gradients only for generator
             inputs = (
                 list(model.decoder.parameters())
-                + list(model.acoustic_style_encoder.parameters())
+                # + list(model.acoustic_style_encoder.parameters())
                 + list(model.text_encoder.parameters())
             )
+            if "acoustic_style_encoder" not in not_trainable_modules:
+                inputs += list(model.acoustic_style_encoder.parameters())
             if epoch >= tma_epoch:
                 inputs += list(model.text_aligner.parameters())
+                if not spkenc_params.freeze:
+                    # Do not do this if speaker encoder is frozen
+                    inputs += list(model.speaker_encoder.parameters())
+
             acc.backward(g_loss, inputs=inputs)
 
             # Accumulate mean mel-spectrogram loss (over all GPUs) across batches for logging
@@ -626,11 +713,14 @@ def main():
                     _ = [acc.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
 
                 optimizer.step("text_encoder")
-                optimizer.step("acoustic_style_encoder")
+                if "acoustic_style_encoder" not in not_trainable_modules:
+                    optimizer.step("acoustic_style_encoder")
                 optimizer.step("decoder")
 
                 if epoch >= tma_epoch:
                     optimizer.step("text_aligner")
+                    if not spkenc_params.freeze:
+                        optimizer.step("speaker_encoder")
                     # JMa: pitch extractor should not be updated, see:
                     # https://github.com/yl4579/StyleTTS2/issues/10#issuecomment-1783701686
                     # optimizer.step('pitch_extractor')
@@ -644,7 +734,7 @@ def main():
             if (batch_idx + 1) % log_interval == 0 and acc.is_main_process:
                 loss_mel = running_loss / log_interval
                 logger.info(
-                    "Epoch [%3d/%d], Step [%4d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f",
+                    "Epoch [%3d/%d], Step [%4d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f, SCL Loss: %.5f",
                     epoch + 1,
                     epochs,
                     batch_idx + 1,
@@ -655,6 +745,7 @@ def main():
                     loss_mono,
                     loss_s2s,
                     loss_slm,
+                    loss_scl,
                 )
 
                 # Check current VRAM usage
@@ -676,6 +767,7 @@ def main():
                         "train/mono_loss": loss_mono,
                         "train/s2s_loss": loss_s2s,
                         "train/slm_loss": loss_slm,
+                        "train/scl_loss": loss_scl,
                         "train/curr_vram": curr_vram,
                         "train/max_vram": max_vram,
                         "train/epoch": epoch,
@@ -696,7 +788,7 @@ def main():
         # === Start of validation part ==============================================
 
         # Validation
-        loss_test = 0
+        loss_test, loss_sim = 0, 0
         # Set all models to eval mode
         model.set_mode("eval")
 
@@ -708,15 +800,14 @@ def main():
                 waves = batch[0]
                 batch = [b.to(device) for b in batch[1:]]
                 (
-                    spk_embs,  # Speaker embeddings [B, spk_emb_dim]
                     phonemes,  # Padded input phoneme IDs [B, T_text]
                     ph_inp_lens,  # Input phoneme lengths [B]
                     _,  # OOD texts not used in 1st stage training
                     _,  # OOD phoneme lengths not used in 1st stage training
                     mels,  # Padded mel spectrograms [B, n_mels, T_mel]
                     mel_inp_len,  # Mel spectrogram lengths [B]
+                    _,  # Reference waveforms not used in 1st stage
                     _,  # Reference mel spectrograms not used in 1st stage
-                    _,  # Reference speaker embeddings not used in 1st stage
                 ) = batch
                 # Current batch size
                 bsize = mel_inp_len.shape[0]
@@ -804,11 +895,16 @@ def main():
                 f0_real, _, _ = model.pitch_extractor(mel_gt.unsqueeze(1))
                 norm_real = log_norm(mel_gt.unsqueeze(1)).squeeze(1)
 
+                # Resample ground-truth segments for speaker encoder
+                seg_gt_for_spkenc = spkenc_resampler(wav_gt)
+                # Calculate ground truth speaker embeddings
+                spk_embs_gt = model.speaker_encoder(seg_gt_for_spkenc)
+
                 # Style encoding:
                 style = model.acoustic_style_encoder(
                     # mel_gt.unsqueeze(1), spk_embs if multispeaker and epoch >= tma_epoch else None
                     mel_gt.unsqueeze(1),
-                    spk_emb=spk_embs if model.multispeaker else None,
+                    spk_emb=spk_embs_gt if model.multispeaker else None,
                     warmup_coef=warmup_coef,
                 )
 
@@ -818,6 +914,19 @@ def main():
 
                 # Compute mel-spectrogram loss
                 loss_mel = stft_loss(y_rec.squeeze(), wav_gt.detach())
+
+                # Calculate speaker consistency loss
+                if epoch >= tma_epoch:
+                    spk_embs_tgt = spk_embs_gt  # target speaker embeddings
+                    # Calculate speaker embeddings for the reconstructed audio
+                    # seg_rec_for_spkenc = resample(y_rec.squeeze(), spkenc_resampler)
+                    seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
+                    # spk_embs_rec = speaker_encoder_infer(seg_rec_for_spkenc.detach())
+                    spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc.detach())
+                    # Compute speaker consistency loss (i.e. cosine similarity)
+                    loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec)
+                    # Gather similarity loss across all processes
+                    loss_sim += acc.gather(loss_scl).mean().item()
 
                 loss_test += acc.gather(loss_mel).mean().item()
                 iters_test += 1
@@ -837,22 +946,24 @@ def main():
                 else gate_param
             )
             logger.info(
-                "Epoch [%3d/%d]: Validation loss: %.3f (best: %.3f), Warmup: %.6f, Gate weights: %.6f±%.6f (%.6f-%.6f)",
+                "Epoch [%3d/%d]: Validation loss: %.3f (best: %.3f), Speaker Consistency Loss: %.3f, Warmup: %.6f, Gate weights: %.6f±%.6f (%.6f-%.6f)",
                 epoch + 1,
                 epochs,
                 curr_loss,
                 best_loss,
-                warmup_coef if model.mode == "mix" else 0,
-                gate_values.mean().item() if model_params.mode == "mix" else 0,
-                gate_values.std().item() if model_params.mode == "mix" else 0,
-                gate_values.min().item() if model_params.mode == "mix" else 0,
-                gate_values.max().item() if model_params.mode == "mix" else 0,
+                loss_sim / iters_test,
+                warmup_coef if model_params.style_mix.mode == "mix" else 0,
+                gate_values.mean().item() if model_params.style_mix.mode == "mix" else 0,
+                gate_values.std().item() if model_params.style_mix.mode == "mix" else 0,
+                gate_values.min().item() if model_params.style_mix.mode == "mix" else 0,
+                gate_values.max().item() if model_params.style_mix.mode == "mix" else 0,
             )
             wb_logger.log(
-                {"eval/mel_loss": curr_loss, "eval/best_mel_loss": best_loss},
+                {"eval/mel_loss": curr_loss, "eval/scl_loss": loss_sim / iters_test},
                 step=iters,
             )
 
+            # Generate validation samples
             with torch.no_grad():
                 # Iterate over the defined number of validation samples
                 for idx in range(min(n_val_audios, bsize)):
@@ -863,7 +974,7 @@ def main():
                         mels[idx, :, :mel_len].unsqueeze(0),  # Ground-truth mel spectrogram
                         # Ground-truth phoneme-audio alignment
                         h_algn[idx, :, : mel_len // 2].unsqueeze(0),
-                        spk_emb=spk_embs[idx].unsqueeze(0) if model.multispeaker else None,
+                        spk_emb=spk_embs_gt[idx].unsqueeze(0) if spk_embs_gt is not None else None,
                         warmup_coef=warmup_coef,
                     )
 

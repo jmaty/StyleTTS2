@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 from monotonic_align.core import maximum_path_c
 from munch import Munch
+from torchaudio.transforms import Resample
 
 
 def maximum_path(neg_cent, mask):
@@ -84,3 +85,36 @@ def warmup_scheduler(step, beg, end):
         progress = (step - beg) / float(end - beg)
         progress = 1.0 if progress >= 1.0 else (0.0 if progress <= 0.0 else progress)
     return progress
+
+
+class Resampler:
+    """
+    A wrapper class for audio resampling functionality.
+
+    This class provides a convenient interface for resampling audio waves from one
+    frequency to another using the underlying Resample functionality.
+
+    Args:
+        orig_freq (int): The original sampling frequency of the input audio.
+        new_freq (int): The target sampling frequency for the output audio.
+
+    Methods:
+        __call__(waves): Resamples the input audio waves to the target frequency.
+
+    Example:
+        >>> resampler = Resampler(orig_freq=44100, new_freq=22050)
+        >>> resampled_audio = resampler(audio_waves)
+    """
+
+    def __init__(self, orig_freq, new_freq, device=None):
+        self.resampler = Resample(orig_freq=orig_freq, new_freq=new_freq)
+
+        # Auto-detect device if not provided
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        self.resampler = self.resampler.to(device)  # Move resampler to the specified device
+        self.device = device
+
+    def __call__(self, waves):
+        return self.resampler(waves)
