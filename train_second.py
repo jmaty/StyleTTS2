@@ -703,12 +703,16 @@ def main():
             with context:
                 # Get speaker embeddings for the style reference segment
                 spk_embs_st = model.speaker_encoder(seg_st_for_spkenc)
+            # Preserve target speaker embedding before any possible in-place use
+            spk_embs_tgt = spk_embs_st.detach()
 
             # Compute styles for the extracted segments
             pros_style = model.prosodic_style_encoder(style_input_mel_batch)
             acoust_style = model.acoustic_style_encoder(
                 style_input_mel_batch,
                 spk_emb=spk_embs_st,
+                # Pass a clone to avoid potential in-place modifications affecting SCL target
+                spk_emb=spk_embs_st.clone(),
                 warmup_coef=1.0,  # no warmup
             )
 
@@ -777,16 +781,13 @@ def main():
             loss_ce /= phonemes.size(0)
             loss_dur /= phonemes.size(0)
 
-            # Calculate speaker consistency loss
-            with torch.no_grad():
-                ## Sync speaker encoder weights
-                # speaker_encoder_infer.load_state_dict(model.speaker_encoder.state_dict())
-                # Calculate speaker embeddings for the reconstructed audio
-                seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
-                # spk_embs_rec = speaker_encoder_infer(seg_rec_for_spkenc)
-                spk_embs_rec = speaker_encoder(seg_rec_for_spkenc)
+            # Speaker consistency loss (SCL)
+            # Calculate speaker embeddings for the reconstructed audio
+            seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
+            # spk_embs_rec = speaker_encoder_infer(seg_rec_for_spkenc)
+            spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc)
             # Compute loss: use embeddings form style waves as target speaker embeddings
-            loss_scl = 1 - F.cosine_similarity(spk_embs_st, spk_embs_rec).mean()
+            loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec).mean()
 
             loss_gen = (
                 loss_params.lambda_mel * loss_mel
@@ -1028,12 +1029,12 @@ def main():
         # Validation
         loss_test, loss_align, loss_f, loss_sim = 0, 0, 0, 0
         # Set all models to eval mode
-        _ = [model[key].eval() for key in model]
+        model.set_mode("eval")
 
         with torch.no_grad():
             iters_test = 0
             for batch_idx, batch in enumerate(val_dataloader):
-                optimizer.zero_grad()
+                # optimizer.zero_grad()
 
                 try:
                     # Keep ground truth audio
@@ -1054,23 +1055,22 @@ def main():
                     # Current batch size
                     bsize = mel_inp_len.shape[0]
 
-                    with torch.no_grad():
-                        mel_mask = length_to_mask(mel_inp_len // (2**n_down)).to(device)
-                        ph_mask = length_to_mask(ph_inp_lens).to(phonemes.device)
+                    mel_mask = length_to_mask(mel_inp_len // (2**n_down)).to(device)
+                    ph_mask = length_to_mask(ph_inp_lens).to(phonemes.device)
 
-                        _, _, d_algn = model.text_aligner(mels, mel_mask, phonemes)
-                        d_algn = d_algn.transpose(-1, -2)
-                        d_algn = d_algn[..., 1:]
-                        d_algn = d_algn.transpose(-1, -2)
+                    _, _, d_algn = model.text_aligner(mels, mel_mask, phonemes)
+                    d_algn = d_algn.transpose(-1, -2)
+                    d_algn = d_algn[..., 1:]
+                    d_algn = d_algn.transpose(-1, -2)
 
-                        mask_st = mask_from_lens(d_algn, ph_inp_lens, mel_inp_len // (2**n_down))
-                        d_algn_mono = maximum_path(d_algn, mask_st)
+                    mask_st = mask_from_lens(d_algn, ph_inp_lens, mel_inp_len // (2**n_down))
+                    d_algn_mono = maximum_path(d_algn, mask_st)
 
-                        # Encode phonemes
-                        h_ph = model.text_encoder(phonemes, ph_inp_lens, ph_mask)
-                        h_algn = h_ph @ d_algn_mono
+                    # Encode phonemes
+                    h_ph = model.text_encoder(phonemes, ph_inp_lens, ph_mask)
+                    h_algn = h_ph @ d_algn_mono
 
-                        d_gt = d_algn_mono.sum(axis=-1).detach()
+                    d_gt = d_algn_mono.sum(axis=-1).detach()
 
                     # Compute prosodic style for the entire utterance
                     # This operation cannot be done in batch because of the avgpool layer
@@ -1207,7 +1207,7 @@ def main():
                     # seg_rec_for_spkenc = resample(y_rec.squeeze(), spkenc_resampler)
                     seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
                     # spk_embs_rec = speaker_encoder_infer(seg_rec_for_spkenc.detach())
-                    spk_embs_rec = speaker_encoder(seg_rec_for_spkenc.detach())
+                    spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc.detach())
                     # Compute speaker consistency loss (i.e. cosine similarity)
                     loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec)
                     # Gather similarity loss across all processes
