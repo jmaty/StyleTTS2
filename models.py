@@ -1,7 +1,6 @@
 # coding:utf-8
 
 import copy
-import logging
 import math
 import os
 from collections import OrderedDict
