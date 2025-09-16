@@ -209,7 +209,8 @@ def main():
 
     # DP
     for key in model:
-        if key not in ("mpd", "msd", "wd"):
+        # speaker_encoder will be left on a single GPU due to scatter/view + in-place issues
+        if key not in ("mpd", "msd", "wd", "speaker_encoder"):
             model[key] = MyDataParallel(model[key])
 
     start_epoch = 0
