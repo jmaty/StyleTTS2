@@ -509,7 +509,7 @@ class AcousticStyleEncoder(nn.Module):
         """
         style_intern = self.forward_internal(x)
         if self._warmup_mode == "internal":
-            style_intern *= warmup_coef
+            style_intern = style_intern * warmup_coef  # out-of-place
 
         # No time to start warmup yet => use internal style only
         if not warmup_coef:
@@ -517,7 +517,7 @@ class AcousticStyleEncoder(nn.Module):
 
         style_extern = self.forward_external(spk_emb)
         if self._warmup_mode == "external":
-            style_extern *= warmup_coef
+            style_extern = style_extern * warmup_coef  # out-of-place
 
         # Setup gate parameter:
         # - If learnable, use sigmoid activation to ensure it is between 0 and 1
