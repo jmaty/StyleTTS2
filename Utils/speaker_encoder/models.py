@@ -46,7 +46,8 @@ class SELayer(nn.Module):
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Sequential(
             nn.Linear(channel, channel // reduction),
-            nn.ReLU(inplace=True),
+            # nn.ReLU(inplace=True),
+            nn.ReLU(inplace=False),
             nn.Linear(channel // reduction, channel),
             nn.Sigmoid(),
         )
@@ -69,7 +70,8 @@ class SEBasicBlock(nn.Module):
         self.bn1 = nn.BatchNorm2d(planes)
         self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(planes)
-        self.relu = nn.ReLU(inplace=True)
+        # self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=False)
         self.se = SELayer(planes, reduction)
         self.downsample = downsample
         self.stride = stride
@@ -88,7 +90,8 @@ class SEBasicBlock(nn.Module):
         if self.downsample is not None:
             residual = self.downsample(x)
 
-        out += residual
+        # out += residual
+        out = out + residual  # JMa: avoid in-place operation
         out = self.relu(out)
         return out
 
@@ -115,7 +118,8 @@ class HASPSpeakerEncoder(nn.Module):
         self.proj_dim = proj_dim
 
         self.conv1 = nn.Conv2d(1, num_filters[0], kernel_size=3, stride=1, padding=1)
-        self.relu = nn.ReLU(inplace=True)
+        # self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=False)
         self.bn1 = nn.BatchNorm2d(num_filters[0])
 
         self.inplanes = num_filters[0]
@@ -195,7 +199,7 @@ class HASPSpeakerEncoder(nn.Module):
         state = torch.load(checkpoint_path, map_location=torch.device("cpu"))
         try:
             self.load_state_dict(state["model"])
-            logger.info("Model fully restored. ")
+            logger.info("H/ASP model fully restored. ")
         except (KeyError, RuntimeError) as error:
             raise error
 
