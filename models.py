@@ -1592,6 +1592,7 @@ def load_spkenc_model(model_path, freeze=False):
     model.load_checkpoint(checkpoint_path=model_path)
 
     if freeze:
+        model.eval()
         for param in model.parameters():
             param.requires_grad = False
 
