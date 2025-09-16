@@ -1,7 +1,7 @@
 # coding: utf-8
+import math
 import os.path as osp
 import random
-import math
 from collections import defaultdict
 
 import numpy as np
@@ -10,21 +10,9 @@ import torch
 import torchaudio
 from torch.utils.data import DataLoader, Sampler
 
-# from logger import get_logger
+from logger import get_logger
 
-# Setup logger
-# logger = get_logger(__name__)
-import logging
-
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-if not logger.handlers:  # ensure handler only once
-    _h = logging.StreamHandler()
-    _h.setLevel(logging.INFO)
-    # _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-    _h.setFormatter(logging.Formatter("%(message)s"))
-    logger.addHandler(_h)
-    logger.propagate = False
+logger = get_logger(__name__)
 
 np.random.seed(3407)
 random.seed(3407)

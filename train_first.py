@@ -1,5 +1,4 @@
 import argparse
-import logging
 import os
 import os.path as osp
 import random
@@ -13,11 +12,10 @@ import torch.nn.functional as F
 import wandb
 import yaml
 from accelerate import Accelerator, DistributedDataParallelKwargs
-from accelerate.logging import get_logger
 from monotonic_align import mask_from_lens
 from munch import munchify
 
-# from logger import get_logger, setup_logging
+from logger import add_logging_args, get_logger, setup_logging
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, create_slm_loss
 from meldataset import build_dataloader
 from models import StyleTTS2, load_ASR_models, load_F0_models, load_spkenc_model
@@ -25,12 +23,12 @@ from Modules.pts import PTS, set_random_seed
 from optimizers import build_optimizer
 from text_utils import TextCleaner
 from utils import (
+    Resampler,
     get_data_path_list,
     length_to_mask,
     log_norm,
     maximum_path,
     warmup_scheduler,
-    Resampler,
 )
 from Utils.PLBERT.util import load_plbert
 
@@ -45,20 +43,20 @@ def main():
     parser = argparse.ArgumentParser(description="StyleTTS2 stage 1 training")
     parser.add_argument("config_path", type=str, help="path to config")
     parser.add_argument("-w", "--num_workers", type=int, default=0, help="number of workers")
-    parser.add_argument(
-        "-L",
-        "--log_level",
-        type=str,
-        default="INFO",
-        help="log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)",
-    )
+    # parser.add_argument(
+    #     "-L",
+    #     "--log_level",
+    #     type=str,
+    #     default="INFO",
+    #     help="log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)",
+    # )
+    add_logging_args(parser)  # --log-level, --log-file
     args = parser.parse_args()
 
     # Load config
     with open(args.config_path, encoding="utf-8") as fr:
         config = munchify(yaml.safe_load(fr))
 
-    # writer = None
     wb_logger = None  # WandB logger
 
     # Set up logging
@@ -66,44 +64,17 @@ def main():
     log_dir = config.log_dir
     os.makedirs(log_dir, exist_ok=True)
 
-    # formatter_file = logging.Formatter(
-    #     fmt="%(levelname)s:%(asctime)s: %(message)s",
-    #     datefmt="%y%m%d-%H:%M:%S",
-    # )
-    # setup_logging(
-    #     level=args.log_level,
-    #     file=osp.join(log_dir, "train.log"),
-    #     formatter_file=formatter_file,
-    #     level_file=args.log_level,
-    # )
-    # logger = get_logger(__name__)  # Get a logger
-
     # Distributed computing
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     acc = Accelerator(project_dir=log_dir, split_batches=True, kwargs_handlers=[ddp_kwargs])
 
+    # Uniform logging (main process only)
+    log_file = args.log_file or osp.join(log_dir, "train.log")
+    setup_logging(args.log_level, log_file, accelerator=acc)
+    logger = get_logger(__name__)
+
     # Configure logging only on main process to avoid duplicate output
     if acc.is_main_process:
-
-        # Initialize logger (Accelerate expects string log level)
-        logger = get_logger(__name__, log_level=args.log_level)
-        # Convert string log level to numeric level for handlers
-        numeric_log_level = getattr(logging, args.log_level.upper())
-
-        # Přidat handlery pouze pokud ještě nejsou žádné
-        if not logger.logger.handlers:
-            # Write logs to file
-            file_handler = logging.FileHandler(osp.join(log_dir, "train.log"))
-            file_handler.setLevel(numeric_log_level)
-            file_handler.setFormatter(logging.Formatter("%(levelname)s:%(asctime)s: %(message)s"))
-            logger.logger.addHandler(file_handler)
-
-            # Write logs to console (stdout) - show log level for DEBUG visibility
-            console_handler = logging.StreamHandler()
-            console_handler.setLevel(numeric_log_level)
-            console_handler.setFormatter(logging.Formatter("%(message)s"))
-            logger.logger.addHandler(console_handler)
-
         # Initialize the wandb logger and name wandb project and run
         wb_logger = wandb.init(
             # Set the wandb project where this run will be logged.
@@ -115,22 +86,20 @@ def main():
             config=config,
             dir=log_dir,
         )
-    else:
-        # For non-main processes, create a basic logger without handlers (Accelerate expects string)
-        logger = get_logger(__name__, log_level=args.log_level)
 
     # Set up device
     device = acc.device
 
     # Init NVLM
-    nvidia_smi.nvmlInit()
-    n_gpus = nvidia_smi.nvmlDeviceGetCount()
-    max_vram = 0  # Track maximum VRAM usage
-    # Get total VRAM of the first GPU
-    total_vram = (
-        nvidia_smi.nvmlDeviceGetMemoryInfo(nvidia_smi.nvmlDeviceGetHandleByIndex(0)).total >> 30
-    )
+    n_gpus, max_vram, total_vram = 0, 0, 0
     if acc.is_main_process:
+        nvidia_smi.nvmlInit()
+        n_gpus = nvidia_smi.nvmlDeviceGetCount()
+        max_vram = 0  # Track maximum VRAM usage
+        # Get total VRAM of the first GPU
+        total_vram = (
+            nvidia_smi.nvmlDeviceGetMemoryInfo(nvidia_smi.nvmlDeviceGetHandleByIndex(0)).total >> 30
+        )
         logger.info("NVLM initialized")
 
     # Set up training parameters
@@ -739,7 +708,7 @@ def main():
             iters += 1  # Increment iteration counter
 
             # Log training progress
-            if (batch_idx + 1) % log_interval == 0 and acc.is_main_process:
+            if (batch_idx + 1) % log_interval == 0:
                 loss_mel = running_loss / log_interval
                 logger.info(
                     "Epoch [%3d/%d], Step [%4d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f, SCL Loss: %.5f",
@@ -756,40 +725,41 @@ def main():
                     loss_scl,
                 )
 
-                # Check current VRAM usage
-                curr_vrams = [
-                    nvidia_smi.nvmlDeviceGetMemoryInfo(
-                        nvidia_smi.nvmlDeviceGetHandleByIndex(device_idx)
-                    ).used
-                    for device_idx in range(n_gpus)
-                ]
-                # Update max VRAM usage
-                curr_vram = max(curr_vrams) >> 30  # Convert bytes to GB
-                max_vram = max(max_vram, curr_vram)
+                if acc.is_main_process:
+                    # Check current VRAM usage
+                    curr_vrams = [
+                        nvidia_smi.nvmlDeviceGetMemoryInfo(
+                            nvidia_smi.nvmlDeviceGetHandleByIndex(device_idx)
+                        ).used
+                        for device_idx in range(n_gpus)
+                    ]
+                    # Update max VRAM usage
+                    curr_vram = max(curr_vrams) >> 30  # Convert bytes to GB
+                    max_vram = max(max_vram, curr_vram)
 
-                wb_logger.log(
-                    {
-                        "train/mel_loss": loss_mel,
-                        "train/gen_loss": loss_gen_all,
-                        "train/disc_loss": loss_disc,
-                        "train/mono_loss": loss_mono,
-                        "train/s2s_loss": loss_s2s,
-                        "train/slm_loss": loss_slm,
-                        "train/scl_loss": loss_scl,
-                        "train/curr_vram": curr_vram,
-                        "train/max_vram": max_vram,
-                        "train/epoch": epoch,
-                    },
-                    step=iters,
-                )
+                    wb_logger.log(
+                        {
+                            "train/mel_loss": loss_mel,
+                            "train/gen_loss": loss_gen_all,
+                            "train/disc_loss": loss_disc,
+                            "train/mono_loss": loss_mono,
+                            "train/s2s_loss": loss_s2s,
+                            "train/slm_loss": loss_slm,
+                            "train/scl_loss": loss_scl,
+                            "train/curr_vram": curr_vram,
+                            "train/max_vram": max_vram,
+                            "train/epoch": epoch,
+                        },
+                        step=iters,
+                    )
 
-                logger.info(
-                    "Max VRAM usage: %d/%d GB (%.2f%%)",
-                    max_vram,
-                    total_vram,
-                    max_vram / total_vram * 100,
-                )
-                logger.info("Time elapsed: %.2f seconds", time.time() - start_time)
+                    logger.info(
+                        "Max VRAM usage: %d/%d GB (%.2f%%)",
+                        max_vram,
+                        total_vram,
+                        max_vram / total_vram * 100,
+                    )
+                    logger.info("Time elapsed: %.2f seconds", time.time() - start_time)
 
                 running_loss = 0  # Reset running loss for next log interval
 
@@ -941,33 +911,34 @@ def main():
                 loss_test += acc.gather(loss_mel).mean().item()
                 iters_test += 1
 
-        if acc.is_main_process:
-            # Compute average loss over all validation batches
-            curr_loss = loss_test / iters_test
-            # Update best_loss
-            best_loss = min(curr_loss, best_loss)
+        # Compute average loss over all validation batches
+        curr_loss = loss_test / iters_test
+        # Update best_loss
+        best_loss = min(curr_loss, best_loss)
 
-            gate_param = acc.unwrap_model(model.acoustic_style_encoder).gate_param
-            # For learnable gate, show values after sigmoid activation
-            # For non-learnable gate, show raw values
-            gate_values = (
-                torch.sigmoid(gate_param)
-                if acc.unwrap_model(model.acoustic_style_encoder).learnable_gate
-                else gate_param
-            )
-            logger.info(
-                "Epoch [%3d/%d]: Validation loss: %.3f (best: %.3f), Speaker Consistency Loss: %.3f, Warmup: %.6f, Gate weights: %.6f±%.6f (%.6f-%.6f)",
-                epoch + 1,
-                epochs,
-                curr_loss,
-                best_loss,
-                loss_sim / iters_test,
-                warmup_coef if model_params.style_mix.mode == "mix" else 0,
-                gate_values.mean().item() if model_params.style_mix.mode == "mix" else 0,
-                gate_values.std().item() if model_params.style_mix.mode == "mix" else 0,
-                gate_values.min().item() if model_params.style_mix.mode == "mix" else 0,
-                gate_values.max().item() if model_params.style_mix.mode == "mix" else 0,
-            )
+        gate_param = acc.unwrap_model(model.acoustic_style_encoder).gate_param
+        # For learnable gate, show values after sigmoid activation
+        # For non-learnable gate, show raw values
+        gate_values = (
+            torch.sigmoid(gate_param)
+            if acc.unwrap_model(model.acoustic_style_encoder).learnable_gate
+            else gate_param
+        )
+        logger.info(
+            "Epoch [%3d/%d]: Validation loss: %.3f (best: %.3f), Speaker Consistency Loss: %.3f, Warmup: %.6f, Gate weights: %.6f±%.6f (%.6f-%.6f)",
+            epoch + 1,
+            epochs,
+            curr_loss,
+            best_loss,
+            loss_sim / iters_test,
+            warmup_coef if model_params.style_mix.mode == "mix" else 0,
+            gate_values.mean().item() if model_params.style_mix.mode == "mix" else 0,
+            gate_values.std().item() if model_params.style_mix.mode == "mix" else 0,
+            gate_values.min().item() if model_params.style_mix.mode == "mix" else 0,
+            gate_values.max().item() if model_params.style_mix.mode == "mix" else 0,
+        )
+
+        if acc.is_main_process:
             wb_logger.log(
                 {"eval/mel_loss": curr_loss, "eval/scl_loss": loss_sim / iters_test},
                 step=iters,
@@ -1021,6 +992,9 @@ def main():
                     "stage1_pre-tma",
                     log_dir,
                 )
+
+        # Sync after I/O so other processes wait for the main process
+        acc.wait_for_everyone()
 
     if acc.is_main_process:
         # Save final 1st stage model

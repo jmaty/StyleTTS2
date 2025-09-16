@@ -1,14 +1,12 @@
 import argparse
 import copy
-import logging
 import os
 import os.path as osp
 import time
 import traceback
 import warnings
 
-# from logger import get_logger, setup_logging
-from logging import FileHandler, Formatter, StreamHandler, getLogger
+from logger import add_logging_args, get_logger, setup_logging
 
 import numpy as np
 import nvidia_smi
@@ -52,13 +50,14 @@ def main():
     parser = argparse.ArgumentParser(description="StyleTTS2 stage 2 training")
     parser.add_argument("config_path", type=str, help="path to config")
     parser.add_argument("-w", "--num_workers", type=int, default=0, help="number of workers")
-    parser.add_argument(
-        "-L",
-        "--log_level",
-        type=str,
-        default="INFO",
-        help="log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)",
-    )
+    # parser.add_argument(
+    #     "-L",
+    #     "--log_level",
+    #     type=str,
+    #     default="INFO",
+    #     help="log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)",
+    # )
+    add_logging_args(parser)  # --log_level, --log_file
     args = parser.parse_args()
 
     # Load config
@@ -69,34 +68,11 @@ def main():
     # Set up logging
     set_random_seed(config.seed)
     log_dir = config.log_dir
-    logger = getLogger(__name__)
-    # Convert string log level to numeric level for handlers
-    numeric_log_level = getattr(logging, args.log_level.upper())
-    logger.setLevel(numeric_log_level)
-
-    # Write logs to file
-    file_handler = FileHandler(osp.join(log_dir, "train.log"))
-    file_handler.setLevel(numeric_log_level)
-    file_handler.setFormatter(Formatter("%(levelname)s:%(asctime)s: %(message)s"))
-    logger.addHandler(file_handler)
-
-    # Write logs to console (stdout) - show log level for DEBUG visibility
-    console_handler = StreamHandler()
-    console_handler.setLevel(numeric_log_level)
-    console_handler.setFormatter(Formatter("%(message)s"))
-    logger.addHandler(console_handler)
-
-    # formatter_file = logging.Formatter(
-    #     fmt="%(levelname)s:%(asctime)s: %(message)s",
-    #     datefmt="%y%m%d-%H:%M:%S",
-    # )
-    # setup_logging(
-    #     level=args.log_level,
-    #     file=osp.join(log_dir, "train.log"),
-    #     formatter_file=formatter_file,
-    #     level_file=args.log_level,
-    # )
-    # logger = get_logger(__name__)  # Get a logger
+    os.makedirs(log_dir, exist_ok=True)
+    # Unified logging (console + file). Without Accelerate => logs this process.
+    log_file = args.log_file or osp.join(log_dir, "train.log")
+    setup_logging(args.log_level, log_file)
+    logger = get_logger(__name__)
 
     wb_logger = wandb.init(
         # Set the wandb project where this run will be logged.
@@ -523,7 +499,7 @@ def main():
                 # Compute acoustic and prosodic styles
                 acoust_style[bidx, :] = model.acoustic_style_encoder(
                     mels4style,
-                    spk_emb=spk_embs[bidx].unsqueeze(0),
+                    spk_emb=spk_embs,
                     warmup_coef=1.0,  # no warmup
                 )
                 pros_style[bidx, :] = model.prosodic_style_encoder(mels4style)
@@ -710,7 +686,6 @@ def main():
             pros_style = model.prosodic_style_encoder(style_input_mel_batch)
             acoust_style = model.acoustic_style_encoder(
                 style_input_mel_batch,
-                spk_emb=spk_embs_st,
                 # Pass a clone to avoid potential in-place modifications affecting SCL target
                 spk_emb=spk_embs_st.clone(),
                 warmup_coef=1.0,  # no warmup
@@ -1253,10 +1228,10 @@ def main():
             avg_loss_align,
             avg_loss_f,
             avg_loss_sim,
-            gate_values.mean().item() if model_params.mode == "mix" else 0,
-            gate_values.std().item() if model_params.mode == "mix" else 0,
-            gate_values.min().item() if model_params.mode == "mix" else 0,
-            gate_values.max().item() if model_params.mode == "mix" else 0,
+            gate_values.mean().item() if model_params.style_mix.mode == "mix" else 0,
+            gate_values.std().item() if model_params.style_mix.mode == "mix" else 0,
+            gate_values.min().item() if model_params.style_mix.mode == "mix" else 0,
+            gate_values.max().item() if model_params.style_mix.mode == "mix" else 0,
         )
         wb_logger.log(
             {
@@ -1379,9 +1354,7 @@ def main():
                 config["model_params"]["diffusion"]["dist"]["sigma_data"] = float(
                     sigma_sum / sigma_count
                 )
-                logger.info(
-                    "Estimated sigma: %f", config["model_params"]["diffusion"]["dist"]["sigma_data"]
-                )
+                logger.info("Estimated sigma: %f", config.model_params.diffusion.dist.sigma_data)
 
                 # Save config file updated with estimated sigma
                 cfg_path = osp.join(log_dir, f"{cfg_name}.processed{cfg_ext}")

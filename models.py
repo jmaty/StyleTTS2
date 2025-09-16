@@ -1,7 +1,7 @@
 # coding:utf-8
 
-import logging
 import copy
+import logging
 import math
 import os
 from collections import OrderedDict
@@ -13,6 +13,8 @@ import yaml
 from munch import Munch, munchify
 from torch.nn.utils import spectral_norm, weight_norm
 from xlstm import mLSTMBlockConfig, mLSTMLayerConfig, xLSTMBlockStack, xLSTMBlockStackConfig
+
+from logger import get_logger
 
 # from logger import get_logger
 from Modules.diffusion.diffusion import AudioDiffusionConditional
@@ -29,19 +31,7 @@ from Utils.ASR.models import ASRCNN
 from Utils.JDC.model import JDCNet
 from Utils.speaker_encoder.models import HASPSpeakerEncoder
 
-# Setup logger
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-if not logger.handlers:  # ensure handler only once
-    _h = logging.StreamHandler()
-    _h.setLevel(logging.INFO)
-    # _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
-    _h.setFormatter(logging.Formatter("%(message)s"))
-    logger.addHandler(_h)
-    logger.propagate = False
-
-# # Setup logger
-# logger = get_logger(__name__)
+logger = get_logger(__name__)
 
 
 class LearnedDownSample(nn.Module):
