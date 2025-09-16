@@ -6,8 +6,6 @@ import time
 import traceback
 import warnings
 
-from logger import add_logging_args, get_logger, setup_logging
-
 import numpy as np
 import nvidia_smi
 import torch
@@ -19,6 +17,7 @@ from monotonic_align import mask_from_lens
 from munch import munchify
 from torch import nn
 
+from logger import add_logging_args, get_logger, setup_logging
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, create_slm_loss
 from meldataset import build_dataloader
 from models import StyleTTS2, load_ASR_models, load_F0_models, load_spkenc_model
@@ -217,7 +216,8 @@ def main():
     iters = 0
 
     load_pretrained = config.get("pretrained_model", "") != "" and config.get(
-        "second_stage_load_pretrained", False
+        "second_stage_load_pretrained",
+        False,
     )
 
     if not load_pretrained:
@@ -670,25 +670,41 @@ def main():
             # Add channel dim for encoders
             style_input_mel_batch = style_input_mel.unsqueeze(1)
 
-            # Speaker encoding:
-            spk_embs_st = None
-            # Resample ground-truth segments for speaker encoder
-            seg_st_for_spkenc = spkenc_resampler(wav_st)
+            # # Speaker encoding:
+            # spk_embs_st = None
+            # # Resample ground-truth segments for speaker encoder
+            # seg_st_for_spkenc = spkenc_resampler(wav_st)
 
-            # Conditionally use no_grad based on freeze setting
-            context = torch.no_grad() if spkenc_params.freeze else torch.enable_grad()
-            with context:
-                # Get speaker embeddings for the style reference segment
+            # # Conditionally use no_grad based on freeze setting
+            # context = torch.no_grad() if spkenc_params.freeze else torch.enable_grad()
+            # with context:
+            #     # Get speaker embeddings for the style reference segment
+            #     spk_embs_st = model.speaker_encoder(seg_st_for_spkenc)
+            # # Preserve target speaker embedding before any possible in-place use
+            # spk_embs_tgt = spk_embs_st.detach()
+
+            # Speaker encoding (target for SCL + conditioning for acoustic style)
+            seg_st_for_spkenc = spkenc_resampler(wav_st)
+            if spkenc_params.freeze:
+                # Frozen: metric only, no gradients to speaker_encoder
+                with torch.no_grad():
+                    spk_embs_tgt = model.speaker_encoder(seg_st_for_spkenc)
+                spk_embs_for_style = spk_embs_tgt
+            else:
                 spk_embs_st = model.speaker_encoder(seg_st_for_spkenc)
-            # Preserve target speaker embedding before any possible in-place use
-            spk_embs_tgt = spk_embs_st.detach()
+                spk_embs_tgt = spk_embs_st.detach()  # target without gradients
+                # allows fine-tuning speaker encoder through style path
+                spk_embs_for_style = spk_embs_st
 
             # Compute styles for the extracted segments
             pros_style = model.prosodic_style_encoder(style_input_mel_batch)
             acoust_style = model.acoustic_style_encoder(
                 style_input_mel_batch,
                 # Pass a clone to avoid potential in-place modifications affecting SCL target
-                spk_emb=spk_embs_st.clone(),
+                # spk_emb=spk_embs_st.clone(),
+                # For frozen we use the target directly;
+                # for FT we pass the computed embeddings to allow grad flow to spkenc
+                spk_emb=spk_embs_for_style,
                 warmup_coef=1.0,  # no warmup
             )
 
@@ -757,12 +773,17 @@ def main():
             loss_ce /= phonemes.size(0)
             loss_dur /= phonemes.size(0)
 
-            # Speaker consistency loss (SCL)
-            # Calculate speaker embeddings for the reconstructed audio
+            # # Speaker consistency loss (SCL)
+            # # Calculate speaker embeddings for the reconstructed audio
+            # seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
+            # # spk_embs_rec = speaker_encoder_infer(seg_rec_for_spkenc)
+            # spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc)
+            # # Compute loss: use embeddings form style waves as target speaker embeddings
+            # loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec).mean()
+
+            # Speaker consistency loss (SCL): gradient flows into y_rec/decoder
             seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
-            # spk_embs_rec = speaker_encoder_infer(seg_rec_for_spkenc)
             spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc)
-            # Compute loss: use embeddings form style waves as target speaker embeddings
             loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec).mean()
 
             loss_gen = (
@@ -807,7 +828,8 @@ def main():
                             model.acoustic_style_encoder.parameters(),
                             grad_clip,
                         )
-                    nn.utils.clip_grad_norm_(model.speaker_encoder.parameters(), grad_clip)
+                    if not spkenc_params.freeze:
+                        nn.utils.clip_grad_norm_(model.speaker_encoder.parameters(), grad_clip)
                     nn.utils.clip_grad_norm_(model.decoder.parameters(), grad_clip)
                 if "acoustic_style_encoder" not in not_trainable_modules:
                     optimizer.step("acoustic_style_encoder")
@@ -1177,16 +1199,22 @@ def main():
                     f0_real, _, _ = model.pitch_extractor(mel_gt.unsqueeze(1))
                     loss_f0 = F.l1_loss(f0_real, f0_fake) / 10
 
-                    # Calculate speaker consistency loss
+                    # # Calculate speaker consistency loss
+                    # spk_embs_tgt = spk_embs_gt  # target speaker embeddings
+                    # # Calculate speaker embeddings for the reconstructed audio
+                    # # seg_rec_for_spkenc = resample(y_rec.squeeze(), spkenc_resampler)
+                    # seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
+                    # # spk_embs_rec = speaker_encoder_infer(seg_rec_for_spkenc.detach())
+                    # spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc.detach())
+                    # # Compute speaker consistency loss (i.e. cosine similarity)
+                    # loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec)
+
+                    # Calculate speaker embeddings for the reconstructed audio (metric only)
                     spk_embs_tgt = spk_embs_gt  # target speaker embeddings
-                    # Calculate speaker embeddings for the reconstructed audio
-                    # seg_rec_for_spkenc = resample(y_rec.squeeze(), spkenc_resampler)
                     seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
-                    # spk_embs_rec = speaker_encoder_infer(seg_rec_for_spkenc.detach())
-                    spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc.detach())
+                    spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc)
                     # Compute speaker consistency loss (i.e. cosine similarity)
                     loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec)
-                    # Gather similarity loss across all processes
 
                     # Aggregate losses (loss_dur is the mean over valid elements)
                     loss_test += (loss_mel).mean()
