@@ -255,7 +255,9 @@ class HASPSpeakerEncoder(nn.Module):
         Shapes:
             - x: :math:`(N, 1, T_{in})`
         """
-        x.squeeze_(1)
+        x.squeeze_(1)  # in-place causes problems with DataParallel
+        # Avoid in-place ops on tensors coming from DataParallel's scatter/view
+        # x = x.squeeze(1).clone()
 
         x = self.torch_spec(x)  # convert wav to mels
 

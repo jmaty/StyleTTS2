@@ -663,7 +663,7 @@ def main():
                 loss_scl = 0
                 g_loss = loss_mel
 
-            g_loss /= grad_accum_steps  # JMa: normalize loss
+            g_loss = g_loss / grad_accum_steps  # JMa: normalize loss
             # JMa: Compute gradients only for generator
             inputs = (
                 list(model.decoder.parameters())
