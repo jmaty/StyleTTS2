@@ -138,6 +138,9 @@ def main():
     loss_params = config.loss_params
     spkenc_params = config.model_params.spkenc_params
 
+    # Optional SCL: treat as disabled when lambda_scl is absent or <= 0
+    use_scl = bool(getattr(loss_params, "lambda_scl", 0.0))
+
     assert spkenc_params.freeze, "Speaker encoder must be frozen so far!"
 
     # Set up text cleaner and pre-processing function
@@ -668,34 +671,15 @@ def main():
                 # # Compute loss: use embeddings form style waves as target speaker embeddings
                 # loss_scl = 1 - F.cosine_similarity(spk_embs_st, spk_embs_rec).mean()
 
-                # # Speaker Consistency Loss (SCL)
-                # # target = embeddings from style reference (detach to avoid gradients)
-                # # target prepared earlier (detached)
-                # # spk_embs_tgt = spk_embs_st.detach()
-                # # reconstructed = embeddings from the reconstructed audio
-                # # (leave gradients for decoder update)
-                # seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
-                # spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc)
-                # loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec).mean()
-
-                # # Speaker Consistency Loss (SCL)
-                # # - keep grad to y_rec (decoder), but do not update speaker encoder params
-                # # - SCL updates decoder to maintain speaker identity
-                # seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
-                # _req = []
-                # for p in model.speaker_encoder.parameters():
-                #     _req.append(p.requires_grad)
-                #     p.requires_grad_(False)
-                # spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc)
-                # for p, f in zip(model.speaker_encoder.parameters(), _req):
-                #     p.requires_grad_(f)
-                # loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec).mean()
-
-                seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
-                # reconstructed = embeddings from the reconstructed audio
-                # (leave gradients for decoder update)
-                spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc)  # grads only to y_rec
-                loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec).mean()
+                # Speaker Consistency Loss (SCL) — compute only if enabled
+                if use_scl:
+                    seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
+                    # reconstructed = embeddings from the reconstructed audio
+                    # (leave gradients for decoder update)
+                    spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc)  # grads only to y_rec
+                    loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec).mean()
+                else:
+                    loss_scl = 0.0
 
                 # Final generator loss is a weighted sum of the above losses
                 g_loss = (
@@ -726,7 +710,7 @@ def main():
                 inputs += list(model.acoustic_style_encoder.parameters())
             if epoch >= tma_epoch:
                 inputs += list(model.text_aligner.parameters())
-                if not spkenc_params.freeze:
+                if use_scl and not spkenc_params.freeze:
                     # Do not do this if speaker encoder is frozen
                     # => SCL updates decoder
                     inputs += list(model.speaker_encoder.parameters())
@@ -749,7 +733,7 @@ def main():
 
                 if epoch >= tma_epoch:
                     optimizer.step("text_aligner")
-                    if not spkenc_params.freeze:
+                    if use_scl and not spkenc_params.freeze:
                         optimizer.step("speaker_encoder")
                     # JMa: pitch extractor should not be updated, see:
                     # https://github.com/yl4579/StyleTTS2/issues/10#issuecomment-1783701686
@@ -966,8 +950,8 @@ def main():
                 #     # Gather similarity loss across all processes
                 #     loss_sim += acc.gather(loss_scl).mean().item()
 
-                # Speaker consistency loss (SCL)
-                if epoch >= tma_epoch:
+                # Speaker consistency loss (SCL) — metric only if enabled
+                if epoch >= tma_epoch and use_scl:
                     # SCL in validation: metric only (no grads), speaker_encoder is frozen
                     spk_embs_tgt = spk_embs_gt
                     seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
