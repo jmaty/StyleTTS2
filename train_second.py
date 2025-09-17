@@ -135,6 +135,8 @@ def main():
     loss_params = config.loss_params
     optimizer_params = config.optimizer_params
     spkenc_params = config.model_params.spkenc_params
+    # Optional SCL: disabled when lambda_scl is absent or <= 0
+    use_scl = bool(getattr(loss_params, "lambda_scl", 0.0))
 
     # Set up text cleaner
     text_cleaner = TextCleaner(data_params.symbol_dict_path, pad=data_params.pad)
@@ -378,6 +380,7 @@ def main():
     logger.info(" | > Total epochs:       %d", epochs)
     logger.info(" | > Steps per epoch:    %d", steps_per_epoch)
     logger.info(" | > Input iterations:   %d", iters)
+    logger.info(" | > Style mix mode:     %s", model_params.style_mix.mode)
     logger.info(" | > Train data:         %s", data_params.train_data)
     logger.info(" | > Valid data:         %s", data_params.val_data)
     logger.info(" | > Pretrained model:   %s", config.pretrained_model)
@@ -394,6 +397,7 @@ def main():
     logger.info(" | > Spk. embedding dim: %d", model_params.spkenc_params.dim_in)
     logger.info(" | > Acoust style dim:   %d", model_params.spkenc_params.spk_emb_dim)
     logger.info(" | > Pros. style dim:    %d", model_params.style_dim)
+    logger.info(" | > Use SCL:            %s", use_scl)
     logger.info("")
 
     # === Start of training loop ==============================================
@@ -781,10 +785,14 @@ def main():
             # # Compute loss: use embeddings form style waves as target speaker embeddings
             # loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec).mean()
 
-            # Speaker consistency loss (SCL): gradient flows into y_rec/decoder
-            seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
-            spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc)
-            loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec).mean()
+            # Speaker consistency loss (SCL): compute only if enabled
+            if use_scl:
+                # gradient flows into y_rec/decoder
+                seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
+                spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc)
+                loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec).mean()
+            else:
+                loss_scl = 0.0
 
             loss_gen = (
                 loss_params.lambda_mel * loss_mel
@@ -1209,18 +1217,21 @@ def main():
                     # # Compute speaker consistency loss (i.e. cosine similarity)
                     # loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec)
 
-                    # Calculate speaker embeddings for the reconstructed audio (metric only)
+                    # Speaker Consistency Loss (metric): compute only if enabled
                     spk_embs_tgt = spk_embs_gt  # target speaker embeddings
-                    seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
-                    spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc)
-                    # Compute speaker consistency loss (i.e. cosine similarity)
-                    loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec)
+                    if use_scl:
+                        seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
+                        spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc)
+                        # cosine similarity (no grads in eval)
+                        loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec).mean()
+                    else:
+                        loss_scl = 0.0
 
                     # Aggregate losses (loss_dur is the mean over valid elements)
                     loss_test += (loss_mel).mean()
                     loss_align += (loss_dur).mean()
                     loss_f += (loss_f0).mean()
-                    loss_sim += (loss_scl).mean()
+                    loss_sim += loss_scl
 
                     iters_test += 1
 
@@ -1237,7 +1248,7 @@ def main():
         avg_loss_test = loss_test.item() / iters_test
         avg_loss_align = loss_align.item() / iters_test
         avg_loss_f = loss_f.item() / iters_test
-        avg_loss_sim = loss_sim.item() / iters_test
+        avg_loss_sim = loss_sim / iters_test
         # Update best validation loss
         best_loss = min(avg_loss_test, best_loss)
 
@@ -1249,7 +1260,7 @@ def main():
             else model.acoustic_style_encoder.gate_param
         )
         logger.info(
-            "Epoch [%3d/%d]: Validation loss: %.3f (best: %.3f), Dur loss: %.3f, F0 loss: %.3f, Speaker Consistency Loss: %.3f, Gate weights: %.6f±%.6f (%.6f-%.6f)",
+            "Epoch [%3d/%d]: Validation loss: %.3f (best: %.3f), Dur loss: %.3f, F0 loss: %.3f, SCL: %.3f, Gate weights: %.6f±%.6f (%.6f-%.6f)",
             epoch + 1,
             epochs,
             avg_loss_test,
@@ -1267,7 +1278,7 @@ def main():
                 "eval/mel_loss": avg_loss_test,
                 "eval/dur_loss": avg_loss_align,
                 "eval/F0_loss": avg_loss_f,
-                "eval/sim_loss": avg_loss_sim,
+                "eval/scl_loss": avg_loss_sim,
             },
             step=iters,
         )
