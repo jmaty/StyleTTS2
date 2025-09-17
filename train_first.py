@@ -357,11 +357,14 @@ def main():
         logger.info(" | > F0 model:            %s", config.F0_path)
         logger.info(" | > PL-BERT:             %s", config.PLBERT_dir)
         logger.info(" | > Batch size:          %d", batch_size)
+        logger.info(" | > Grad. accum. steps:  %d", grad_accum_steps)
+        logger.info(" | > Effect. batch size:  %d", batch_size * grad_accum_steps)
         logger.info(" | > Max len:             %d", max_len)
         logger.info(" | > SLM loss:            %s", model_params.slm.model)
         logger.info(" | > Inp. spk. emb. dim:  %d", model_params.spkenc_params.dim_in)
         logger.info(" | > Acoust style dim:    %d", acoustic_style_dim)
         logger.info(" | > Pros. style dim:     %d", model_params.style_dim)
+        logger.info(" | > Use SCL:             %s", use_scl)
         logger.info("")
 
     # === Start of training loop ==============================================
