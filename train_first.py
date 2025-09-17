@@ -337,6 +337,10 @@ def main():
         logger.info(" | > Experiment label:    %s", config.label)
         logger.info(" | > Starting epoch:      %d", start_epoch)
         logger.info(" | > Total epochs:        %d", epochs)
+        logger.info(" | > Steps per epoch:     %d", steps_per_epoch)
+        logger.info(" | > Updates per epoch:   %d", updates_per_epoch)
+        logger.info(" | > Input iterations:    %d", iters)
+        logger.info(" | > Style mix mode:      %s", model_params.style_mix.mode)
         logger.info(" | > Warmup mode:         %s", model_params.style_mix.warmup_mode)
         logger.info(
             " | > Warmup (epochs/it.): %d-%d / %d-%d",
@@ -347,9 +351,6 @@ def main():
             warmup_beg_updates,
             warmup_end_updates,
         )
-        logger.info(" | > Steps per epoch:     %d", steps_per_epoch)
-        logger.info(" | > Updates per epoch:   %d", updates_per_epoch)
-        logger.info(" | > Input iterations:    %d", iters)
         logger.info(" | > Train data:          %s", data_params.train_data)
         logger.info(" | > Valid data:          %s", data_params.val_data)
         logger.info(" | > Pretrained model:    %s", config.pretrained_model)
