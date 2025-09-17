@@ -567,7 +567,7 @@ def main():
             # Compute warmup coefficient
             warmup_coef = (
                 warmup_scheduler(updates + 1, warmup_beg_updates, warmup_end_updates)
-                if model.multispeaker and model.mix_mode == "mix"
+                if model.multispeaker and model_params.style_mix.mode == "mix"
                 else None
             )
             # warmup_coef = (
