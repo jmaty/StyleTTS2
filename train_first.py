@@ -29,6 +29,7 @@ from utils import (
     length_to_mask,
     log_norm,
     maximum_path,
+    nccl_warmup,
     warmup_scheduler,
 )
 from Utils.PLBERT.util import load_plbert
@@ -65,9 +66,16 @@ def main():
     log_dir = config.log_dir
     os.makedirs(log_dir, exist_ok=True)
 
-    # Distributed computing
+    # must be before Accelerator
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     acc = Accelerator(project_dir=log_dir, split_batches=True, kwargs_handlers=[ddp_kwargs])
+
+    # NCCL warm-up
+    nccl_warmup(device=getattr(acc, "device", None), local_rank=local_rank)
 
     # Uniform logging (main process only)
     log_file = args.log_file or osp.join(log_dir, "train.log")
@@ -180,14 +188,6 @@ def main():
     # Prepare model for distributed training
     for k in model:
         model[k] = acc.prepare(model[k])
-
-    # # Create inference copy of speaker encoder (for speaker consistency loss)
-    # speaker_encoder_infer = clone_model(
-    #     model.speaker_encoder,
-    #     device=device,
-    #     freeze=True,
-    #     eval_mode=True,
-    # )
 
     # Load data
     train_list, val_list = get_data_path_list(train_path, val_path)
@@ -836,7 +836,7 @@ def main():
                 bsize = mel_inp_len.shape[0]
 
                 with torch.no_grad():
-                    mel_mask = length_to_mask(mel_inp_len // (2**n_down)).to("cuda")
+                    mel_mask = length_to_mask(mel_inp_len // (2**n_down)).to(device)
                     _, s2s_pred, d_algn = model.text_aligner(mels, mel_mask, phonemes)
 
                     d_algn = d_algn.transpose(-1, -2)
