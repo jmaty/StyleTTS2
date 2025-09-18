@@ -137,6 +137,11 @@ def main():
     spkenc_params = config.model_params.spkenc_params
     # Optional SCL: disabled when lambda_scl is absent or <= 0
     use_scl = bool(getattr(loss_params, "lambda_scl", 0.0))
+    # Optional fine-tuning for speaker encoder
+    # - freeze: if False, allow training
+    # - unfreeze_epoch: set to joint start
+    # - lr: optional dedicated LR for speaker_encoder
+    spkenc_unfreeze_epoch = joint_epoch
 
     # Set up text cleaner
     text_cleaner = TextCleaner(data_params.symbol_dict_path, pad=data_params.pad)
@@ -290,6 +295,15 @@ def main():
     # Build parameter groups for optimizer
     optimizer = build_optimizer(parameters_dict, scheduler_params_dict, optimizer_params.lr)
 
+    # Optional dedicated LR for speaker encoder
+    if "speaker_encoder" in optimizer.optimizers:
+        try:
+            for g in optimizer.optimizers["speaker_encoder"].param_groups:
+                g["lr"] = spkenc_params.lr
+                g["initial_lr"] = spkenc_params.lr
+        except Exception:
+            pass
+
     # adjust BERT learning rate
     for g in optimizer.optimizers["bert"].param_groups:
         g["betas"] = (0.9, 0.99)
@@ -398,14 +412,22 @@ def main():
     logger.info(" | > Acoust style dim:   %d", model_params.spkenc_params.spk_emb_dim)
     logger.info(" | > Pros. style dim:    %d", model_params.style_dim)
     logger.info(" | > Use SCL:            %s", use_scl)
+    logger.info(
+        " | > SpkEnc freeze:       %s (unfreeze@epoch=%d, lr=%s)",
+        spkenc_params.freeze,
+        spkenc_unfreeze_epoch,
+        spkenc_params.lr,
+    )
     logger.info("")
 
     # === Start of training loop ==============================================
 
     # Train model
     for epoch in range(start_epoch, epochs):
+        logger.debug("> ----- Epoch %d/%d -----", epoch + 1, epochs)
         running_loss = 0
         start_time = time.time()
+        train_dataloader.batch_sampler.epoch = epoch  # Set epoch for the sampler
 
         # Set all models to eval mode
         model.set_mode("eval")
@@ -417,6 +439,26 @@ def main():
             "bert",
             "prosodic_style_encoder",
         ]
+
+        # Decide if speaker encoder should be trained this epoch
+        spkenc_train_enabled = (
+            model.multispeaker
+            and not spkenc_params.freeze
+            and use_scl
+            and epoch >= spkenc_unfreeze_epoch
+        )
+
+        # If we plan to train speaker encoder now, ensure its params require grads
+        if spkenc_train_enabled and "speaker_encoder" in model:
+            for p in model.speaker_encoder.parameters():
+                p.requires_grad = True
+
+        logger.debug(
+            "| > Speaker encoder training %s at epoch %d",
+            "ENABLED" if spkenc_train_enabled else "DISABLED",
+            epoch + 1,
+        )
+
         # Models in train mode based on the epoch
         if epoch >= diff_epoch:
             train_components.extend(["msd", "mpd", "diffusion"])
@@ -424,7 +466,7 @@ def main():
             train_components.extend(["decoder", "wd"])
             if "acoustic_style_encoder" not in not_trainable_modules:
                 modules.append("acoustic_style_encoder")
-            if not spkenc_params.freeze:
+            if spkenc_train_enabled:
                 train_components.append("speaker_encoder")
 
         # Set models to train mode
@@ -476,7 +518,8 @@ def main():
                     # Vectorized computation for reference styles
                     ref_mels_batch = ref_mels.unsqueeze(1)  # Shape: [B, 1, n_mels, max_ref_len]
                     # Shape: [B, spk_emb_dim]
-                    ref_spk_embs = model.speaker_encoder(ref_waves)
+                    with torch.no_grad():
+                        ref_spk_embs = model.speaker_encoder(ref_waves)
                     ref_acoust_style = model.acoustic_style_encoder(
                         ref_mels_batch,
                         spk_emb=ref_spk_embs,
@@ -498,15 +541,18 @@ def main():
 
                 # Resample ground-truth segments for speaker encoder
                 seg4spkenc = spkenc_resampler(waves[bidx].to(device).unsqueeze(0))
-                # Get speaker embeddings for the segment
-                spk_embs = model.speaker_encoder(seg4spkenc)
 
-                # Compute acoustic and prosodic styles
-                acoust_style[bidx, :] = model.acoustic_style_encoder(
-                    mels4style,
-                    spk_emb=spk_embs,
-                    warmup_coef=1.0,  # no warmup
-                )
+                # No grad proposed by Codex
+                with torch.no_grad():
+                    # Get speaker embeddings for the segment
+                    spk_embs = model.speaker_encoder(seg4spkenc)
+                    # Compute acoustic and prosodic styles
+                    acoust_style[bidx, :] = model.acoustic_style_encoder(
+                        mels4style,
+                        spk_emb=spk_embs,
+                        warmup_coef=1.0,  # no warmup
+                    )
+                # prosodic style used for prosodic prediction => use grad
                 pros_style[bidx, :] = model.prosodic_style_encoder(mels4style)
 
             # Set ground truth style for denoiser
@@ -689,7 +735,7 @@ def main():
 
             # Speaker encoding (target for SCL + conditioning for acoustic style)
             seg_st_for_spkenc = spkenc_resampler(wav_st)
-            if spkenc_params.freeze:
+            if not spkenc_train_enabled:
                 # Frozen: metric only, no gradients to speaker_encoder
                 with torch.no_grad():
                     spk_embs_tgt = model.speaker_encoder(seg_st_for_spkenc)
@@ -836,12 +882,12 @@ def main():
                             model.acoustic_style_encoder.parameters(),
                             grad_clip,
                         )
-                    if not spkenc_params.freeze:
+                    if spkenc_train_enabled:
                         nn.utils.clip_grad_norm_(model.speaker_encoder.parameters(), grad_clip)
                     nn.utils.clip_grad_norm_(model.decoder.parameters(), grad_clip)
                 if "acoustic_style_encoder" not in not_trainable_modules:
                     optimizer.step("acoustic_style_encoder")
-                if not spkenc_params.freeze:
+                if spkenc_train_enabled:
                     optimizer.step("speaker_encoder")
                 optimizer.step("decoder")
 
