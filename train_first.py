@@ -147,13 +147,13 @@ def main():
     spkenc_params = config.model_params.spkenc_params
 
     # Optional SCL: treat as disabled when lambda_scl is absent or <= 0
-    use_scl = bool(getattr(loss_params, "lambda_scl", 0.0))
+    use_scl = bool(loss_params.get("lambda_scl", 0.0))
 
     # Optional fine-tuning of speaker encoder
     # - freeze: if False, allow training
     # - unfreeze_epoch: optionally delay training until given epoch
     # - lr: optional dedicated LR for speaker_encoder
-    spkenc_unfreeze_epoch = int(getattr(spkenc_params, "unfreeze_epoch", tma_epoch))
+    spkenc_unfreeze_epoch = spkenc_params.get("unfreeze_epoch", tma_epoch)
     # Note: do not force freeze; allow optional finetuning via config
 
     # Set up text cleaner and pre-processing function
@@ -270,12 +270,10 @@ def main():
     if (
         model.multispeaker
         and "speaker_encoder" in raw_param_groups
-        and (
-            not getattr(spkenc_params, "freeze", True)
-            or hasattr(spkenc_params, "unfreeze_epoch")
-        )
+        and (not getattr(spkenc_params, "freeze", True) or hasattr(spkenc_params, "unfreeze_epoch"))
     ):
         parameters_filtered["speaker_encoder"] = raw_param_groups["speaker_encoder"]
+
     not_trainable_modules = [k for k, v in parameters_filtered.items() if len(v) == 0]
     parameters_dict = {k: v for k, v in parameters_filtered.items() if v}
 
@@ -287,14 +285,10 @@ def main():
     optimizer = build_optimizer(parameters_dict, scheduler_params_dict, lr)
 
     # Optional dedicated LR for speaker encoder
-    if (
-        "speaker_encoder" in optimizer.optimizers
-        and hasattr(spkenc_params, "lr")
-        and spkenc_params.lr is not None
-    ):
+    if "speaker_encoder" in optimizer.optimizers:
         try:
             for pg in optimizer.optimizers["speaker_encoder"].param_groups:
-                pg["lr"] = float(spkenc_params.lr)
+                pg["lr"] = spkenc_params.lr
         except Exception:
             pass
 
@@ -397,10 +391,10 @@ def main():
         logger.info(" | > Pros. style dim:     %d", model_params.style_dim)
         logger.info(" | > Use SCL:             %s", use_scl)
         logger.info(
-            " | > SpkEnc freeze:        %s (unfreeze@epoch=%d, lr=%s)",
-            bool(getattr(spkenc_params, "freeze", True)),
+            " | > SpkEnc freeze:       %s (unfreeze@epoch=%d, lr=%s)",
+            spkenc_params.freeze,
             spkenc_unfreeze_epoch,
-            getattr(spkenc_params, "lr", None),
+            spkenc_params.lr,
         )
         logger.info("")
 
@@ -412,6 +406,7 @@ def main():
 
     # Iterate through the defined number of epochs
     for epoch in range(start_epoch, epochs):
+        logger.debug("> ----- Epoch %d/%d -----", epoch + 1, epochs)
         running_loss = 0
         start_time = time.time()
         train_dataloader.batch_sampler.epoch = epoch  # Set epoch for the sampler
@@ -420,19 +415,15 @@ def main():
         # Decide if speaker encoder should be trained this epoch
         spkenc_train_enabled = (
             model.multispeaker
+            and not spkenc_params.freeze
             and use_scl
-            and (
-                (not spkenc_params.freeze)
-                or (
-                    hasattr(spkenc_params, "unfreeze_epoch")
-                    and epoch >= spkenc_unfreeze_epoch
-                )
-            )
+            and epoch >= spkenc_unfreeze_epoch
         )
         # If we plan to train speaker encoder now, ensure its params require grads
         if spkenc_train_enabled and "speaker_encoder" in model:
             for p in model.speaker_encoder.parameters():
                 p.requires_grad = True
+            logger.debug("| > Speaker encoder training ENABLED at epoch %d", epoch + 1)
 
         # Models in train mode from the beginning
         train_components = [
@@ -448,6 +439,7 @@ def main():
             train_components.extend(["msd", "mpd", "text_aligner"])
             if spkenc_train_enabled:
                 train_components.append("speaker_encoder")
+
         # Set models to train mode
         model.set_mode("train", train_components)
 
@@ -732,8 +724,7 @@ def main():
                 if use_scl:
                     seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
                     # reconstructed = embeddings from the reconstructed audio
-                    # (leave gradients for decoder update)
-                    spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc)  # grads only to y_rec
+                    spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc)
                     loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec).mean()
                 else:
                     loss_scl = 0.0
