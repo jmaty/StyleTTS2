@@ -423,7 +423,12 @@ def main():
         if spkenc_train_enabled and "speaker_encoder" in model:
             for p in model.speaker_encoder.parameters():
                 p.requires_grad = True
-            logger.debug("| > Speaker encoder training ENABLED at epoch %d", epoch + 1)
+
+        logger.debug(
+            "| > Speaker encoder training %s at epoch %d",
+            "ENABLED" if spkenc_train_enabled else "DISABLED",
+            epoch + 1,
+        )
 
         # Models in train mode from the beginning
         train_components = [
@@ -640,17 +645,13 @@ def main():
             #     spk_embs_tgt = spk_embs_st.detach()
 
             # Target speaker embedding for style conditioning:
-            spk_embs_tgt = None
+            # Always keep conditioning target detached (no_grad), even if spkenc FT is enabled.
+            # FT for speaker encoder should flow only via SCL (reconstructed audio path).
             if model.multispeaker:
-                if spkenc_params.freeze:
-                    # Frozen encoder: eval + no_grad, bez togglování módů
-                    with torch.no_grad():
-                        spk_embs_tgt = model.speaker_encoder(seg4style)
-                else:
-                    # Nezmrazený: ponech stávající chování (target bez gradů)
-                    # Not-frozen encoder
-                    spk_embs_st = model.speaker_encoder(seg4style)
-                    spk_embs_tgt = spk_embs_st.detach()
+                with torch.no_grad():
+                    spk_embs_tgt = model.speaker_encoder(seg4style)
+            else:
+                spk_embs_tgt = None
 
             # Only (acoustic) style encoder is trained within 1st stage training
             style = model.acoustic_style_encoder(
