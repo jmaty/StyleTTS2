@@ -288,9 +288,9 @@ def main():
     if "speaker_encoder" in optimizer.optimizers:
         try:
             for pg in optimizer.optimizers["speaker_encoder"].param_groups:
-                pg["lr"] = spkenc_params.lr
+                pg["lr"] = float(spkenc_params.lr)
         except Exception:
-            pass
+            logger.warning("Cannot set dedicated LR for speaker encoder.")
 
     # Prepare optimizers and schedulers for distributed training
     for k, _ in optimizer.optimizers.items():
