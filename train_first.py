@@ -626,8 +626,8 @@ def main():
             #     else None
             # )
 
-            # Speaker encoding:
-            spk_embs_st = None
+            # # Speaker encoding:
+            # spk_embs_st = None
             # Resample ground-truth segments for speaker encoder
             seg4style = spkenc_resampler(wav_st) if model.multispeaker else spkenc_resampler(wav_gt)
 
