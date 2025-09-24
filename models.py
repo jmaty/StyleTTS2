@@ -2189,3 +2189,55 @@ class StyleTTS2:
             iters = 0
 
         return optimizer, epoch, iters
+
+    def params_for_optimizer(
+        self,
+        epochs,
+        steps_per_epoch,
+        optimizer_params,
+        use_max_lr=False,
+        spkenc_params=None,
+    ):
+        # Default common scheduler parameters
+        scheduler_params = {
+            "max_lr": optimizer_params.lr,
+            "pct_start": float(0),
+            "epochs": epochs,
+            "steps_per_epoch": steps_per_epoch,
+        }
+
+        raw_param_groups = {k: list(self._model[k].parameters()) for k in self._model}
+
+        # Leave only parameters with requires_grad=True (default),
+        # but optionally include speaker_encoder params even if currently frozen,
+        # so we can unfreeze later without rebuilding optimizers.
+        parameters_filtered = {
+            k: [p for p in v if p.requires_grad] for k, v in raw_param_groups.items()
+        }
+        # Always include speaker_encoder params in optimizer if multispeaker and
+        # finetuning is desired now or later (unfreeze_epoch specified)
+        if (
+            self.multispeaker
+            and "speaker_encoder" in raw_param_groups
+            and (
+                not getattr(spkenc_params, "freeze", True)
+                or hasattr(spkenc_params, "unfreeze_epoch")
+            )
+        ):
+            parameters_filtered["speaker_encoder"] = raw_param_groups["speaker_encoder"]
+
+        not_trainable_modules = [k for k, v in parameters_filtered.items() if len(v) == 0]
+        parameters_dict = {k: v for k, v in parameters_filtered.items() if v}
+        scheduler_params_dict = {k: scheduler_params.copy() for k in parameters_dict}
+
+        # Update scheduler `max_lr` parameters
+        if use_max_lr:
+            scheduler_params_dict["bert"]["max_lr"] = optimizer_params.bert_lr * 2
+            scheduler_params_dict["decoder"]["max_lr"] = optimizer_params.ft_lr * 2
+            if "acoustic_style_encoder" not in not_trainable_modules:
+                scheduler_params_dict["acoustic_style_encoder"]["max_lr"] = (
+                    optimizer_params.ft_lr * 2
+                )
+            scheduler_params_dict["prosodic_style_encoder"]["max_lr"] = optimizer_params.ft_lr * 2
+
+        return parameters_dict, scheduler_params_dict, not_trainable_modules

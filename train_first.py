@@ -186,6 +186,7 @@ def main():
     # Initialize StyleTTS2 model
     logger.info("Building StyleTTS2 model...")
     model = StyleTTS2(model_params, text_aligner, pitch_extractor, plbert, speaker_encoder)
+
     # The following parameters must be set before accelerator.prepare()
     acoustic_style_dim = model.acoustic_style_encoder.style_dim
     bert_size = model.bert.config.max_position_embeddings  # ALBERT config
@@ -246,43 +247,63 @@ def main():
     # Prepare dataloaders for accelerated training
     train_dataloader, val_dataloader = acc.prepare(train_dataloader, val_dataloader)
 
-    scheduler_params = {
-        "max_lr": float(config["optimizer_params"].get("lr", 1e-4)),
-        "pct_start": float(config["optimizer_params"].get("pct_start", 0.0)),
-        "epochs": epochs,
-        "steps_per_epoch": int(np.ceil(len(train_dataloader) / max(1, grad_accum_steps))),
-    }
+    # Number of iteration-steps per epoch (per process)
+    steps_per_epoch = len(train_dataloader)
+    # Warmup iterations (valid for mode="mix")
+    # Number of update-steps per epoch (accounts for grad accumulation)
+    updates_per_epoch = int(np.ceil(steps_per_epoch / max(1, grad_accum_steps)))
+    # Warmup thresholds in update-krocích (stabilní vůči grad_accum_steps)
+    warmup_beg_updates = int(updates_per_epoch * model_params.style_mix.warmup_beg_epoch)
+    warmup_end_updates = int(updates_per_epoch * model_params.style_mix.warmup_end_epoch)
+    # warmup_beg_iters = int(steps_per_epoch * model_params.style_mix.warmup_beg_epoch)
+    # warmup_end_iters = int(steps_per_epoch * model_params.style_mix.warmup_end_epoch)
+
+    # scheduler_params = {
+    #     "max_lr": float(config["optimizer_params"].get("lr", 1e-4)),
+    #     "pct_start": float(config["optimizer_params"].get("pct_start", 0.0)),
+    #     "epochs": epochs,
+    #     "steps_per_epoch": updates_per_epoch,
+    # }
 
     # Move models to device (cuda)
     model.to(device)
 
-    # Initialize optimizers after preparing models for compatibility with FSDP
-    lr = float(config["optimizer_params"].get("lr", 1e-4))
-    raw_param_groups = {k: list(model[k].parameters()) for k in model}
-    # Leave only parameters with requires_grad=True (default),
-    # but optionally include speaker_encoder params even if currently frozen,
-    # so we can unfreeze later without rebuilding optimizers.
-    parameters_filtered = {
-        k: [p for p in v if p.requires_grad] for k, v in raw_param_groups.items()
-    }
-    # Always include speaker_encoder params in optimizer if multispeaker and
-    # finetuning is desired now or later (unfreeze_epoch specified)
-    if (
-        model.multispeaker
-        and "speaker_encoder" in raw_param_groups
-        and (not getattr(spkenc_params, "freeze", True) or hasattr(spkenc_params, "unfreeze_epoch"))
-    ):
-        parameters_filtered["speaker_encoder"] = raw_param_groups["speaker_encoder"]
+    # raw_param_groups = {k: list(model[k].parameters()) for k in model}
+    # # Leave only parameters with requires_grad=True (default),
+    # # but optionally include speaker_encoder params even if currently frozen,
+    # # so we can unfreeze later without rebuilding optimizers.
+    # parameters_filtered = {
+    #     k: [p for p in v if p.requires_grad] for k, v in raw_param_groups.items()
+    # }
+    # # Always include speaker_encoder params in optimizer if multispeaker and
+    # # finetuning is desired now or later (unfreeze_epoch specified)
+    # if (
+    #     model.multispeaker
+    #     and "speaker_encoder" in raw_param_groups
+    #     and (not getattr(spkenc_params, "freeze", True) or hasattr(spkenc_params, "unfreeze_epoch"))
+    # ):
+    #     parameters_filtered["speaker_encoder"] = raw_param_groups["speaker_encoder"]
 
-    not_trainable_modules = [k for k, v in parameters_filtered.items() if len(v) == 0]
-    parameters_dict = {k: v for k, v in parameters_filtered.items() if v}
+    # not_trainable_modules = [k for k, v in parameters_filtered.items() if len(v) == 0]
+    # parameters_dict = {k: v for k, v in parameters_filtered.items() if v}
 
-    if acc.is_main_process:
-        logger.info("Optimizer groups: %s", list(parameters_dict.keys()))
-        if not_trainable_modules:
-            logger.info("Not trainable modules: %s", not_trainable_modules)
-    scheduler_params_dict = {k: scheduler_params.copy() for k in parameters_dict}
-    optimizer = build_optimizer(parameters_dict, scheduler_params_dict, lr)
+    # if acc.is_main_process:
+    #     logger.info("Optimizer groups: %s", list(parameters_dict.keys()))
+    #     if not_trainable_modules:
+    #         logger.info("Not trainable modules: %s", not_trainable_modules)
+    # scheduler_params_dict = {k: scheduler_params.copy() for k in parameters_dict}
+    parameters_dict, scheduler_params_dict, not_trainable_modules = model.params_for_optimizer(
+        epochs,
+        updates_per_epoch,
+        config.optimizer_params,
+        use_max_lr=False,
+        spkenc_params=spkenc_params,
+    )
+    logger.info("Optimizer groups: %s", list(parameters_dict.keys()))
+    logger.info("Not trainable modules: %s", not_trainable_modules)
+    optimizer = build_optimizer(parameters_dict, scheduler_params_dict, config.optimizer_params.lr)
+
+    logger.debug("Optimizer: %s", optimizer.optimizers)
 
     # Optional dedicated LR for speaker encoder
     if "speaker_encoder" in optimizer.optimizers:
@@ -291,6 +312,8 @@ def main():
                 pg["lr"] = float(spkenc_params.lr)
         except Exception:
             logger.warning("Cannot set dedicated LR for speaker encoder.")
+
+    logger.debug("Speaker encoder optimizer: %s", optimizer.optimizers["speaker_encoder"])
 
     # Prepare optimizers and schedulers for distributed training
     for k, _ in optimizer.optimizers.items():
@@ -341,17 +364,6 @@ def main():
     # Create phoneme-to-speech object for synthesizing validation sentences
     # - use global noise for speed
     pts = PTS(config, model, use_glob_noise=True)
-
-    # Number of iteration-steps per epoch (per process)
-    steps_per_epoch = len(train_dataloader)
-    # Warmup iterations (valid for mode="mix")
-    # Number of update-steps per epoch (accounts for grad accumulation)
-    updates_per_epoch = int(np.ceil(steps_per_epoch / max(1, grad_accum_steps)))
-    # Warmup thresholds in update-krocích (stabilní vůči grad_accum_steps)
-    warmup_beg_updates = int(updates_per_epoch * model_params.style_mix.warmup_beg_epoch)
-    warmup_end_updates = int(updates_per_epoch * model_params.style_mix.warmup_end_epoch)
-    # warmup_beg_iters = int(steps_per_epoch * model_params.style_mix.warmup_beg_epoch)
-    # warmup_end_iters = int(steps_per_epoch * model_params.style_mix.warmup_end_epoch)
 
     best_loss = float("inf")  # best test loss
 

@@ -222,6 +222,9 @@ def main():
     start_epoch = 0
     iters = 0
 
+    # Total number of steps given the batch size
+    steps_per_epoch = len(train_dataloader)
+
     load_pretrained = config.get("pretrained_model", "") != "" and config.get(
         "second_stage_load_pretrained",
         False,
@@ -251,7 +254,12 @@ def main():
             diff_epoch += start_epoch
             joint_epoch += start_epoch
             epochs += start_epoch
-            model.prosodic_style_encoder = copy.deepcopy(model.acoustic_style_encoder.style_encoder)
+            if model_params.style_mix.mode != "external":
+                # Inherit the style encoder component from acoustic style encoder to the prosodic style encoder
+                # But when we are in external mode, we keep the randomly initialized prosodic style encoder
+                model.prosodic_style_encoder = copy.deepcopy(
+                    model.acoustic_style_encoder.style_encoder
+                )
         else:
             raise ValueError("You need to specify the path to the first stage model.")
 
@@ -271,28 +279,39 @@ def main():
         clamp=False,
     )
 
-    scheduler_params = {
-        "max_lr": optimizer_params.lr,
-        "pct_start": float(0),
-        "epochs": epochs,
-        "steps_per_epoch": len(train_dataloader),
-    }
+    # scheduler_params = {
+    #     "max_lr": optimizer_params.lr,
+    #     "pct_start": float(0),
+    #     "epochs": epochs,
+    #     "steps_per_epoch": len(train_dataloader),
+    # }
 
-    raw_param_groups = {k: list(model[k].parameters()) for k in model}
-    not_trainable_modules = [k for k, v in raw_param_groups.items() if len(v) == 0]
-    parameters_dict = {k: v for k, v in raw_param_groups.items() if v}
-    logger.info("Optimizer groups: %s", list(parameters_dict.keys()))
-    if not_trainable_modules:
-        logger.info("Not trainable modules: %s", not_trainable_modules)
+    # raw_param_groups = {k: list(model[k].parameters()) for k in model}
+    # not_trainable_modules = [k for k, v in raw_param_groups.items() if len(v) == 0]
+    # parameters_dict = {k: v for k, v in raw_param_groups.items() if v}
+    # logger.info("Optimizer groups: %s", list(parameters_dict.keys()))
+    # if not_trainable_modules:
+    #     logger.info("Not trainable modules: %s", not_trainable_modules)
 
-    scheduler_params_dict = {k: scheduler_params.copy() for k in parameters_dict}
-    scheduler_params_dict["bert"]["max_lr"] = optimizer_params.bert_lr * 2
-    scheduler_params_dict["decoder"]["max_lr"] = optimizer_params.ft_lr * 2
-    if "acoustic_style_encoder" not in not_trainable_modules:
-        scheduler_params_dict["acoustic_style_encoder"]["max_lr"] = optimizer_params.ft_lr * 2
-    scheduler_params_dict["prosodic_style_encoder"]["max_lr"] = optimizer_params.ft_lr * 2
+    # scheduler_params_dict = {k: scheduler_params.copy() for k in parameters_dict}
 
     # Build parameter groups for optimizer
+    parameters_dict, scheduler_params_dict, not_trainable_modules = model.params_for_optimizer(
+        epochs,
+        steps_per_epoch,
+        optimizer_params,
+        use_max_lr=True,
+        spkenc_params=spkenc_params,
+    )
+    logger.info("Optimizer groups: %s", list(parameters_dict.keys()))
+    logger.info("Not trainable modules: %s", not_trainable_modules)
+    # # Update scheduler parameters
+    # scheduler_params_dict["bert"]["max_lr"] = optimizer_params.bert_lr * 2
+    # scheduler_params_dict["decoder"]["max_lr"] = optimizer_params.ft_lr * 2
+    # if "acoustic_style_encoder" not in not_trainable_modules:
+    #     scheduler_params_dict["acoustic_style_encoder"]["max_lr"] = optimizer_params.ft_lr * 2
+    # scheduler_params_dict["prosodic_style_encoder"]["max_lr"] = optimizer_params.ft_lr * 2
+    # Create optimizer
     optimizer = build_optimizer(parameters_dict, scheduler_params_dict, optimizer_params.lr)
 
     # Optional dedicated LR for speaker encoder
@@ -302,9 +321,9 @@ def main():
                 g["lr"] = spkenc_params.lr
                 g["initial_lr"] = spkenc_params.lr
         except Exception:
-            pass
+            logger.warning("Cannot set dedicated LR for speaker encoder")
 
-    # adjust BERT learning rate
+    # Adjust BERT learning rate
     for g in optimizer.optimizers["bert"].param_groups:
         g["betas"] = (0.9, 0.99)
         g["lr"] = optimizer_params.bert_lr
@@ -312,7 +331,7 @@ def main():
         g["min_lr"] = 0
         g["weight_decay"] = 0.01
 
-    # adjust acoustic module learning rate
+    # Adjust acoustic module learning rate
     modules = ["decoder", "prosodic_style_encoder"]
     if "acoustic_style_encoder" not in not_trainable_modules:
         modules.append("acoustic_style_encoder")
@@ -324,7 +343,7 @@ def main():
             g["min_lr"] = 0
             g["weight_decay"] = 1e-4
 
-    # Load models if there is a model
+    # Load models if there is a pre-trained model
     if load_pretrained:
         optimizer, start_epoch, iters = model.load(
             config.pretrained_model,
@@ -383,9 +402,6 @@ def main():
     # Create phoneme-to-speech object for synthesizing test sentences
     # - use global noise for speed
     pts = PTS(config, model, use_glob_noise=True)
-
-    # Total number of steps given the batch size
-    steps_per_epoch = len(train_dataloader)
 
     logger.info(" > Start training cycles:")
     logger.info(" | > Random seed:        %s", config.seed)
