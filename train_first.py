@@ -103,81 +103,42 @@ def main():
         )
         logger.info("NVLM initialized")
 
-    # Set up training parameters
-    batch_size = config.get("batch_size", 4)
-    grad_accum_steps = config.get("grad_accum_steps", 1)  # JMa: gradient accumulation
-    max_len = config.get("max_len", 200)
-    log_interval = config.get("log_interval", 10)
-    saving_epoch = config.get("save_freq", 2)
-    max_saved_models = config.get("max_saved_models", 2)
-    save_milestones = config.get("save_milestones", False)
-    grad_clip = config.get("grad_clip", None)  # JMa: gradient clipping support
-
     # Set up epochs
-    epochs = config["epochs"].get("stage1", 200)
-    tma_epoch = config["epochs"].get("tma", 50)
+    epochs = config.epochs.stage1
+    tma_epoch = config.epochs.tma
 
     # Set up data parameters
-    data_params = config.get("data_params", None)
-    sr = config["preprocess_params"].get("sr", 24000)
-    hop_length = config["preprocess_params"]["spect_params"].get("hop_length", 300)
-    train_path = data_params["train_data"]
-    val_path = data_params["val_data"]
-    root_path = data_params["root_path"]
-    # ood_data = data_params["OOD_data"]  # OOD texts are not used during 1st stage training
-    save_val_audio = data_params.get("save_val_audio", False)
-    n_val_audios = config["data_params"].get("n_val_audios", 3)
-    save_test_audio = False
-    test_audio_dir = os.path.join(
-        config["log_dir"],
-        config["data_params"].get("test_audio_dir", "test_audios"),
-    )
-
-    # Shortcuts to access parameters
-    model_params = config.model_params
-    loss_params = config.loss_params
-    spkenc_params = config.model_params.spkenc_params
+    test_audio_dir = os.path.join(config.log_dir, config.data_params.test_audio_dir)
 
     # Optional SCL: treat as disabled when lambda_scl is absent or <= 0
-    use_scl = bool(loss_params.get("lambda_scl", 0.0))
-
-    # Optional fine-tuning of speaker encoder
-    # - freeze: if False, allow training
-    # - unfreeze_epoch: optionally delay training until given epoch
-    # - lr: optional dedicated LR for speaker_encoder
-    spkenc_unfreeze_epoch = spkenc_params.get("unfreeze_epoch", tma_epoch)
-    # Note: do not force freeze; allow optional finetuning via config
+    use_scl = bool(config.loss_params.lambda_scl)
 
     # Set up text cleaner and pre-processing function
-    text_cleaner = TextCleaner(data_params["symbol_dict_path"], pad=data_params["pad"])
+    text_cleaner = TextCleaner(config.data_params.symbol_dict_path, pad=config.data_params.pad)
     if acc.is_main_process:
         logger.debug("Number of symbols: %d", len(text_cleaner))
     assert len(text_cleaner) == 81, f"Number of symbols must be 81 but it is {len(text_cleaner)}"
     assert (
-        model_params.n_token == 81
-    ), f"Number of tokens must be 81 but it is {model_params.n_token}"
+        config.model_params.n_token == 81
+    ), f"Number of tokens must be 81 but it is {config.model_params.n_token}"
 
     # Load utility models
     with acc.main_process_first():
         # Load pretrained ASR model
-        asr_config = config.get("ASR_config", False)
-        asr_path = config.get("ASR_path", False)
-        text_aligner = load_ASR_models(asr_path, asr_config)
-
+        text_aligner = load_ASR_models(config.ASR_path, config.ASR_config)
         # Load pretrained F0 model
-        f0_path = config.get("F0_path", False)
-        pitch_extractor = load_F0_models(f0_path)
-
+        pitch_extractor = load_F0_models(config.F0_path)
         # Load BERT model
-        bert_path = config.get("PLBERT_dir", False)
-        plbert = load_plbert(bert_path)
-
+        plbert = load_plbert(config.PLBERT_dir)
         # Load speaker encoder model
-        speaker_encoder = load_spkenc_model(spkenc_params.model, spkenc_params.freeze)
+        speaker_encoder = load_spkenc_model(
+            config.model_params.spkenc_params.model,
+            config.model_params.spkenc_params.freeze,
+        )
 
     # Initialize StyleTTS2 model
     logger.info("Building StyleTTS2 model...")
-    model = StyleTTS2(model_params, text_aligner, pitch_extractor, plbert, speaker_encoder)
+    model = StyleTTS2(config.model_params, text_aligner, pitch_extractor, plbert, speaker_encoder)
 
     # The following parameters must be set before accelerator.prepare()
     acoustic_style_dim = model.acoustic_style_encoder.style_dim
@@ -188,12 +149,14 @@ def main():
         model[k] = acc.prepare(model[k])
 
     # Load data
-    train_list, val_list = get_data_path_list(train_path, val_path)
+    train_list, val_list = get_data_path_list(
+        config.data_params.train_data, config.data_params.val_data
+    )
 
     # Set up dataset parameters (from config)
     dataset_config = {
-        "sr": sr,
-        "min_length": data_params.min_length,
+        "sr": config.preprocess_params.sr,
+        "min_length": config.data_params.min_length,
         # limit max length of the input sequence to the max length of the BERT model
         "max_length": bert_size,  # ALBERT config
         "silence_beg": config.preprocess_params.silence_beg,
@@ -208,11 +171,11 @@ def main():
     logger.info("Building training dataloader...")
     train_dataloader = build_dataloader(
         train_list,
-        root_path,
+        config.data_params.root_path,
         text_cleaner,
         validation=False,
         ood_data=None,  # OOD data not used for 1st stage training
-        batch_size=batch_size,
+        batch_size=config.batch_size,
         num_workers=args.num_workers,
         device=device,
         dataset_config=dataset_config,
@@ -221,10 +184,10 @@ def main():
     logger.info("Building validation dataloader...")
     val_dataloader = build_dataloader(
         val_list,
-        root_path,
+        config.data_params.root_path,
         text_cleaner,
         ood_data=None,  # OOD data not used for validation
-        batch_size=batch_size,
+        batch_size=config.batch_size,
         validation=True,
         num_workers=0,
         device=device,
@@ -243,10 +206,10 @@ def main():
     steps_per_epoch = len(train_dataloader)
     # Warmup iterations (valid for mode="mix")
     # Number of update-steps per epoch (accounts for grad accumulation)
-    updates_per_epoch = int(np.ceil(steps_per_epoch / max(1, grad_accum_steps)))
+    updates_per_epoch = int(np.ceil(steps_per_epoch / max(1, config.grad_accum_steps)))
     # Warmup thresholds in update-krocích (stabilní vůči grad_accum_steps)
-    warmup_beg_updates = int(updates_per_epoch * model_params.style_mix.warmup_beg_epoch)
-    warmup_end_updates = int(updates_per_epoch * model_params.style_mix.warmup_end_epoch)
+    warmup_beg_updates = int(updates_per_epoch * config.model_params.style_mix.warmup_beg_epoch)
+    warmup_end_updates = int(updates_per_epoch * config.model_params.style_mix.warmup_end_epoch)
 
     # Move models to device (cuda)
     model.to(device)
@@ -312,15 +275,23 @@ def main():
     stft_loss = MultiResolutionSTFTLoss().to(device)
     gl = GeneratorLoss(model.mpd, model.msd).to(device)
     dl = DiscriminatorLoss(model.mpd, model.msd).to(device)
-    wl = create_slm_loss(model.slm, model.wd, sr).to(device)
+    wl = create_slm_loss(model.slm, model.wd, config.preprocess_params.sr).to(device)
 
     # Create test audio dir under log/eval dir
-    if (save_val_audio or save_test_audio) and not os.path.exists(test_audio_dir):
+    if (
+        config.data_params.save_val_audio or config.data_params.save_test_audio
+    ) and not os.path.exists(test_audio_dir):
         os.makedirs(test_audio_dir, exist_ok=True)
 
     # Create resampler for speaker encoder
     spkenc_resampler = (
-        Resampler(sr, spkenc_params.get("sr", 16000), device=device) if model.multispeaker else None
+        Resampler(
+            config.preprocess_params.sr,
+            config.model_params.spkenc_params.get("sr", 16000),
+            device=device,
+        )
+        if model.multispeaker
+        else None
     )
 
     # Create phoneme-to-speech object for synthesizing validation sentences
@@ -338,36 +309,36 @@ def main():
         logger.info(" | > Steps per epoch:     %d", steps_per_epoch)
         logger.info(" | > Updates per epoch:   %d", updates_per_epoch)
         logger.info(" | > Input iterations:    %d", iters)
-        logger.info(" | > Style mix mode:      %s", model_params.style_mix.mode)
-        logger.info(" | > Warmup mode:         %s", model_params.style_mix.warmup_mode)
+        logger.info(" | > Style mix mode:      %s", config.model_params.style_mix.mode)
+        logger.info(" | > Warmup mode:         %s", config.model_params.style_mix.warmup_mode)
         logger.info(
             " | > Warmup (epochs/it.): %d-%d / %d-%d",
-            model_params.style_mix.warmup_beg_epoch,
-            model_params.style_mix.warmup_end_epoch,
+            config.model_params.style_mix.warmup_beg_epoch,
+            config.model_params.style_mix.warmup_end_epoch,
             # warmup_beg_iters,
             # warmup_end_iters,
             warmup_beg_updates,
             warmup_end_updates,
         )
-        logger.info(" | > Train data:          %s", data_params.train_data)
-        logger.info(" | > Valid data:          %s", data_params.val_data)
+        logger.info(" | > Train data:          %s", config.data_params.train_data)
+        logger.info(" | > Valid data:          %s", config.data_params.val_data)
         logger.info(" | > Pretrained model:    %s", config.pretrained_model)
         logger.info(" | > Text aligner:        %s", config.ASR_path)
         logger.info(" | > F0 model:            %s", config.F0_path)
         logger.info(" | > PL-BERT:             %s", config.PLBERT_dir)
-        logger.info(" | > Batch size:          %d", batch_size)
-        logger.info(" | > Grad. accum. steps:  %d", grad_accum_steps)
-        logger.info(" | > Effect. batch size:  %d", batch_size * grad_accum_steps)
-        logger.info(" | > Max len:             %d", max_len)
-        logger.info(" | > SLM loss:            %s", model_params.slm.model)
-        logger.info(" | > Inp. spk. emb. dim:  %d", model_params.spkenc_params.dim_in)
+        logger.info(" | > Batch size:          %d", config.batch_size)
+        logger.info(" | > Grad. accum. steps:  %d", config.grad_accum_steps)
+        logger.info(" | > Effect. batch size:  %d", config.batch_size * config.grad_accum_steps)
+        logger.info(" | > Max len:             %d", config.max_len)
+        logger.info(" | > SLM loss:            %s", config.model_params.slm.model)
+        logger.info(" | > Inp. spk. emb. dim:  %d", config.model_params.spkenc_params.dim_in)
         logger.info(" | > Acoust style dim:    %d", acoustic_style_dim)
-        logger.info(" | > Pros. style dim:     %d", model_params.style_dim)
+        logger.info(" | > Pros. style dim:     %d", config.model_params.style_dim)
         logger.info(" | > Use SCL:             %s", use_scl)
         logger.info(
             " | > SpkEnc freeze:       %s (unfreeze@epoch=%d, lr=%s)",
-            spkenc_params.freeze,
-            spkenc_unfreeze_epoch,
+            config.model_params.spkenc_params.freeze,
+            config.model_params.spkenc_params.unfreeze_epoch,
             config.optimizer_params.lr,
         )
         logger.info("")
@@ -389,9 +360,9 @@ def main():
         # Decide if speaker encoder should be trained this epoch
         spkenc_train_enabled = (
             model.multispeaker
-            and not spkenc_params.freeze
+            and not config.model_params.spkenc_params.freeze
             and use_scl
-            and epoch >= spkenc_unfreeze_epoch
+            and epoch >= config.model_params.spkenc_params.unfreeze_epoch
         )
         # If we plan to train speaker encoder now, ensure its params require grads
         if spkenc_train_enabled and "speaker_encoder" in model:
@@ -498,7 +469,7 @@ def main():
             # --- Pre-allocate tensors ---
 
             mel_inp_len_all = acc.gather(mel_inp_len)  # for balanced load
-            mel_len_gt = min([int(mel_inp_len_all.min().item() / 2 - 1), max_len // 2])
+            mel_len_gt = min([int(mel_inp_len_all.min().item() / 2 - 1), config.max_len // 2])
             # Early check for segment length:
             # - mel_len_gt * 2 is the length of the original mel spectrogram
             # - multiplication by 2 is due to the downsampling factor between mel and text aligner
@@ -506,7 +477,7 @@ def main():
                 logger.warning(
                     "Segment is too short (%d frames, %d samples)=> skipping batch %d.",
                     mel_len_gt * 2,
-                    (mel_len_gt * 2) * hop_length,
+                    (mel_len_gt * 2) * config.preprocess_params.spect_params.hop_length,
                     batch_idx,
                 )
                 continue
@@ -514,8 +485,10 @@ def main():
             mel_len_st = int(mel_inp_len.min().item() / 2 - 1)
 
             bsize = mel_inp_len.shape[0]  # Use current batch size
-            wav_len = (mel_len_gt * 2) * hop_length  # Calculate fixed waveform segment length
-            wav_st_len = (mel_len_st * 2) * hop_length  # Calculate fixed style segment length
+            # Calculate fixed waveform segment length
+            wav_len = (mel_len_gt * 2) * config.preprocess_params.spect_params.hop_length
+            # Calculate fixed style segment length
+            wav_st_len = (mel_len_st * 2) * config.preprocess_params.spect_params.hop_length
 
             # Pre-allocate tensors with the calculated fixed length
             ph_algn = torch.empty(
@@ -556,7 +529,7 @@ def main():
                 # Extract ground-truth mel spectrogram and assign to tensor
                 mel_gt[bidx] = mels[bidx, :, (beg_gt * 2) : ((beg_gt + mel_len_gt) * 2)]
                 # Extract corresponding ground-truth audio and assign to tensor
-                beg_idx_wav = (beg_gt * 2) * hop_length
+                beg_idx_wav = (beg_gt * 2) * config.preprocess_params.spect_params.hop_length
                 end_idx_wav = beg_idx_wav + wav_len  # Use pre-calculated length
                 wav_gt[bidx] = waves[bidx][beg_idx_wav:end_idx_wav]
 
@@ -566,7 +539,7 @@ def main():
                 # Extract style reference mel spectrogram for style conditioning and assign to tensor
                 mel_st[bidx] = mels[bidx, :, (beg_st * 2) : ((beg_st + mel_len_st) * 2)]
                 # Extract corresponding ground-truth audio and assign to tensor
-                beg_idx_wav = (beg_st * 2) * hop_length
+                beg_idx_wav = (beg_st * 2) * config.preprocess_params.spect_params.hop_length
                 end_idx_wav = beg_idx_wav + wav_st_len  # Use pre-calculated length
                 wav_st[bidx] = waves[bidx][beg_idx_wav:end_idx_wav]
 
@@ -591,7 +564,7 @@ def main():
             # Compute warmup coefficient
             warmup_coef = (
                 warmup_scheduler(updates + 1, warmup_beg_updates, warmup_end_updates)
-                if model.multispeaker and model_params.style_mix.mode == "mix"
+                if model.multispeaker and config.model_params.style_mix.mode == "mix"
                 else None
             )
             # warmup_coef = (
@@ -630,17 +603,20 @@ def main():
             if epoch >= tma_epoch:
                 # Compute decoder's discriminator loss
                 loss_disc = dl(wav_gt.detach().unsqueeze(1).float(), y_rec.detach()).mean()
-                loss_disc = loss_disc / grad_accum_steps  # JMa: normalize loss
+                loss_disc = loss_disc / config.grad_accum_steps  # JMa: normalize loss
                 # JMa: Compute gradients only for discriminators
                 acc.backward(
                     loss_disc,
                     inputs=list(model.mpd.parameters()) + list(model.msd.parameters()),
                 )
                 # JMa: Gradient accumulation
-                if (batch_idx + 1) % grad_accum_steps == 0:
+                if (batch_idx + 1) % config.grad_accum_steps == 0:
                     # JMa: gradient clipping
-                    if grad_clip:
-                        _ = [acc.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
+                    if config.grad_clip:
+                        _ = [
+                            acc.clip_grad_norm_(model[k].parameters(), config.grad_clip)
+                            for k in model
+                        ]
                     optimizer.step("msd")
                     optimizer.step("mpd")
                     optimizer.zero_grad("msd")
@@ -682,12 +658,12 @@ def main():
 
                 # Final generator loss is a weighted sum of the above losses
                 g_loss = (
-                    loss_params.lambda_mel * loss_mel
-                    + loss_params.lambda_mono * loss_mono
-                    + loss_params.lambda_s2s * loss_s2s
-                    + loss_params.lambda_gen * loss_gen_all
-                    + loss_params.lambda_slm * loss_slm
-                    + loss_params.lambda_scl * loss_scl
+                    config.loss_params.lambda_mel * loss_mel
+                    + config.loss_params.lambda_mono * loss_mono
+                    + config.loss_params.lambda_s2s * loss_s2s
+                    + config.loss_params.lambda_gen * loss_gen_all
+                    + config.loss_params.lambda_slm * loss_slm
+                    + config.loss_params.lambda_scl * loss_scl
                 )
 
             else:
@@ -698,7 +674,7 @@ def main():
                 loss_scl = 0
                 g_loss = loss_mel
 
-            g_loss = g_loss / grad_accum_steps  # JMa: normalize loss
+            g_loss = g_loss / config.grad_accum_steps  # JMa: normalize loss
             # JMa: Compute gradients only for generator
             inputs = (
                 list(model.decoder.parameters())
@@ -720,10 +696,12 @@ def main():
             running_loss += acc.gather(loss_mel).mean().item()
 
             # JMa: Gradient accumulation
-            if (batch_idx + 1) % grad_accum_steps == 0:
+            if (batch_idx + 1) % config.grad_accum_steps == 0:
                 # JMa: gradient clipping
-                if grad_clip:
-                    _ = [acc.clip_grad_norm_(model[k].parameters(), grad_clip) for k in model]
+                if config.grad_clip:
+                    _ = [
+                        acc.clip_grad_norm_(model[k].parameters(), config.grad_clip) for k in model
+                    ]
 
                 optimizer.step("text_encoder")
                 if "acoustic_style_encoder" not in not_trainable_modules:
@@ -745,8 +723,8 @@ def main():
             iters += 1  # Increment iteration counter
 
             # Log training progress
-            if (batch_idx + 1) % log_interval == 0:
-                loss_mel = running_loss / log_interval
+            if (batch_idx + 1) % config.log_interval == 0:
+                loss_mel = running_loss / config.log_interval
                 curr_updates = min(updates - updates_at_epoch_start, updates_per_epoch)
                 logger.info(
                     "Epoch [%3d/%d], Batch [%4d/%d], Upd [%4d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f, SCL Loss: %.5f",
@@ -866,10 +844,12 @@ def main():
                 # Get clips
                 # Note: Validation uses local min length, not gathered length like training
                 # mel_input_length_all = accelerator.gather(mel_input_length)  # for balanced load
-                mel_len_gt = min([int(mel_inp_len.min().item() / 2 - 1), max_len // 2])
+                mel_len_gt = min([int(mel_inp_len.min().item() / 2 - 1), config.max_len // 2])
 
                 # --- Pre-allocate tensors ---
-                wav_len = (mel_len_gt * 2) * hop_length  # Calculate fixed waveform segment length
+                wav_len = (
+                    mel_len_gt * 2
+                ) * config.preprocess_params.spect_params.hop_length  # Calculate fixed waveform segment length
 
                 # Pre-allocate tensors with the calculated fixed length
                 # Note: Style tensor `mel_st` is not used in validation
@@ -902,7 +882,7 @@ def main():
                     # Extract ground-truth mel spectrogram and assign to tensor
                     mel_gt[bidx] = mels[bidx, :, (beg_gt * 2) : ((beg_gt + mel_len_gt) * 2)]
                     # Extract corresponding ground-truth audio and assign to tensor
-                    beg_idx_wav = (beg_gt * 2) * hop_length
+                    beg_idx_wav = (beg_gt * 2) * config.preprocess_params.spect_params.hop_length
                     end_idx_wav = beg_idx_wav + wav_len  # Use pre-calculated length
                     wav_gt[bidx] = waves[bidx][beg_idx_wav:end_idx_wav]
 
@@ -967,11 +947,11 @@ def main():
             curr_loss,
             best_loss,
             loss_sim / iters_test,
-            warmup_coef if model_params.style_mix.mode == "mix" else 0,
-            gate_values.mean().item() if model_params.style_mix.mode == "mix" else 0,
-            gate_values.std().item() if model_params.style_mix.mode == "mix" else 0,
-            gate_values.min().item() if model_params.style_mix.mode == "mix" else 0,
-            gate_values.max().item() if model_params.style_mix.mode == "mix" else 0,
+            warmup_coef if config.model_params.style_mix.mode == "mix" else 0,
+            gate_values.mean().item() if config.model_params.style_mix.mode == "mix" else 0,
+            gate_values.std().item() if config.model_params.style_mix.mode == "mix" else 0,
+            gate_values.min().item() if config.model_params.style_mix.mode == "mix" else 0,
+            gate_values.max().item() if config.model_params.style_mix.mode == "mix" else 0,
         )
 
         if acc.is_main_process:
@@ -983,7 +963,7 @@ def main():
             # Generate validation samples
             with torch.no_grad():
                 # Iterate over the defined number of validation samples
-                for idx in range(min(n_val_audios, bsize)):
+                for idx in range(min(config.data_params.n_val_audios, bsize)):
                     mel_len = int(mel_inp_len[idx].item())
                     # Reconstruct audio from ground-truth mel spectrogram and
                     # phoneme-audio alignment
@@ -996,18 +976,18 @@ def main():
                     )
 
                     # Write and save val audio
-                    if save_val_audio and epoch % saving_epoch == 0:
+                    if config.data_params.save_val_audio and epoch % config.save_freq == 0:
                         outfile = f"epoch_1st_{epoch:0>5}_val-rec-{idx}.wav"
                         pts.save_wav(wav, osp.join(test_audio_dir, outfile))
 
                     # Save ground truth audio in given epochs
                     if epoch in (0, tma_epoch):
                         wav_gt = waves[idx].squeeze()
-                        if save_val_audio:
+                        if config.data_params.save_val_audio:
                             outfile = f"epoch_1st_{epoch:0>5}_gt-{idx}.wav"
                             pts.save_wav(wav_gt, os.path.join(test_audio_dir, outfile))
 
-            if epoch % saving_epoch == 0:
+            if epoch % config.save_freq == 0:
                 model.save(
                     optimizer,
                     epoch,
@@ -1015,11 +995,11 @@ def main():
                     curr_loss,
                     "epoch_1st",
                     log_dir,
-                    max_saved_models,
+                    config.max_saved_models,
                 )
 
             # Save pre-TMA model
-            if save_milestones and epoch == tma_epoch - 1:
+            if config.save_milestones and epoch == tma_epoch - 1:
                 model.save(
                     optimizer,
                     epoch,
@@ -1041,7 +1021,7 @@ def main():
             curr_loss,
             "epoch_1st",
             log_dir,
-            max_saved_models,
+            config.max_saved_models,
         )
         if epoch > tma_epoch - 1:
             try:
