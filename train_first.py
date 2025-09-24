@@ -45,13 +45,6 @@ def main():
     parser = argparse.ArgumentParser(description="StyleTTS2 stage 1 training")
     parser.add_argument("config_path", type=str, help="path to config")
     parser.add_argument("-w", "--num_workers", type=int, default=0, help="number of workers")
-    # parser.add_argument(
-    #     "-L",
-    #     "--log_level",
-    #     type=str,
-    #     default="INFO",
-    #     help="log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)",
-    # )
     add_logging_args(parser)  # --log-level, --log-file
     args = parser.parse_args()
 
@@ -89,7 +82,6 @@ def main():
             # Set the wandb project where this run will be logged.
             project="StyleTTS2+spkenc",
             # Set run name
-            # name=f"{osp.basename(log_dir)}_{exp_label}",
             name=f"{osp.basename(log_dir)}",
             # Track hyperparameters and run metadata.
             config=config,
@@ -255,43 +247,9 @@ def main():
     # Warmup thresholds in update-krocích (stabilní vůči grad_accum_steps)
     warmup_beg_updates = int(updates_per_epoch * model_params.style_mix.warmup_beg_epoch)
     warmup_end_updates = int(updates_per_epoch * model_params.style_mix.warmup_end_epoch)
-    # warmup_beg_iters = int(steps_per_epoch * model_params.style_mix.warmup_beg_epoch)
-    # warmup_end_iters = int(steps_per_epoch * model_params.style_mix.warmup_end_epoch)
-
-    # scheduler_params = {
-    #     "max_lr": float(config["optimizer_params"].get("lr", 1e-4)),
-    #     "pct_start": float(config["optimizer_params"].get("pct_start", 0.0)),
-    #     "epochs": epochs,
-    #     "steps_per_epoch": updates_per_epoch,
-    # }
 
     # Move models to device (cuda)
     model.to(device)
-
-    # raw_param_groups = {k: list(model[k].parameters()) for k in model}
-    # # Leave only parameters with requires_grad=True (default),
-    # # but optionally include speaker_encoder params even if currently frozen,
-    # # so we can unfreeze later without rebuilding optimizers.
-    # parameters_filtered = {
-    #     k: [p for p in v if p.requires_grad] for k, v in raw_param_groups.items()
-    # }
-    # # Always include speaker_encoder params in optimizer if multispeaker and
-    # # finetuning is desired now or later (unfreeze_epoch specified)
-    # if (
-    #     model.multispeaker
-    #     and "speaker_encoder" in raw_param_groups
-    #     and (not getattr(spkenc_params, "freeze", True) or hasattr(spkenc_params, "unfreeze_epoch"))
-    # ):
-    #     parameters_filtered["speaker_encoder"] = raw_param_groups["speaker_encoder"]
-
-    # not_trainable_modules = [k for k, v in parameters_filtered.items() if len(v) == 0]
-    # parameters_dict = {k: v for k, v in parameters_filtered.items() if v}
-
-    # if acc.is_main_process:
-    #     logger.info("Optimizer groups: %s", list(parameters_dict.keys()))
-    #     if not_trainable_modules:
-    #         logger.info("Not trainable modules: %s", not_trainable_modules)
-    # scheduler_params_dict = {k: scheduler_params.copy() for k in parameters_dict}
 
     # Optional per-module optimizer overrides from config
     per_module_overrides = {
@@ -647,19 +605,6 @@ def main():
             # Resample ground-truth segments for speaker encoder
             seg4style = spkenc_resampler(wav_st) if model.multispeaker else spkenc_resampler(wav_gt)
 
-            # # Target speaker embedding for style conditioning:
-            # # - compute in eval() + no_grad() to avoid BN running stats in-place updates
-            # # - detach to prevent grads flowing into speaker encoder via style path
-            # spk_embs_tgt = None
-            # if model.multispeaker:
-            #     _spkenc_was_training = model.speaker_encoder.training
-            #     model.speaker_encoder.eval()
-            #     with torch.no_grad():
-            #         spk_embs_st = model.speaker_encoder(seg4style)
-            #     if _spkenc_was_training:
-            #         model.speaker_encoder.train()
-            #     spk_embs_tgt = spk_embs_st.detach()
-
             # Target speaker embedding for style conditioning:
             # Always keep conditioning target detached (no_grad), even if spkenc FT is enabled.
             # FT for speaker encoder should flow only via SCL (reconstructed audio path).
@@ -725,17 +670,6 @@ def main():
                 loss_gen_all = gl(wav_gt.detach().unsqueeze(1).float(), y_rec).mean()
                 # SLM loss to ensure the generated audio follows natural speech patterns
                 loss_slm = wl(wav_gt.detach(), y_rec).mean()
-
-                # # Calculate speaker consistency loss
-                # with torch.no_grad():
-                #     ## Sync speaker encoder weights
-                #     # speaker_encoder_infer.load_state_dict(model.speaker_encoder.state_dict())
-                #     # Calculate speaker embeddings for the reconstructed audio
-                #     seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
-                #     # spk_embs_rec = speaker_encoder_infer(seg_rec_for_spkenc)
-                #     spk_embs_rec = speaker_encoder(seg_rec_for_spkenc)
-                # # Compute loss: use embeddings form style waves as target speaker embeddings
-                # loss_scl = 1 - F.cosine_similarity(spk_embs_st, spk_embs_rec).mean()
 
                 # Speaker Consistency Loss (SCL) — compute only if enabled
                 if use_scl:
@@ -815,7 +749,6 @@ def main():
                 loss_mel = running_loss / log_interval
                 curr_updates = min(updates - updates_at_epoch_start, updates_per_epoch)
                 logger.info(
-                    # "Epoch [%3d/%d], Step [%4d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f, SCL Loss: %.5f",
                     "Epoch [%3d/%d], Batch [%4d/%d], Upd [%4d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f, SCL Loss: %.5f",
                     epoch + 1,
                     epochs,
@@ -1001,19 +934,6 @@ def main():
 
                 # Compute mel-spectrogram loss
                 loss_mel = stft_loss(y_rec.squeeze(), wav_gt.detach())
-
-                # # Calculate speaker consistency loss
-                # if epoch >= tma_epoch:
-                #     spk_embs_tgt = spk_embs_gt  # target speaker embeddings
-                #     # Calculate speaker embeddings for the reconstructed audio
-                #     # seg_rec_for_spkenc = resample(y_rec.squeeze(), spkenc_resampler)
-                #     seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
-                #     # spk_embs_rec = speaker_encoder_infer(seg_rec_for_spkenc.detach())
-                #     spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc.detach())
-                #     # Compute speaker consistency loss (i.e. cosine similarity)
-                #     loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec)
-                #     # Gather similarity loss across all processes
-                #     loss_sim += acc.gather(loss_scl).mean().item()
 
                 # Speaker consistency loss (SCL) — metric only if enabled
                 if epoch >= tma_epoch and use_scl:

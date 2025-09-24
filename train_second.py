@@ -49,13 +49,6 @@ def main():
     parser = argparse.ArgumentParser(description="StyleTTS2 stage 2 training")
     parser.add_argument("config_path", type=str, help="path to config")
     parser.add_argument("-w", "--num_workers", type=int, default=0, help="number of workers")
-    # parser.add_argument(
-    #     "-L",
-    #     "--log_level",
-    #     type=str,
-    #     default="INFO",
-    #     help="log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)",
-    # )
     add_logging_args(parser)  # --log_level, --log_file
     args = parser.parse_args()
 
@@ -77,7 +70,6 @@ def main():
         # Set the wandb project where this run will be logged.
         project="StyleTTS2+spkenc",
         # Set run name
-        # name=f"{osp.basename(log_dir)}_{exp_label}",
         name=f"{osp.basename(log_dir)}",
         # Track hyperparameters and run metadata.
         config=config,
@@ -280,22 +272,6 @@ def main():
         clamp=False,
     )
 
-    # scheduler_params = {
-    #     "max_lr": optimizer_params.lr,
-    #     "pct_start": float(0),
-    #     "epochs": epochs,
-    #     "steps_per_epoch": len(train_dataloader),
-    # }
-
-    # raw_param_groups = {k: list(model[k].parameters()) for k in model}
-    # not_trainable_modules = [k for k, v in raw_param_groups.items() if len(v) == 0]
-    # parameters_dict = {k: v for k, v in raw_param_groups.items() if v}
-    # logger.info("Optimizer groups: %s", list(parameters_dict.keys()))
-    # if not_trainable_modules:
-    #     logger.info("Not trainable modules: %s", not_trainable_modules)
-
-    # scheduler_params_dict = {k: scheduler_params.copy() for k in parameters_dict}
-
     # Build parameter groups for optimizer
     # Optional per-module optimizer overrides from config
     per_module_overrides = {
@@ -372,12 +348,7 @@ def main():
     logger.info("Optimizer groups: %s", list(parameters_dict.keys()))
     logger.info("Not trainable modules: %s", not_trainable_modules)
     logger.debug("Scheduler parameters: %s", scheduler_params_dict)
-    # # Update scheduler parameters
-    # scheduler_params_dict["bert"]["max_lr"] = optimizer_params.bert_lr * 2
-    # scheduler_params_dict["decoder"]["max_lr"] = optimizer_params.ft_lr * 2
-    # if "acoustic_style_encoder" not in not_trainable_modules:
-    #     scheduler_params_dict["acoustic_style_encoder"]["max_lr"] = optimizer_params.ft_lr * 2
-    # scheduler_params_dict["prosodic_style_encoder"]["max_lr"] = optimizer_params.ft_lr * 2
+
     # Create optimizer
     optimizer = build_optimizer(
         parameters_dict,
@@ -779,19 +750,6 @@ def main():
             # Add channel dim for encoders
             style_input_mel_batch = style_input_mel.unsqueeze(1)
 
-            # # Speaker encoding:
-            # spk_embs_st = None
-            # # Resample ground-truth segments for speaker encoder
-            # seg_st_for_spkenc = spkenc_resampler(wav_st)
-
-            # # Conditionally use no_grad based on freeze setting
-            # context = torch.no_grad() if spkenc_params.freeze else torch.enable_grad()
-            # with context:
-            #     # Get speaker embeddings for the style reference segment
-            #     spk_embs_st = model.speaker_encoder(seg_st_for_spkenc)
-            # # Preserve target speaker embedding before any possible in-place use
-            # spk_embs_tgt = spk_embs_st.detach()
-
             # Speaker encoding (target for SCL + conditioning for acoustic style)
             seg_st_for_spkenc = spkenc_resampler(wav_st)
             if not spkenc_train_enabled:
@@ -882,14 +840,6 @@ def main():
             loss_ce /= phonemes.size(0)
             loss_dur /= phonemes.size(0)
 
-            # # Speaker consistency loss (SCL)
-            # # Calculate speaker embeddings for the reconstructed audio
-            # seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
-            # # spk_embs_rec = speaker_encoder_infer(seg_rec_for_spkenc)
-            # spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc)
-            # # Compute loss: use embeddings form style waves as target speaker embeddings
-            # loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec).mean()
-
             # Speaker consistency loss (SCL): compute only if enabled
             if use_scl:
                 # gradient flows into y_rec/decoder
@@ -914,7 +864,7 @@ def main():
 
             running_loss += loss_mel.item()
             loss_gen.backward()
-            # JMa: gradient clipping
+            # Gradient clipping
             if grad_clip:
                 nn.utils.clip_grad_norm_(model.bert_encoder.parameters(), grad_clip)
                 nn.utils.clip_grad_norm_(model.bert.parameters(), grad_clip)
@@ -1193,16 +1143,6 @@ def main():
                             mels_ok.unsqueeze(0).unsqueeze(1)
                         )
 
-                    # # JMa: Fix: remove explicitly 2nd dimension
-                    # # otherwise all dimensions of size 1 are removed
-                    # # (resulting in error when current batch size is 1)
-                    # # pros_style = torch.stack(ss).squeeze()
-                    # # pros_style = torch.stack(ss).squeeze(dim=-1) # - not working
-                    # pros_style = torch.stack(ss).squeeze(dim=1)
-                    # # # acoust_style = torch.stack(gs).squeeze()              # !!! JMa: not used anymore?
-                    # # acoust_style = torch.stack(gs).squeeze(dim=1)        # !!! JMa: not used anymore?
-                    # # target_style = torch.cat([acoust_style, pros_style], dim=-1).detach() # !!! JMa: not used anymore?
-
                     h_bert = model.bert(phonemes, attention_mask=(~ph_mask).int())  # [B, T, 768]
                     h_bert_en = model.bert_encoder(h_bert).transpose(-1, -2)  # [B, 256, T]
 
@@ -1312,16 +1252,6 @@ def main():
                     f0_real, _, _ = model.pitch_extractor(mel_gt.unsqueeze(1))
                     loss_f0 = F.l1_loss(f0_real, f0_fake) / 10
 
-                    # # Calculate speaker consistency loss
-                    # spk_embs_tgt = spk_embs_gt  # target speaker embeddings
-                    # # Calculate speaker embeddings for the reconstructed audio
-                    # # seg_rec_for_spkenc = resample(y_rec.squeeze(), spkenc_resampler)
-                    # seg_rec_for_spkenc = spkenc_resampler(y_rec.squeeze())
-                    # # spk_embs_rec = speaker_encoder_infer(seg_rec_for_spkenc.detach())
-                    # spk_embs_rec = model.speaker_encoder(seg_rec_for_spkenc.detach())
-                    # # Compute speaker consistency loss (i.e. cosine similarity)
-                    # loss_scl = 1 - F.cosine_similarity(spk_embs_tgt, spk_embs_rec)
-
                     # Speaker Consistency Loss (metric): compute only if enabled
                     spk_embs_tgt = spk_embs_gt  # target speaker embeddings
                     if use_scl:
@@ -1410,7 +1340,6 @@ def main():
                     )
 
                     # Write and save val audio
-                    # writer.add_audio(f"pred/y{idx}", wav_pred, epoch, sample_rate=sr)
                     if save_val_audio and epoch % saving_epoch == 0:
                         outfile = f"epoch_2nd_{epoch:0>5}_val-pred-{idx}.wav"
                         pts.save_wav(wav_pred, os.path.join(test_audio_dir, outfile))
