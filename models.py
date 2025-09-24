@@ -2195,13 +2195,16 @@ class StyleTTS2:
         epochs,
         steps_per_epoch,
         optimizer_params,
-        use_max_lr=False,
-        spkenc_params=None,
+        double_max_lr=None,
+        optimizer_overrides=None,
     ):
+        if double_max_lr is None:
+            double_max_lr = []
+
         # Default common scheduler parameters
         scheduler_params = {
             "max_lr": optimizer_params.lr,
-            "pct_start": float(0),
+            "pct_start": 0.0,
             "epochs": epochs,
             "steps_per_epoch": steps_per_epoch,
         }
@@ -2220,8 +2223,8 @@ class StyleTTS2:
             self.multispeaker
             and "speaker_encoder" in raw_param_groups
             and (
-                not getattr(spkenc_params, "freeze", True)
-                or hasattr(spkenc_params, "unfreeze_epoch")
+                not getattr(self._params.spkenc_params, "freeze", True)
+                or hasattr(self._params.spkenc_params, "unfreeze_epoch")
             )
         ):
             parameters_filtered["speaker_encoder"] = raw_param_groups["speaker_encoder"]
@@ -2230,14 +2233,35 @@ class StyleTTS2:
         parameters_dict = {k: v for k, v in parameters_filtered.items() if v}
         scheduler_params_dict = {k: scheduler_params.copy() for k in parameters_dict}
 
-        # Update scheduler `max_lr` parameters
-        if use_max_lr:
-            scheduler_params_dict["bert"]["max_lr"] = optimizer_params.bert_lr * 2
-            scheduler_params_dict["decoder"]["max_lr"] = optimizer_params.ft_lr * 2
-            if "acoustic_style_encoder" not in not_trainable_modules:
-                scheduler_params_dict["acoustic_style_encoder"]["max_lr"] = (
-                    optimizer_params.ft_lr * 2
-                )
-            scheduler_params_dict["prosodic_style_encoder"]["max_lr"] = optimizer_params.ft_lr * 2
+        # Merge user-provided per-module overrides directly into per-module scheduler/optimizer dict
+        if isinstance(optimizer_overrides, dict):
+            for k, v in optimizer_overrides.items():
+                if k in scheduler_params_dict and isinstance(v, dict):
+                    scheduler_params_dict[k].update(v)
+        # If user provided only lr without max_lr, align max_lr := lr for that module
+        if isinstance(optimizer_overrides, dict):
+            for k, uov in optimizer_overrides.items():
+                if k in scheduler_params_dict and isinstance(uov, dict):
+                    if "lr" in uov and "max_lr" not in uov:
+                        try:
+                            scheduler_params_dict[k]["max_lr"] = float(
+                                scheduler_params_dict[k]["lr"]
+                            )
+                        except Exception:
+                            scheduler_params_dict[k]["max_lr"] = scheduler_params_dict[k]["lr"]
+
+        # Ensure OneCycleLR starts at the requested lr, not max_lr:
+        # If both lr and max_lr are present and user did not specify div_factor,
+        # compute div_factor = max_lr / lr (clamped at >=1).
+        for k, cfg in scheduler_params_dict.items():
+            if "lr" in cfg and "max_lr" in cfg and "div_factor" not in cfg:
+                try:
+                    lr_v = float(cfg["lr"]) if cfg["lr"] is not None else None
+                    max_lr_v = float(cfg["max_lr"]) if cfg["max_lr"] is not None else None
+                    if lr_v and max_lr_v and lr_v > 0:
+                        df = max(max_lr_v / lr_v, 1.0)
+                        cfg["div_factor"] = df
+                except Exception:
+                    pass
 
         return parameters_dict, scheduler_params_dict, not_trainable_modules

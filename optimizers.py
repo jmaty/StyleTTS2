@@ -11,7 +11,11 @@ logger = get_logger(__name__)
 
 
 class MultiOptimizer:
-    def __init__(self, optimizers={}, schedulers={}):
+    def __init__(self, optimizers=None, schedulers=None):
+        if optimizers is None:
+            optimizers = {}
+        if schedulers is None:
+            schedulers = {}
         self.optimizers = optimizers
         self.schedulers = schedulers
         self.keys = list(optimizers.keys())
@@ -61,19 +65,64 @@ def define_scheduler(optimizer, params):
         epochs=params.get("epochs", 200),
         steps_per_epoch=params.get("steps_per_epoch", 1000),
         pct_start=params.get("pct_start", 0.0),
-        div_factor=1,
-        final_div_factor=1,
+        div_factor=params.get("div_factor", 1),
+        final_div_factor=params.get("final_div_factor", 1),
     )
     return scheduler
 
 
 def build_optimizer(parameters_dict, scheduler_params_dict, lr):
-    optim = dict(
-        [
-            (key, AdamW(params, lr=lr, weight_decay=1e-4, betas=(0.0, 0.99), eps=1e-9))
-            for key, params in parameters_dict.items()
-        ]
-    )
+    """
+    Build per-module optimizers.
+
+    Supports component-specific learning rates in two ways:
+    - If `scheduler_params_dict[key]["lr"]` is present, it takes precedence.
+    - Otherwise falls back to the global `lr` argument.
+
+    This preserves backward compatibility while allowing dedicated LRs to be
+    defined at the time parameter groups are prepared.
+    """
+
+    def _hyper_for(key):
+        # Pull optimizer hyperparams from scheduler_params_dict[key]
+        cfg = scheduler_params_dict.get(key, {})
+        lr_key = cfg.get("lr", None)
+        h = {
+            "lr": lr_key if lr_key is not None else lr,
+            "betas": cfg.get("betas", (0.0, 0.99)),
+            "eps": cfg.get("eps", 1e-9),
+            "weight_decay": cfg.get("weight_decay", 1e-4),
+        }
+        # Extras: any keys not used by OneCycleLR or above hyperparams
+        scheduler_keys = {
+            "max_lr",
+            "epochs",
+            "steps_per_epoch",
+            "pct_start",
+            "lr",
+            "betas",
+            "eps",
+            "weight_decay",
+        }
+        extras = {k: v for k, v in cfg.items() if k not in scheduler_keys}
+        h["extras"] = extras
+        return h
+
+    optim = {}
+    for key, params in parameters_dict.items():
+        h = _hyper_for(key)
+        opt = AdamW(
+            params,
+            lr=h["lr"],
+            weight_decay=h["weight_decay"],
+            betas=h["betas"],
+            eps=h["eps"],
+        )
+        # Apply extra param-group fields if specified (e.g., initial_lr, min_lr)
+        if h["extras"]:
+            for g in opt.param_groups:
+                g.update(h["extras"])
+        optim[key] = opt
 
     schedulers = dict(
         [(key, define_scheduler(opt, scheduler_params_dict[key])) for key, opt in optim.items()]

@@ -292,28 +292,32 @@ def main():
     #     if not_trainable_modules:
     #         logger.info("Not trainable modules: %s", not_trainable_modules)
     # scheduler_params_dict = {k: scheduler_params.copy() for k in parameters_dict}
+
+    # Optional per-module optimizer overrides from config
+    per_module_overrides = {
+        "speaker_encoder": {
+            "lr": config.optimizer_params.ft_lr,
+            "initial_lr": config.optimizer_params.ft_lr,
+        },
+    }
+    # Create optimizers and schedulers parameters for each module
     parameters_dict, scheduler_params_dict, not_trainable_modules = model.params_for_optimizer(
         epochs,
         updates_per_epoch,
         config.optimizer_params,
-        use_max_lr=False,
-        spkenc_params=spkenc_params,
+        optimizer_overrides=per_module_overrides,
     )
     logger.info("Optimizer groups: %s", list(parameters_dict.keys()))
     logger.info("Not trainable modules: %s", not_trainable_modules)
-    optimizer = build_optimizer(parameters_dict, scheduler_params_dict, config.optimizer_params.lr)
+    logger.debug("Scheduler parameters: %s", scheduler_params_dict)
 
+    # Build combined optimizer and schedulers
+    optimizer = build_optimizer(
+        parameters_dict,
+        scheduler_params_dict,
+        config.optimizer_params.lr,
+    )
     logger.debug("Optimizer: %s", optimizer.optimizers)
-
-    # Optional dedicated LR for speaker encoder
-    if "speaker_encoder" in optimizer.optimizers:
-        try:
-            for pg in optimizer.optimizers["speaker_encoder"].param_groups:
-                pg["lr"] = float(spkenc_params.lr)
-        except Exception:
-            logger.warning("Cannot set dedicated LR for speaker encoder.")
-
-    logger.debug("Speaker encoder optimizer: %s", optimizer.optimizers["speaker_encoder"])
 
     # Prepare optimizers and schedulers for distributed training
     for k, _ in optimizer.optimizers.items():
@@ -406,7 +410,7 @@ def main():
             " | > SpkEnc freeze:       %s (unfreeze@epoch=%d, lr=%s)",
             spkenc_params.freeze,
             spkenc_unfreeze_epoch,
-            spkenc_params.lr,
+            config.optimizer_params.lr,
         )
         logger.info("")
 

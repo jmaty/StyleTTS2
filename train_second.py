@@ -135,12 +135,13 @@ def main():
     loss_params = config.loss_params
     optimizer_params = config.optimizer_params
     spkenc_params = config.model_params.spkenc_params
+
     # Optional SCL: disabled when lambda_scl is absent or <= 0
     use_scl = bool(getattr(loss_params, "lambda_scl", 0.0))
+
     # Optional fine-tuning for speaker encoder
     # - freeze: if False, allow training
     # - unfreeze_epoch: set to joint start
-    # - lr: optional dedicated LR for speaker_encoder
     spkenc_unfreeze_epoch = joint_epoch
 
     # Set up text cleaner
@@ -296,15 +297,81 @@ def main():
     # scheduler_params_dict = {k: scheduler_params.copy() for k in parameters_dict}
 
     # Build parameter groups for optimizer
+    # Optional per-module optimizer overrides from config
+    per_module_overrides = {
+        "bert": {
+            "lr": config.optimizer_params.bert_lr,
+            "betas": (0.9, 0.99),
+            "weight_decay": 0.01,
+            "initial_lr": config.optimizer_params.bert_lr,
+            "min_lr": 0,
+            "max_lr": config.optimizer_params.bert_lr * 2,
+        },
+        "decoder": {
+            "lr": config.optimizer_params.ft_lr,
+            "betas": (0.0, 0.99),
+            "weight_decay": 1e-4,
+            "initial_lr": config.optimizer_params.ft_lr,
+            "min_lr": 0,
+            "max_lr": config.optimizer_params.ft_lr * 2,
+        },
+        "prosodic_style_encoder": {
+            "lr": (
+                config.optimizer_params.ft_lr
+                if model_params.style_mix.mode != "external"
+                else config.optimizer_params.lr
+            ),
+            "betas": (0.0, 0.99),
+            "weight_decay": 1e-4,
+            "initial_lr": (
+                config.optimizer_params.ft_lr
+                if model_params.style_mix.mode != "external"
+                else config.optimizer_params.lr
+            ),
+            "min_lr": 0,
+            "max_lr": (
+                config.optimizer_params.ft_lr * 2
+                if model_params.style_mix.mode != "external"
+                else config.optimizer_params.lr * 2
+            ),
+        },
+        "speaker_encoder": {
+            "lr": config.optimizer_params.ft_lr,
+            "betas": (0.0, 0.99),
+            "weight_decay": 1e-4,
+            "initial_lr": config.optimizer_params.ft_lr,
+            "min_lr": 0,
+            "max_lr": config.optimizer_params.ft_lr * 2,
+        },
+        # Won't work if acoustic_style_encoder is not trainable
+        "acoustic_style_encoder": {
+            "lr": config.optimizer_params.ft_lr,
+            "betas": (0.0, 0.99),
+            "weight_decay": 1e-4,
+            "initial_lr": config.optimizer_params.ft_lr,
+            "min_lr": 0,
+            "max_lr": config.optimizer_params.ft_lr * 2,
+        },
+    }
+
+    # Modules to use double max_lr (typically for 2nd stage training)
+    modules = [
+        "bert",
+        "decoder",
+        "prosodic_style_encoder",
+        "acoustic_style_encoder",
+        "speaker_encoder",
+    ]
     parameters_dict, scheduler_params_dict, not_trainable_modules = model.params_for_optimizer(
         epochs,
         steps_per_epoch,
         optimizer_params,
-        use_max_lr=True,
-        spkenc_params=spkenc_params,
+        double_max_lr=modules,
+        optimizer_overrides=per_module_overrides,
     )
     logger.info("Optimizer groups: %s", list(parameters_dict.keys()))
     logger.info("Not trainable modules: %s", not_trainable_modules)
+    logger.debug("Scheduler parameters: %s", scheduler_params_dict)
     # # Update scheduler parameters
     # scheduler_params_dict["bert"]["max_lr"] = optimizer_params.bert_lr * 2
     # scheduler_params_dict["decoder"]["max_lr"] = optimizer_params.ft_lr * 2
@@ -312,36 +379,12 @@ def main():
     #     scheduler_params_dict["acoustic_style_encoder"]["max_lr"] = optimizer_params.ft_lr * 2
     # scheduler_params_dict["prosodic_style_encoder"]["max_lr"] = optimizer_params.ft_lr * 2
     # Create optimizer
-    optimizer = build_optimizer(parameters_dict, scheduler_params_dict, optimizer_params.lr)
-
-    # Optional dedicated LR for speaker encoder
-    if "speaker_encoder" in optimizer.optimizers:
-        try:
-            for g in optimizer.optimizers["speaker_encoder"].param_groups:
-                g["lr"] = spkenc_params.lr
-                g["initial_lr"] = spkenc_params.lr
-        except Exception:
-            logger.warning("Cannot set dedicated LR for speaker encoder")
-
-    # Adjust BERT learning rate
-    for g in optimizer.optimizers["bert"].param_groups:
-        g["betas"] = (0.9, 0.99)
-        g["lr"] = optimizer_params.bert_lr
-        g["initial_lr"] = optimizer_params.bert_lr
-        g["min_lr"] = 0
-        g["weight_decay"] = 0.01
-
-    # Adjust acoustic module learning rate
-    modules = ["decoder", "prosodic_style_encoder"]
-    if "acoustic_style_encoder" not in not_trainable_modules:
-        modules.append("acoustic_style_encoder")
-    for module in modules:
-        for g in optimizer.optimizers[module].param_groups:
-            g["betas"] = (0.0, 0.99)
-            g["lr"] = optimizer_params.ft_lr
-            g["initial_lr"] = optimizer_params.ft_lr
-            g["min_lr"] = 0
-            g["weight_decay"] = 1e-4
+    optimizer = build_optimizer(
+        parameters_dict,
+        scheduler_params_dict,
+        optimizer_params.lr,
+    )
+    logger.debug("Optimizer: %s", optimizer.optimizers)
 
     # Load models if there is a pre-trained model
     if load_pretrained:
@@ -432,7 +475,7 @@ def main():
         " | > SpkEnc freeze:       %s (unfreeze@epoch=%d, lr=%s)",
         spkenc_params.freeze,
         spkenc_unfreeze_epoch,
-        spkenc_params.lr,
+        config.optimizer_params.ft_lr,
     )
     logger.info("")
 
@@ -481,7 +524,7 @@ def main():
         if epoch >= joint_epoch:
             train_components.extend(["decoder", "wd"])
             if "acoustic_style_encoder" not in not_trainable_modules:
-                modules.append("acoustic_style_encoder")
+                train_components.append("acoustic_style_encoder")
             if spkenc_train_enabled:
                 train_components.append("speaker_encoder")
 
