@@ -140,20 +140,19 @@ def setup_logging(
     is_main_fn = lambda: is_main_process(accelerator)
     rank_fn = lambda: current_rank(accelerator)
 
-    # Konzolový handler (jen hlavní proces)
-    ch = logging.StreamHandler(stream=sys.stdout)
-    ch.setLevel(level_num)
-    ch.addFilter(_RankAugmentFilter(rank_fn))
-    ch.addFilter(_MainOnlyFilter(is_main_fn))
-    ch.setFormatter(logging.Formatter(fmt=fmt, datefmt=datefmt))
-    root.addHandler(ch)
+    # Konzolový handler: přidej pouze v hlavním procesu, aby se předešlo duplicitám
+    if is_main_fn():
+        ch = logging.StreamHandler(stream=sys.stdout)
+        ch.setLevel(level_num)
+        ch.addFilter(_RankAugmentFilter(rank_fn))
+        ch.setFormatter(logging.Formatter(fmt=fmt, datefmt=datefmt))
+        root.addHandler(ch)
 
     # Souborový handler (volitelný, jen hlavní proces)
-    if log_file:
+    if log_file and is_main_fn():
         fh = logging.FileHandler(log_file, mode="a", encoding="utf-8")
         fh.setLevel(level_num)
         fh.addFilter(_RankAugmentFilter(rank_fn))
-        fh.addFilter(_MainOnlyFilter(is_main_fn))
         fh.setFormatter(logging.Formatter(fmt=fmt_file, datefmt=datefmt))
         root.addHandler(fh)
 
