@@ -1598,80 +1598,6 @@ def load_spkenc_model(model_path, freeze=False):
     return model
 
 
-# def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_modules=None):
-#     """
-#     Load model and optimizer states from a checkpoint file.
-#     This function handles loading model parameters with special handling for
-#     DataParallel modules that might have key name inconsistencies between
-#     training stages.
-#     Parameters
-#     ----------
-#     model : dict
-#         Dictionary of model components to load
-#     optimizer : torch.optim.Optimizer
-#         Optimizer to load state
-#     path : str
-#         Path to the checkpoint file
-#     load_only_params : bool, default=True
-#         If True, only loads model parameters without optimizer state,
-#         and resets epoch/iters to 0. If False, loads optimizer state
-#         and continues from saved epoch/iters.
-#     ignore_modules : list, optional
-#         List of module names to ignore during loading
-#     Returns
-#     -------
-#     tuple
-#         (model, optimizer, epoch, iters) - The loaded model, optimizer,
-#         current epoch, and iteration count
-#     Notes
-#     -----
-#     This function includes handling for inconsistent key names between first
-#     and second training stages as noted in StyleTTS2 GitHub issues.
-#     """
-#     # Modified to deal with inconsistent key names between first and second training stages
-#     # => see https://github.com/yl4579/StyleTTS2/issues/254,
-#     # https://github.com/yl4579/StyleTTS2/issues/21#issue-1962579727
-#     # https://github.com/pytorch/pytorch/issues/9176#issuecomment-403570715
-
-#     if ignore_modules is None:
-#         ignore_modules = []
-#     state = torch.load(path, map_location="cpu")
-#     params = state["net"]
-#     for key in model:
-#         if key in params and key not in ignore_modules:
-#             logger.info("%s loaded", key)
-#             try:
-#                 model[key].load_state_dict(params[key], strict=True)
-#             except RuntimeError:  # DataParallel module. mismatch
-#                 state_dict = params[key]
-#                 new_state_dict = OrderedDict()
-#                 # print(f'{key} key length: {len(model[key].state_dict().keys())}, state_dict length: {len(state_dict.keys())}')
-#                 # print("model", len(model[key].state_dict().items()))
-#                 # print("state", len(state_dict.items()))
-#                 for k_m, _ in model[key].state_dict().items():
-#                     k_fix, v_c = None, None
-#                     if k_m in state_dict:
-#                         v_c = state_dict[k_m]
-#                         k_fix = k_m[7:]
-#                     if k_fix:
-#                         new_state_dict[k_fix] = v_c
-#                         # print(f'=> {k_m} => {k_fix}')
-#                 model[key].load_state_dict(new_state_dict, strict=False)
-#     # Set to eval mode
-#     _ = [model[key].eval() for key in model]
-
-#     if not load_only_params:
-#         # advance start epoch or we'd re-train and rewrite the last epoch file
-#         epoch = state["epoch"] + 1
-#         iters = state["iters"]
-#         optimizer.load_state_dict(state["optimizer"])
-#     else:
-#         epoch = 0
-#         iters = 0
-
-#     return model, optimizer, epoch, iters
-
-
 class StyleTTS2:
     """
     StyleTTS2 model class that encapsulates all components of the StyleTTS2 text-to-speech system.
@@ -2195,11 +2121,27 @@ class StyleTTS2:
         epochs,
         steps_per_epoch,
         optimizer_params,
-        double_max_lr=None,
         optimizer_overrides=None,
     ):
-        if double_max_lr is None:
-            double_max_lr = []
+        """
+        Prepares parameter groups and scheduler parameters for optimizer initialization.
+        This method filters out parameters that don't require gradients, handles speaker encoder
+        parameters according to training configuration, and applies custom learning rate
+        schedules per module.
+        Args:
+            epochs (int): Total number of training epochs.
+            optimizer_params (object): Base optimizer parameters containing at least 'lr'.
+            steps_per_epoch (int): Number of training steps per epoch.
+            optimizer_overrides (dict, optional): Dictionary of module-specific overrides for
+                                                 scheduler parameters. Defaults to None.
+        Returns:
+            tuple: A tuple containing:
+                - parameters_dict (dict): Dictionary mapping module names to their trainable parameters.
+                - scheduler_params_dict (dict): Dictionary mapping module names to their scheduler parameters.
+                - not_trainable_modules (list): List of module names that have no trainable parameters.
+        """
+        if optimizer_overrides is None:
+            optimizer_overrides = {}
 
         # Default common scheduler parameters
         scheduler_params = {
@@ -2233,35 +2175,10 @@ class StyleTTS2:
         parameters_dict = {k: v for k, v in parameters_filtered.items() if v}
         scheduler_params_dict = {k: scheduler_params.copy() for k in parameters_dict}
 
-        # Merge user-provided per-module overrides directly into per-module scheduler/optimizer dict
-        if isinstance(optimizer_overrides, dict):
-            for k, v in optimizer_overrides.items():
-                if k in scheduler_params_dict and isinstance(v, dict):
-                    scheduler_params_dict[k].update(v)
-        # If user provided only lr without max_lr, align max_lr := lr for that module
-        if isinstance(optimizer_overrides, dict):
-            for k, uov in optimizer_overrides.items():
-                if k in scheduler_params_dict and isinstance(uov, dict):
-                    if "lr" in uov and "max_lr" not in uov:
-                        try:
-                            scheduler_params_dict[k]["max_lr"] = float(
-                                scheduler_params_dict[k]["lr"]
-                            )
-                        except Exception:
-                            scheduler_params_dict[k]["max_lr"] = scheduler_params_dict[k]["lr"]
-
-        # Ensure OneCycleLR starts at the requested lr, not max_lr:
-        # If both lr and max_lr are present and user did not specify div_factor,
-        # compute div_factor = max_lr / lr (clamped at >=1).
-        for k, cfg in scheduler_params_dict.items():
-            if "lr" in cfg and "max_lr" in cfg and "div_factor" not in cfg:
-                try:
-                    lr_v = float(cfg["lr"]) if cfg["lr"] is not None else None
-                    max_lr_v = float(cfg["max_lr"]) if cfg["max_lr"] is not None else None
-                    if lr_v and max_lr_v and lr_v > 0:
-                        df = max(max_lr_v / lr_v, 1.0)
-                        cfg["div_factor"] = df
-                except Exception:
-                    pass
+        # Override default scheduler params if specified for any module
+        for k, uov in optimizer_overrides.items():
+            if k in scheduler_params_dict:
+                # Merge override values
+                scheduler_params_dict[k] = {**scheduler_params_dict[k], **uov}
 
         return parameters_dict, scheduler_params_dict, not_trainable_modules
