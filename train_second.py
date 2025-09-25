@@ -61,20 +61,18 @@ def main():
     set_random_seed(config.seed)
     log_dir = config.log_dir
     os.makedirs(log_dir, exist_ok=True)
+    # Initialize W&B first (it may add logging handlers); we'll override logging next
+    wb_logger = wandb.init(
+        project="StyleTTS2+spkenc",
+        name=f"{osp.basename(log_dir)}",
+        config=config,
+        dir=log_dir,
+    )
+
     # Unified logging (console + file). Without Accelerate => logs this process.
     log_file = args.log_file or osp.join(log_dir, "train.log")
     setup_logging(args.log_level, log_file)
     logger = get_logger(__name__)
-
-    wb_logger = wandb.init(
-        # Set the wandb project where this run will be logged.
-        project="StyleTTS2+spkenc",
-        # Set run name
-        name=f"{osp.basename(log_dir)}",
-        # Track hyperparameters and run metadata.
-        config=config,
-        dir=log_dir,
-    )
 
     # Init NVLM
     nvidia_smi.nvmlInit()

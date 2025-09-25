@@ -70,23 +70,19 @@ def main():
     # NCCL warm-up
     nccl_warmup(device=getattr(acc, "device", None), local_rank=local_rank)
 
+    # Initialize W&B first (it may add logging handlers); we'll override logging next
+    if acc.is_main_process:
+        wb_logger = wandb.init(
+            project="StyleTTS2+spkenc",
+            name=f"{osp.basename(log_dir)}",
+            config=config,
+            dir=log_dir,
+        )
+
     # Uniform logging (main process only)
     log_file = args.log_file or osp.join(log_dir, "train.log")
     setup_logging(args.log_level, log_file, accelerator=acc)
     logger = get_logger(__name__)
-
-    # Configure logging only on main process to avoid duplicate output
-    if acc.is_main_process:
-        # Initialize the wandb logger and name wandb project and run
-        wb_logger = wandb.init(
-            # Set the wandb project where this run will be logged.
-            project="StyleTTS2+spkenc",
-            # Set run name
-            name=f"{osp.basename(log_dir)}",
-            # Track hyperparameters and run metadata.
-            config=config,
-            dir=log_dir,
-        )
 
     # Set up device
     device = acc.device

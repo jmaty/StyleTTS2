@@ -129,6 +129,21 @@ def setup_logging(
             h.close()
         except Exception:
             pass
+    # Also clear handlers on existing non-root loggers and ensure they propagate
+    try:
+        for _name, _logger in list(logging.Logger.manager.loggerDict.items()):  # type: ignore[attr-defined]
+            if isinstance(_logger, logging.Logger):
+                for h in list(_logger.handlers):
+                    _logger.removeHandler(h)
+                    try:
+                        h.close()
+                    except Exception:
+                        pass
+                _logger.propagate = True
+                # Do not force level here; let it inherit from root
+    except Exception:
+        # Be tolerant in exotic environments
+        pass
     root.setLevel(level_num)
 
     if fmt is None:
