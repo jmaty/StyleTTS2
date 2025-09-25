@@ -241,14 +241,46 @@ def main():
 
     # Build parameter groups for optimizer
     # Optional per-module optimizer overrides from config
-    per_module_overrides = {
+    pre_optim_params = {
+        "bert": {"max_lr": cfg.optimizer_params.bert_lr * 2},
+        "decoder": {"max_lr": cfg.optimizer_params.ft_lr * 2},
+        "prosodic_style_encoder": {
+            "max_lr": (
+                cfg.optimizer_params.ft_lr * 2
+                if cfg.model_params.style_mix.mode != "external"
+                else cfg.optimizer_params.lr * 2
+            )
+        },
+        "speaker_encoder": {"max_lr": cfg.optimizer_params.ft_lr * 2},
+        # Won't work if acoustic_style_encoder is not trainable
+        "acoustic_style_encoder": {"max_lr": cfg.optimizer_params.ft_lr * 2},
+    }
+
+    parameters_dict, scheduler_params_dict, not_trainable_modules = model.params_for_optimizer(
+        epochs,
+        steps_per_epoch,
+        cfg.optimizer_params,
+        optimizer_overrides=pre_optim_params,
+    )
+    logger.info("Optimizer groups: %s", list(parameters_dict.keys()))
+    logger.info("Not trainable modules: %s", not_trainable_modules)
+    logger.debug("Scheduler parameters: %s", scheduler_params_dict)
+
+    # Create optimizer
+    optimizer = build_optimizer(
+        parameters_dict,
+        scheduler_params_dict,
+        cfg.optimizer_params.lr,
+    )
+
+    # Adjust optimizers for specific modules
+    post_optim_params = {
         "bert": {
             "lr": cfg.optimizer_params.bert_lr,
             "betas": (0.9, 0.99),
             "weight_decay": 0.01,
             "initial_lr": cfg.optimizer_params.bert_lr,
             "min_lr": 0,
-            "max_lr": cfg.optimizer_params.bert_lr * 2,
         },
         "decoder": {
             "lr": cfg.optimizer_params.ft_lr,
@@ -256,7 +288,6 @@ def main():
             "weight_decay": 1e-4,
             "initial_lr": cfg.optimizer_params.ft_lr,
             "min_lr": 0,
-            "max_lr": cfg.optimizer_params.ft_lr * 2,
         },
         "prosodic_style_encoder": {
             "lr": (
@@ -272,11 +303,6 @@ def main():
                 else cfg.optimizer_params.lr
             ),
             "min_lr": 0,
-            "max_lr": (
-                cfg.optimizer_params.ft_lr * 2
-                if cfg.model_params.style_mix.mode != "external"
-                else cfg.optimizer_params.lr * 2
-            ),
         },
         "speaker_encoder": {
             "lr": cfg.optimizer_params.ft_lr,
@@ -284,7 +310,6 @@ def main():
             "weight_decay": 1e-4,
             "initial_lr": cfg.optimizer_params.ft_lr,
             "min_lr": 0,
-            "max_lr": cfg.optimizer_params.ft_lr * 2,
         },
         # Won't work if acoustic_style_encoder is not trainable
         "acoustic_style_encoder": {
@@ -293,35 +318,16 @@ def main():
             "weight_decay": 1e-4,
             "initial_lr": cfg.optimizer_params.ft_lr,
             "min_lr": 0,
-            "max_lr": cfg.optimizer_params.ft_lr * 2,
         },
     }
 
-    # Modules to use double max_lr (typically for 2nd stage training)
-    modules = [
-        "bert",
-        "decoder",
-        "prosodic_style_encoder",
-        "acoustic_style_encoder",
-        "speaker_encoder",
-    ]
-    parameters_dict, scheduler_params_dict, not_trainable_modules = model.params_for_optimizer(
-        epochs,
-        steps_per_epoch,
-        cfg.optimizer_params,
-        double_max_lr=modules,
-        optimizer_overrides=per_module_overrides,
-    )
-    logger.info("Optimizer groups: %s", list(parameters_dict.keys()))
-    logger.info("Not trainable modules: %s", not_trainable_modules)
-    logger.debug("Scheduler parameters: %s", scheduler_params_dict)
+    optimizer["bert"] = post_optim_params["bert"]
+    optimizer["decoder"] = post_optim_params["decoder"]
+    optimizer["prosodic_style_encoder"] = post_optim_params["prosodic_style_encoder"]
+    optimizer["speaker_encoder"] = post_optim_params["speaker_encoder"]
+    if model.acoustic_style_encoder not in not_trainable_modules:
+        optimizer["acoustic_style_encoder"] = post_optim_params["acoustic_style_encoder"]
 
-    # Create optimizer
-    optimizer = build_optimizer(
-        parameters_dict,
-        scheduler_params_dict,
-        cfg.optimizer_params.lr,
-    )
     logger.debug("Optimizer: %s", optimizer.optimizers)
 
     # Load models if there is a pre-trained model
