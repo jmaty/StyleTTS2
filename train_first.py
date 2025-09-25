@@ -209,12 +209,7 @@ def main():
     model.to(device)
 
     # Optional per-module optimizer overrides from config
-    pre_optim_params = {
-        "speaker_encoder": {
-            "lr": cfg.optimizer_params.ft_lr,
-            "initial_lr": cfg.optimizer_params.ft_lr,
-        },
-    }
+    pre_optim_params = {"speaker_encoder": {"max_lr": cfg.optimizer_params.ft_lr * 2}}
     # Create optimizers and schedulers parameters for each module
     parameters_dict, scheduler_params_dict, not_trainable_modules = model.params_for_optimizer(
         epochs,
@@ -232,12 +227,21 @@ def main():
         scheduler_params_dict,
         cfg.optimizer_params.lr,
     )
+    post_optim_params = {
+        "speaker_encoder": {
+            "lr": cfg.optimizer_params.ft_lr,
+            "betas": (0.0, 0.99),
+            "weight_decay": 1e-4,
+            "initial_lr": cfg.optimizer_params.ft_lr,
+            "min_lr": 0,
+        },
+    }
+    optimizer["speaker_encoder"] = post_optim_params["speaker_encoder"]
     logger.debug("Optimizer: %s", optimizer.optimizers)
 
-    # Prepare optimizers and schedulers for distributed training
-    for k, _ in optimizer.optimizers.items():
-        optimizer.optimizers[k] = acc.prepare(optimizer.optimizers[k])
-        optimizer.schedulers[k] = acc.prepare(optimizer.schedulers[k])
+    # Prepare optimizers and schedulers for distributed training - safe variant
+    optimizer.optimizers = {k: acc.prepare(v) for k, v in optimizer.optimizers.items()}
+    optimizer.schedulers = {k: acc.prepare(v) for k, v in optimizer.schedulers.items()}
 
     # Load model weights
     with acc.main_process_first():
