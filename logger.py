@@ -23,6 +23,26 @@ _LEVELS = {
 }
 
 
+def _is_papermill_env() -> bool:
+    """Detect execution under papermill/nb execution runners.
+
+    We avoid attaching our own console StreamHandler in these environments
+    because runners already capture stdout/stderr and often install their
+    own logging handlers, which can lead to duplicate console output.
+    """
+    try:
+        # Papermill typically sets these
+        keys = ("PAPERMILL_INPUT_PATH", "PAPERMILL_OUTPUT_PATH", "PAPERMILL_EXECUTION")
+        if any(os.getenv(k) for k in keys):
+            return True
+        # Fallback heuristic
+        if "papermill" in sys.modules:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _get_rank_env() -> int:
     for k in ("RANK", "LOCAL_RANK"):
         v = os.getenv(k)
@@ -122,28 +142,30 @@ def setup_logging(
     level_num = _LEVELS.get(str(level).upper(), logging.INFO)
 
     root = logging.getLogger()
-    # Remove all existing handlers to prevent duplicates in spawn/torchrun
-    for h in list(root.handlers):
-        root.removeHandler(h)
+    is_pm = _is_papermill_env()
+    # Remove existing handlers only in normal CLI runs; under papermill keep theirs
+    if not is_pm:
+        # Remove all existing handlers to prevent duplicates in spawn/torchrun
+        for h in list(root.handlers):
+            root.removeHandler(h)
+            try:
+                h.close()
+            except Exception:
+                pass
+        # Also clear handlers on existing non-root loggers and ensure they propagate
         try:
-            h.close()
+            for _name, _logger in list(logging.Logger.manager.loggerDict.items()):  # type: ignore[attr-defined]
+                if isinstance(_logger, logging.Logger):
+                    for h in list(_logger.handlers):
+                        _logger.removeHandler(h)
+                        try:
+                            h.close()
+                        except Exception:
+                            pass
+                    _logger.propagate = True
         except Exception:
+            # Be tolerant in exotic environments
             pass
-    # Also clear handlers on existing non-root loggers and ensure they propagate
-    try:
-        for _name, _logger in list(logging.Logger.manager.loggerDict.items()):  # type: ignore[attr-defined]
-            if isinstance(_logger, logging.Logger):
-                for h in list(_logger.handlers):
-                    _logger.removeHandler(h)
-                    try:
-                        h.close()
-                    except Exception:
-                        pass
-                _logger.propagate = True
-                # Do not force level here; let it inherit from root
-    except Exception:
-        # Be tolerant in exotic environments
-        pass
     root.setLevel(level_num)
 
     if fmt is None:
@@ -156,7 +178,8 @@ def setup_logging(
     rank_fn = lambda: current_rank(accelerator)
 
     # Konzolový handler: přidej pouze v hlavním procesu, aby se předešlo duplicitám
-    if is_main_fn():
+    # a vynech při běhu pod papermill/nb runnerem (ti mají vlastní handler/capturing)
+    if is_main_fn() and not is_pm:
         ch = logging.StreamHandler(stream=sys.stdout)
         ch.setLevel(level_num)
         ch.addFilter(_RankAugmentFilter(rank_fn))
