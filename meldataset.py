@@ -1,20 +1,59 @@
 # coding: utf-8
+import math
 import os.path as osp
 import random
+from collections import defaultdict
 
 import numpy as np
 import pandas as pd
 import torch
 import torchaudio
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Sampler
 
 from logger import get_logger
 
 # Setup logger
 logger = get_logger(__name__)
 
-np.random.seed(1)
-random.seed(1)
+np.random.seed(3407)
+random.seed(3407)
+
+
+def seconds2mel_length(seconds, sample_rate=24000, hop_length=300):
+    """Converts seconds to the number of mel frames.
+    Args:
+        seconds (float): Duration in seconds.
+        sample_rate (int): Sample rate of the audio. Defaults to 24000.
+        hop_length (int): Hop length for STFT. Defaults to 300.
+    Returns:
+        int: Number of mel frames corresponding to the given duration.
+    """
+    # Calculate the number of mel frames: samples / hop_length
+    return int(seconds * sample_rate / hop_length)
+
+
+def samples2mel_length(samples, hop_length):
+    """Converts number of samples to the number of mel frames.
+    Args:
+        samples (int): Number of audio samples.
+        hop_length (int): Hop length for STFT. Defaults to 300.
+    Returns:
+        int: Number of mel frames corresponding to the given number of samples.
+    """
+    # Calculate the number of mel frames: samples / hop_length
+    return int(samples / hop_length)
+
+
+def mel2samples_length(mel_frames, hop_length):
+    """Converts number of mel frames to the number of samples.
+    Args:
+        mel_frames (int): Number of mel frames.
+        hop_length (int): Hop length for STFT. Defaults to 300.
+    Returns:
+        int: Number of audio samples corresponding to the given number of mel frames.
+    """
+    # Calculate the number of samples: mel_frames * hop_length
+    return int(mel_frames * hop_length - 1)
 
 
 class AudioProcessor:
@@ -141,11 +180,6 @@ class FilePathDataset(torch.utils.data.Dataset):
         ood_data=None,
         **kwargs,
     ):
-        self.data_augmentation = data_augmentation and (not validation)  # not used
-        self.max_mel_length = 192
-        self.root_path = root_path  # Set up path to waveform directory
-        self.ptexts = []  # Initialize list of OOD texts
-
         # Get parameters from kwargs (config)
         self.sr = kwargs.get("sr", 24000)
         self.min_length = kwargs.get("min_length", 50)
@@ -159,7 +193,16 @@ class FilePathDataset(torch.utils.data.Dataset):
         self.n_mels = kwargs.get("n_mels", 80)
         self.mean = kwargs.get("mean", -4)
         self.std = kwargs.get("std", 4)
-        self.use_ref_mel = kwargs.get("use_ref_mel", True)
+        self.use_ref_sample = kwargs.get("use_ref_sample", True)
+        # # 2.4s at 24000 Hz (192 mel frames * 300 hop length - 1)
+        # self.max_ref_wave_length = mel2samples_length(
+        #     kwargs.get("max_ref_mel_length", 192), self.spect_params["hop_length"]
+        # )
+        self.max_ref_mel_length = kwargs.get("max_ref_mel_length", 192)
+
+        self.data_augmentation = data_augmentation and (not validation)  # not used
+        self.root_path = root_path  # Set up path to waveform directory
+        self.ptexts = []  # Initialize list of OOD texts
 
         logger.info("%s dataset config: %s", "validation" if validation else "training", kwargs)
 
@@ -257,6 +300,112 @@ class FilePathDataset(torch.utils.data.Dataset):
         """Returns the number of out-of-distribution (OOD) texts."""
         return len(self.ptexts)
 
+    def _load_tensor(self, data):
+        """Loads and preprocesses a single audio sample and its metadata.
+        This method takes a tuple containing the relative path to a waveform file,
+        a string of phonemes, and a speaker ID. It loads the waveform, ensures
+        it's mono, resamples it to the target sample rate if necessary, adds
+        silence padding at the beginning and end, cleans the phoneme string,
+        converts it to a tensor of phone IDs with padding, and returns the
+        processed data.
+        Args:
+            data (tuple): A tuple containing:
+                - wave_path (str): Relative path to the waveform file.
+                - ph_string (str): String representation of phonemes.
+                - speaker_id (str or int): The speaker identifier.
+        Returns:
+            tuple: A tuple containing:
+                - wave (torch.Tensor): The processed 1D waveform tensor.
+                - phone_ids (torch.LongTensor): Padded tensor of phone IDs.
+                - speaker_id (int): The integer speaker identifier.
+        Raises:
+            Warning: Logs a warning if resampling is performed.
+        """
+        wave_path, ph_string, speaker_id = data
+        speaker_id = int(speaker_id)  # Ensure speaker_id is an integer
+
+        # Load waveform directly into a tensor
+        wave, sr = torchaudio.load(osp.join(self.root_path, wave_path))
+        # Handle stereo audio by taking the first channel
+        if wave.shape[0] > 1:
+            wave = wave[0, :].unsqueeze(0)  # Keep it as a 2D tensor [1, n_samples]
+
+        logger.debug("| > id: %d: | wav=%s | ph=%s", speaker_id, wave.shape, ph_string)
+
+        # Resample if necessary
+        if sr != self.sr:
+            resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=self.sr)
+            wave = resampler(wave)
+            logger.warning("%s: sampling rate is %d, resampling to %d", wave_path, sr, self.sr)
+
+        # Add padding to the waveform tensor
+        silence_beg_tensor = torch.zeros((1, self.silence_beg), dtype=wave.dtype)
+        silence_end_tensor = torch.zeros((1, self.silence_end), dtype=wave.dtype)
+        wave = torch.cat([silence_beg_tensor, wave, silence_end_tensor], dim=1)
+
+        logger.debug("| > silence padding: wav=%s", wave.shape)
+
+        return (
+            wave.squeeze(0),  # raw waveform as 1D tensor
+            torch.LongTensor(self.text_cleaner(ph_string, pad=True)),  # phone IDs with padding
+            speaker_id,  # speaker ID
+        )
+
+    def _load_speaker_embedding(self, spk_emb_path):
+        """Loads the speaker embedding from a specified path.
+        Args:
+            spk_emb_path (str): Path to the speaker embedding file.
+        Returns:
+            torch.Tensor: The loaded speaker embedding tensor.
+        """
+        return torch.load(osp.join(self.root_path, spk_emb_path))
+
+    def _load_ref_data(self, data):
+        """
+        Load and process reference audio data for style transfer.
+
+        This method loads reference audio waveform data, processes it into mel-spectrogram
+        features, and resamples the audio to the target sample rate. If the audio is longer
+        than the maximum allowed reference length, it randomly crops a segment.
+
+        Args:
+            data: Input data containing audio file information or path
+
+        Returns:
+            tuple: A tuple containing:
+                - wave_tensor_resampled (torch.Tensor): Resampled audio waveform tensor
+                - mel_tensor (torch.Tensor): Mel-spectrogram features with shape [n_mels, n_frames]
+                - speaker_id: Speaker identification information
+
+        Note:
+            - Audio longer than max_ref_wave_length is randomly cropped
+            - Mel-spectrogram is computed using the configured audio processor
+            - Audio is resampled to match the target sample rate
+        """
+        # Loads the reference audio waveform
+        wave_tensor, _, speaker_id = self._load_tensor(data)
+        logger.debug("| > Ref: %s |shape=%s", data[0], wave_tensor.shape)
+        # wave_len = wave_tensor.size(0)
+        # if wave_len > self.max_ref_wave_length:
+        #     # Randomly crop a wave segment with length self.max_ref_wave_length
+        #     random_start = np.random.randint(0, wave_len - self.max_ref_wave_length)
+        #     wave_tensor = wave_tensor[random_start : random_start + self.max_ref_wave_length]
+
+        # Process audio
+        # Output: [n_mels, n_frames]
+        mel_tensor = self.audio_processor(wave_tensor)
+        mel_len = mel_tensor.size(1)
+        if mel_len > self.max_ref_mel_length:
+            # Randomly crop a mel segment with length self.max_ref_mel_length
+            random_start = np.random.randint(0, mel_len - self.max_ref_mel_length)
+            mel_tensor = mel_tensor[:, random_start : random_start + self.max_ref_mel_length]
+        logger.debug("| > Cropping: mel=%s", mel_tensor.shape)
+
+        # # Resample to target sample rate
+        # wave_tensor_resampled = self.resampler(wave_tensor.unsqueeze(0)).squeeze(0)
+
+        return mel_tensor, speaker_id
+
     def __getitem__(self, idx):
         """
         Retrieves a data sample for the given index.
@@ -288,11 +437,15 @@ class FilePathDataset(torch.utils.data.Dataset):
         """
         data = self.data_list[idx]  # [wavfile, phone IDs, speaker_id]
 
+        logger.debug("> %s (%d):", data[0], idx)
+
         # Load the waveform, phonetic string, and speaker ID
         wave, text_tensor, speaker_id = self._load_tensor(data)
 
         # Process audio: output [n_mels, n_frames]
         mel_normalized = self.audio_processor(wave)
+
+        logger.debug("| > mel=%s", mel_normalized.shape)
 
         # acoustic_feature = mel_tensor.squeeze()
         acoustic_feature = mel_normalized
@@ -300,10 +453,10 @@ class FilePathDataset(torch.utils.data.Dataset):
         # Ensure feature tensor with even length
         acoustic_feature = acoustic_feature[:, : (length_feature - length_feature % 2)]
 
-        # Get reference sample of max length `self.max_mel_length` (192)
-        if self.use_ref_mel:
+        # Get reference sample of max length `self.max_ref_mel_length` (192)
+        if self.use_ref_sample:
             ref_data = (self.df[self.df[2] == str(speaker_id)]).sample(n=1).iloc[0].tolist()
-            ref_mel_tensor, ref_label = self._load_data(ref_data[:3])  # ref_label is speaker ID
+            ref_mel_tensor, ref_label = self._load_ref_data(ref_data[:3])  # ref_label is speaker ID
         else:
             ref_mel_tensor = torch.tensor([], dtype=torch.float)  # Empty tensor
             ref_label = 0
@@ -328,81 +481,6 @@ class FilePathDataset(torch.utils.data.Dataset):
             wave,  # raw waveform tensor
         )
 
-    def _load_tensor(self, data):
-        """Loads and preprocesses a single audio sample and its metadata.
-        This method takes a tuple containing the relative path to a waveform file,
-        a string of phonemes, and a speaker ID. It loads the waveform, ensures
-        it's mono, resamples it to the target sample rate if necessary, adds
-        silence padding at the beginning and end, cleans the phoneme string,
-        converts it to a tensor of phone IDs with padding, and returns the
-        processed data.
-        Args:
-            data (tuple): A tuple containing:
-                - wave_path (str): Relative path to the waveform file.
-                - ph_string (str): String representation of phonemes.
-                - speaker_id (str or int): The speaker identifier.
-        Returns:
-            tuple: A tuple containing:
-                - wave (torch.Tensor): The processed 1D waveform tensor.
-                - phone_ids (torch.LongTensor): Padded tensor of phone IDs.
-                - speaker_id (int): The integer speaker identifier.
-        Raises:
-            Warning: Logs a warning if resampling is performed.
-        """
-        wave_path, ph_string, speaker_id = data
-        # Load waveform directly into a tensor
-        wave, sr = torchaudio.load(osp.join(self.root_path, wave_path))
-        # Handle stereo audio by taking the first channel
-        if wave.shape[0] > 1:
-            wave = wave[0, :].unsqueeze(0)  # Keep it as a 2D tensor [1, n_samples]
-        # Resample if necessary
-        if sr != self.sr:
-            resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=self.sr)
-            wave = resampler(wave)
-            logger.warning("%s: sampling rate is %d, resampling to %d", wave_path, sr, self.sr)
-
-        # Add padding to the waveform tensor
-        silence_beg_tensor = torch.zeros((1, self.silence_beg), dtype=wave.dtype)
-        silence_end_tensor = torch.zeros((1, self.silence_end), dtype=wave.dtype)
-        wave = torch.cat([silence_beg_tensor, wave, silence_end_tensor], dim=1)
-
-        return (
-            wave.squeeze(0),  # raw waveform as 1D tensor
-            torch.LongTensor(self.text_cleaner(ph_string, pad=True)),  # phone IDs with padding
-            int(speaker_id),  # speaker ID
-        )
-
-    def _load_data(self, data):
-        """Takes a tuple containing the relative path to a waveform file,
-        a string of phonemes, and a speaker ID. It loads the waveform, processes
-        it into a mel spectrogram, and crops it to a maximum length if necessary.
-        Args:
-            data (tuple): A tuple containing:
-                - wave_path (str): Relative path to the waveform file.
-                - ph_string (str): String representation of phonemes.
-                - speaker_id (str or int): The speaker identifier.
-        Returns:
-            tuple: A tuple containing:
-                - mel_tensor (torch.Tensor): The processed mel spectrogram.
-                - speaker_id (int): The integer speaker identifier.
-        Raises:
-            Warning: Logs a warning if the mel spectrogram length exceeds
-                the maximum length and crops it."""
-        # Loads the reference audio waveform
-        wave, _, speaker_id = self._load_tensor(data)
-        # mel_tensor = preprocess(wave).squeeze()
-        # Process audio
-        # Output: [n_mels, n_frames]
-        mel_tensor = self.audio_processor(wave)
-
-        mel_length = mel_tensor.size(1)
-        if mel_length > self.max_mel_length:
-            # Randomly crop a segment of the mel spectrogram with length self.max_mel_length
-            random_start = np.random.randint(0, mel_length - self.max_mel_length)
-            mel_tensor = mel_tensor[:, random_start : random_start + self.max_mel_length]
-
-        return mel_tensor, speaker_id
-
 
 class Collater(object):
     """
@@ -423,51 +501,57 @@ class Collater(object):
         data samples.
     """
 
-    def __init__(self, return_wave=False):
-        self.text_pad_index = 0
-        self.min_mel_length = 192
-        self.max_mel_length = 192
+    def __init__(self, return_wave=False, **kwargs):
         self.return_wave = return_wave
 
+        # Processing parameters from kwargs (config)
+        self.sr = kwargs.get("sr", 24000)
+        self.hop_length = kwargs.get("hop_length", 300)
+        self.max_ref_mel_length = kwargs.get("max_ref_mel_length", 192)
+        # self.max_ref_wave_length = mel2samples_length(self.max_ref_mel_length, self.hop_length)
+
+        logger.info("collate config: %s", kwargs)
+
     def __call__(self, batch):
-        """Collate function for creating batches of data.
-        This method takes a list of data samples (returned by __getitem__)
-        and collates them into a batch suitable for model training or inference.
-        It sorts the batch by mel spectrogram length (descending), determines
-        maximum lengths for padding within the batch, initializes padded tensors,
-        and populates these tensors with data from the batch samples. Reference
-        mel spectrograms are padded or cropped to a fixed maximum length defined
-        in the class configuration (`self.max_mel_length`).
+        """
+        Collate function for batching dataset samples with padding and sorting.
+
+        This method processes a batch of samples by sorting them by acoustic feature length
+        (descending order) and padding all sequences to match the maximum length within
+        the batch. It handles multiple types of data including mel spectrograms, text
+        phoneme IDs, reference audio, and raw waveforms.
+
         Args:
-            batch (list): A list of tuples, where each tuple represents a data
-                sample and contains:
-                - speaker_id (int): Speaker identifier.
-                - acoustic_feature (torch.Tensor): Mel spectrogram [n_mels, T_mel].
-                - text_tensor (torch.Tensor): Input phoneme IDs [T_text].
-                - ref_ph_ids (torch.Tensor): OOD text phoneme IDs [T_ref_text].
-                - ref_mel_tensor (torch.Tensor): Reference mel spectrogram
-                  [n_mels, T_ref_mel].
-                - ref_label (int): Reference speaker ID (not used in the returned batch).
-                - wavfile_path (str): Path to the original audio file.
-                - wave_tensor (torch.Tensor or None): Raw waveform tensor.
+            batch (list): List of tuples, where each tuple contains:
+                - [0] label (int): Speaker ID
+                - [1] mel (torch.Tensor): Acoustic features/mel spectrogram [n_mels, T_mel]
+                - [2] text (torch.Tensor): Input phoneme IDs [T_text]
+                - [3] ref_text (torch.Tensor): Reference/OOD text phoneme IDs [T_ref_text]
+                - [4] ref_mel (torch.Tensor): Reference mel spectrogram [n_mels, T_ref_mel]
+                - [5] ref_label (int): Reference speaker ID (unused)
+                - [6] wavfile_path (str): Path to wave file (unused)
+                - [7] wave (torch.Tensor): Raw waveform tensor [T_samples]
+
         Returns:
-            tuple: A tuple containing the following batched and padded tensors:
-            - waves (list): List of raw waveform tensors (torch.Tensor or None)
-              from the batch.
-            - texts (torch.Tensor): Padded input phoneme IDs [B, max_text_length].
-            - input_lengths (torch.Tensor): Lengths of input phoneme sequences [B].
-            - ref_texts (torch.Tensor): Padded OOD text phoneme IDs
-              [B, max_rtext_length].
-            - ref_lengths (torch.Tensor): Lengths of OOD text phoneme sequences [B].
-            - mels (torch.Tensor): Padded mel spectrograms
-              [B, n_mels, max_mel_length].
-            - output_lengths (torch.Tensor): Lengths of mel spectrograms [B].
-            - ref_mels (torch.Tensor): Padded/cropped reference mel spectrograms
-              [B, n_mels, self.max_mel_length].
+            tuple: A tuple containing:
+                - waves (list): List of raw waveform tensors, length B
+                - texts (torch.Tensor): Padded input phoneme IDs [B, max_text_length]
+                - input_lengths (torch.Tensor): Actual lengths of input texts [B]
+                - ref_texts (torch.Tensor): Padded reference phoneme IDs [B, max_rtext_length]
+                - ref_lengths (torch.Tensor): Actual lengths of reference texts [B]
+                - mels (torch.Tensor): Padded mel spectrograms [B, n_mels, max_mel_length]
+                - output_lengths (torch.Tensor): Actual lengths of mel spectrograms [B]
+                - ref_mels (torch.Tensor): Padded reference mel spectrograms [B, n_mels, max_mel_length]
+                                          or empty tensor if no valid reference mels
+
+        Note:
+            - Batch is sorted by mel spectrogram length in descending order for efficient training
+            - Reference waves and mels are conditionally initialized based on availability
+            - Raw waves are kept as a list to manage memory constraints
+            - Padding is applied to ensure all sequences in batch have uniform dimensions
         """
 
-        # batch[0] = wave, mel, text, f0, speakerid
-        batch_size = len(batch)
+        bsize = len(batch)  # Number of samples in the batch
 
         # Sort batch by acoustic feature (mel) length (descending)
         # b[1] is acoustic_feature from __getitem__
@@ -478,9 +562,9 @@ class Collater(object):
         # Determine max lengths for padding within this batch
         nmels = batch[0][1].size(0)
         # Max length of acoustic_feature in this batch
-        max_mel_length = max([b[1].shape[1] for b in batch])
+        max_mel_length = max(b[1].shape[1] for b in batch)
         # b[2] is text_tensor
-        max_text_length = max([b[2].shape[0] for b in batch])
+        max_text_length = max(b[2].shape[0] for b in batch)
         # b[3] is ref_ph_ids (OOD text)
         max_rtext_length = max([b[3].shape[0] for b in batch])
 
@@ -490,22 +574,33 @@ class Collater(object):
 
         # Initialize padded tensors
         # b[0] is speaker_id (integer)
-        labels = torch.zeros((batch_size)).long()
+        labels = torch.zeros((bsize)).long()
         # b[1] is acoustic_feature (mel spectrogram)
-        mels = torch.zeros((batch_size, nmels, max_mel_length)).float()
+        mels = torch.zeros((bsize, nmels, max_mel_length)).float()
         # b[2] is text_tensor (input phoneme IDs)
-        texts = torch.zeros((batch_size, max_text_length)).long()
+        texts = torch.zeros((bsize, max_text_length)).long()
         # b[3] is ref_ph_ids (OOD text phoneme IDs)
-        ref_texts = torch.zeros((batch_size, max_rtext_length)).long()
+        ref_texts = torch.zeros((bsize, max_rtext_length)).long()
 
-        input_lengths = torch.zeros(batch_size).long()
-        ref_lengths = torch.zeros(batch_size).long()
-        output_lengths = torch.zeros(batch_size).long()
+        input_lengths = torch.zeros(bsize).long()
+        ref_lengths = torch.zeros(bsize).long()
+        output_lengths = torch.zeros(bsize).long()
+
+        # # Initialize ref wave tensors conditionally
+        # # b[4] is ref_wave_tensor, use `self.max_ref_wave_length` (fixed length)
+        # # Check if batch has valid reference mel tensors
+        # # b[4] is ref_wave_tensor from __getitem__
+        # has_valid_ref_wave = batch[0][4].numel() != 0
+        # ref_waves = (
+        #     torch.zeros((bsize, 1, self.max_ref_wave_length)).float()
+        #     if has_valid_ref_wave
+        #     else torch.tensor([], dtype=torch.float)  # Return None if no item has ref_wave
+        # )
 
         # Initialize ref_mels conditionally
         # b[4] is ref_mel_tensor, use self.max_mel_length (fixed size from config)
         ref_mels = (
-            torch.zeros((batch_size, nmels, self.max_mel_length)).float()
+            torch.zeros((bsize, nmels, self.max_ref_mel_length)).float()
             if has_valid_ref_mel
             else torch.tensor([], dtype=torch.float)  # Return None if no item has ref_mel
         )
@@ -518,7 +613,7 @@ class Collater(object):
 
         # b[7] is raw wave tensor
         # Due to memory constraints, it is better to keep it as a list
-        waves = [None for _ in range(batch_size)]
+        waves = [None for _ in range(bsize)]
 
         # Rearrange batch data according to mel length
         for bid, (label, mel, text, ref_text, ref_mel, _, _, wave) in enumerate(batch):
@@ -548,7 +643,7 @@ class Collater(object):
             waves[bid] = wave
 
         return (
-            waves,  # List of raw waveform tensors (or None)
+            waves,  # List of raw waveform tensors [T_samples] (or None)
             texts,  # Padded input phoneme IDs [B, T_text]
             input_lengths,  # Input phoneme lengths [B]
             ref_texts,  # Padded OOD text phoneme IDs [B, T_ref_text]
@@ -557,6 +652,205 @@ class Collater(object):
             output_lengths,  # Mel spectrogram lengths [B]
             ref_mels,  # Padded reference mel spectrograms [B, n_mels, max_mel_length]
         )
+
+
+class BalancedSpeakerSampler(Sampler):
+    """A PyTorch Sampler that ensures balanced speaker representation across mini-batches.
+    This sampler distributes data samples to maintain approximately equal representation
+    of different speakers within each batch, which is particularly useful for training
+    speaker-aware models like text-to-speech systems.
+    The sampler supports distributed training (DDP) by partitioning speakers across
+    multiple processes and provides deterministic shuffling through epoch-based seeding.
+    Args:
+        dataset: Dataset object containing data_list where each item has speaker_id at index 2
+        batch_size (int): Number of samples per mini-batch
+        drop_last (bool): Whether to drop the last incomplete batch
+        seed (int, optional): Base random seed for reproducibility. Defaults to 42.
+        rank (int, optional): Process rank for distributed training. Defaults to 0.
+        world_size (int, optional): Total number of processes in distributed training. Defaults to 1.
+    Raises:
+        ValueError: If batch_size < 1 or world_size < 1
+        TypeError: If batch_size is not an integer
+    Attributes:
+        batch_size (int): Number of samples per batch
+        drop_last (bool): Whether to drop incomplete final batch
+        base_seed (int): Base seed for random number generation
+        rank (int): Current process rank
+        world_size (int): Total number of distributed processes
+        epoch (int): Current training epoch (updated via set_epoch)
+        spk2idx (dict): Mapping from speaker IDs to lists of sample indices
+        speakers (list): List of all unique speaker IDs
+    Example:
+        >>> sampler = BalancedSpeakerSampler(dataset, batch_size=32, drop_last=True)
+        >>> dataloader = DataLoader(dataset, batch_sampler=sampler)
+        >>> for epoch in range(num_epochs):
+        ...     sampler.set_epoch(epoch)
+        ...     for batch in dataloader:
+        ...         # Training code here
+        ...         pass
+    Note:
+        Call set_epoch() at the beginning of each training epoch to ensure
+        proper shuffling and reproducibility across epochs and distributed processes."""
+
+    def __init__(
+        self,
+        dataset,
+        batch_size,
+        drop_last,
+        seed=3407,
+        rank=0,
+        world_size=1,
+    ):
+        super().__init__(None)
+
+        self.batch_size = batch_size
+        self.drop_last = drop_last
+        self.base_seed = seed
+        self.rank = rank
+        self.world_size = world_size
+        self.epoch = 0  # Updated via ``set_epoch`` from the training loop.
+
+        # Build mapping {speaker_id: [indices]}
+        self.spk2idx = defaultdict(list)
+        for index, data in enumerate(dataset.data_list):
+            spk_id = data[2]  # data[2] is speaker_id
+            self.spk2idx[spk_id].append(index)
+        self.speakers = list(self.spk2idx.keys())
+
+        # Pre‑allocate RNG.  We *reseed* it every epoch for determinism.
+        self._rng = random.Random()
+
+    # ---------------------------------------------------------------------
+    # Epoch property with setter
+    # ---------------------------------------------------------------------
+    @property
+    def epoch(self):
+        """Current training epoch number."""
+        return self._epoch
+
+    @epoch.setter
+    def epoch(self, value):
+        """Set the current epoch for deterministic sampling.
+
+        This method is typically called by the DataLoader to ensure proper
+        shuffling behavior across training epochs when using distributed training
+        or epoch-based sampling strategies.
+
+        Args:
+            value (int): The current epoch number.
+        """
+        self._epoch = value
+
+    # ---------------------------------------------------------------------
+    # Legacy compatibility method
+    # ---------------------------------------------------------------------
+    def set_epoch(self, epoch):  # noqa: D401 (non‑imperative)
+        """Set the current epoch for the dataset.
+
+        This method is typically called by the DataLoader to ensure proper
+        shuffling behavior across training epochs when using distributed training
+        or epoch-based sampling strategies.
+
+        Args:
+            epoch (int): The current epoch number.
+        """
+        self.epoch = epoch
+
+    # ------------------------------------------------------------------
+    # Sampler core
+    # ------------------------------------------------------------------
+    def __iter__(self):  # noqa: D401
+        """Iterate over batches of data indices with speaker-balanced sampling.
+        This iterator implements a sophisticated batching strategy that:
+        1. Uses deterministic seeding based on epoch and rank for reproducibility
+        2. Shuffles samples within each speaker and shuffles speaker order
+        3. Distributes speakers across multiple ranks for distributed training
+        4. Rotates through active speakers to create balanced batches
+        5. Ensures each batch contains samples from different speakers when possible
+        The algorithm maintains fairness by cycling through speakers and only
+        removing them from the active pool when they're exhausted. This prevents
+        any single speaker from dominating the batches.
+        Yields:
+            List[int]: Batches of data indices, each of size `batch_size`
+                        (except possibly the last batch if `drop_last=False`)
+        Note:
+            - Uses NumPy's permutation for efficient shuffling of large lists (>32 items)
+            - Falls back to Python's random.shuffle for smaller lists
+            - Supports distributed data parallel (DDP) training via rank-based partitioning
+            - Reshuffles active speakers after each full rotation to maintain randomness
+        """
+
+        # ------------------------------------------------------------------
+        # (1) Deterministic seed per epoch & rank
+        # ------------------------------------------------------------------
+        epoch_seed = self.base_seed + self.epoch + self.rank * 10_000
+        self._rng.seed(epoch_seed)
+        np_rng = np.random.default_rng(epoch_seed)
+
+        # ------------------------------------------------------------------
+        # (2) Shuffle order *inside* each speaker + order of speakers
+        # ------------------------------------------------------------------
+        for idx_list in self.spk2idx.values():
+            # NumPy shuffle is ~2× faster for long lists than pure Python.
+            if len(idx_list) > 32:
+                idx_list[:] = np_rng.permutation(idx_list).tolist()
+            else:
+                self._rng.shuffle(idx_list)
+
+        # Partition speakers among ranks in DDP (simple round‑robin split)
+        speakers_this_rank = self.speakers[self.rank :: self.world_size]
+        self._rng.shuffle(speakers_this_rank)
+
+        # Cursor tracks how many clips have been consumed per speaker.
+        cursor = {spk: 0 for spk in speakers_this_rank}
+
+        batch = []
+        active_spk = [spk for spk in speakers_this_rank if cursor[spk] < len(self.spk2idx[spk])]
+
+        while active_spk:
+            # Rotate through the list, reshuffling every full pass.
+            for spk in list(active_spk):
+                pos = cursor[spk]
+                if pos >= len(self.spk2idx[spk]):
+                    continue  # Speaker exhausted, handled later.
+
+                batch.append(self.spk2idx[spk][pos])
+                cursor[spk] += 1
+
+                if len(batch) == self.batch_size:
+                    yield batch
+                    batch = []
+
+            # Remove exhausted speakers and reshuffle the remainder.
+            active_spk = [s for s in active_spk if cursor[s] < len(self.spk2idx[s])]
+            self._rng.shuffle(active_spk)
+
+        # Tail batch (if allowed)
+        if batch and not self.drop_last:
+            yield batch
+
+    # ------------------------------------------------------------------
+    # Misc helpers
+    # ------------------------------------------------------------------
+    def __len__(self) -> int:  # noqa: D401
+        """
+        Calculate the number of batches available for this dataset rank.
+        Returns the total number of batches that will be produced by this dataset
+        instance, taking into account distributed training settings. The calculation
+        considers the portion of data assigned to the current rank and applies
+        batch size division with optional dropping of incomplete batches.
+        Returns:
+            int: Number of batches available for iteration. If drop_last is True,
+                 returns only complete batches. Otherwise, includes the final
+                 incomplete batch if present.
+        """
+
+        total_clips = sum(len(v) for v in self.spk2idx.values())
+        # Only the portion of data assigned to *this* rank counts.
+        total_clips = math.ceil(total_clips / self.world_size)
+        if self.drop_last:
+            return total_clips // self.batch_size
+        return math.ceil(total_clips / self.batch_size)
 
 
 def build_dataloader(
@@ -570,6 +864,7 @@ def build_dataloader(
     device="cpu",
     collate_config=None,
     dataset_config=None,
+    use_speaker_sampler=False,
 ):
     """Builds and returns a PyTorch DataLoader.
     The DataLoader is configured for loading audio and text data pairs
@@ -591,11 +886,21 @@ def build_dataloader(
             Defaults to an empty dict.
         dataset_config (dict, optional): Configuration dictionary for the FilePathDataset.
             Defaults to an empty dict.
+        use_speaker_sampler (bool, optional): If True, use BalancedSpeakerSampler
+            to ensure one sample per speaker per batch. Defaults to False.
     Returns:
         torch.utils.data.DataLoader: Configured DataLoader instance.
     """
     collate_config = collate_config or {}
     dataset_config = dataset_config or {}
+
+    # Propagate selected params from dataset_config to collate_config if missing
+    if "sr" not in collate_config and "sr" in dataset_config:
+        collate_config["sr"] = dataset_config["sr"]
+    if "hop_length" not in collate_config and "hop_length" in dataset_config["spect_params"]:
+        collate_config["hop_length"] = dataset_config["spect_params"]["hop_length"]
+    if "max_ref_mel_length" not in collate_config and "max_ref_mel_length" in dataset_config:
+        collate_config["max_ref_mel_length"] = dataset_config["max_ref_mel_length"]
 
     dataset = FilePathDataset(
         path_list,
@@ -605,8 +910,27 @@ def build_dataloader(
         validation=validation,
         **dataset_config,
     )
+    # Create collate function with provided configuration
     collate_fn = Collater(**collate_config)
-    data_loader = DataLoader(
+
+    # Dataloader for speaker-balanced sampling
+    if use_speaker_sampler and not validation:
+        batch_sampler = BalancedSpeakerSampler(
+            dataset,
+            batch_size=batch_size,
+            drop_last=False,
+        )
+        dataloader = DataLoader(
+            dataset,
+            batch_sampler=batch_sampler,
+            num_workers=num_workers,
+            collate_fn=collate_fn,
+            pin_memory=(device != "cpu"),
+        )
+        return dataloader
+
+    # Dataloader for regular sampling
+    dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=(not validation),
@@ -615,5 +939,4 @@ def build_dataloader(
         collate_fn=collate_fn,
         pin_memory=(device != "cpu"),
     )
-
-    return data_loader
+    return dataloader

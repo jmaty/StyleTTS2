@@ -5,13 +5,13 @@ from collections import OrderedDict
 import librosa
 import numpy as np
 import torch
-from scipy.io.wavfile import write
 import yaml
 from munch import munchify
+from scipy.io.wavfile import write
 
 from logger import get_logger
 from meldataset import AudioProcessor
-from models import build_model, load_ASR_models, load_F0_models
+from models import StyleTTS2, load_ASR_models, load_F0_models
 from Modules.diffusion.sampler import ADPM2Sampler, DiffusionSampler, KarrasSchedule
 from text_utils import TextCleaner
 from utils import length_to_mask, log_norm
@@ -43,7 +43,8 @@ class PTS:
             config: The configuration object or path to the configuration file
             model: The pre-trained model or path to the model checkpoint
             t (float, optional): The temperature parameter for synthesis. Default: 0.7
-                                 Weight for convex combination of two styles (of neighboring sentences).
+                                 Weight for convex combination of two styles
+                                 (of neighboring sentences).
                                  t=1.0 means only the style of current sentences is used.
                                  t=0.0 means only the style of previous sentences is used.
                                  t=(0,1) means the style is a convex combination of both.
@@ -58,15 +59,24 @@ class PTS:
             diffusion_steps (int, optional): Number of diffusion steps. Default: 10
             embedding_scale (float, optional): Scaling factor for the embeddings. Default: 1.0
             speech_rate (float, optional): Controls the rate of synthesized speech. Default: 1.0
-            use_glob_noise (bool, optional): Whether to use global noise for all synthesis operations. Default: False
-            fix_noise_in_ph_string (bool, optional): Whether to use the same noise for phonetic strings. Default: False
+            use_glob_noise (bool, optional): Whether to use global noise for all synthesis
+                                             operations. Default: False
+            fix_noise_in_ph_string (bool, optional): Whether to use the same noise for phonetic
+                                                     strings. Default: False
 
         Note:
             If `use_glob_noise` is True, `fix_noise_in_ph_string` is automatically set to True.
         """
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info("Using device: %s", self.device)
+
         self._model = None
         self._config = None
         self._sampler = None
+
+        # Set up model
+        self.setup_config(config)
+        self.setup_model(model)
 
         self.t = t
         self.alpha = alpha
@@ -74,13 +84,6 @@ class PTS:
         self.diffusion_steps = diffusion_steps
         self.embedding_scale = embedding_scale
         self.speech_rate = speech_rate
-
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info("Using device: %s", self.device)
-
-        # Set up model
-        self.setup_config(config)
-        self.setup_model(model)
 
         self.text_cleaner = TextCleaner(
             self._config.data_params.symbol_dict_path,
@@ -179,7 +182,12 @@ class PTS:
 
         # Build StyleTTS2 model
         logger.info("Constructing StyleTTS2 model with components")
-        self._model = build_model(self._config.model_params, text_aligner, pitch_extractor, plbert)
+        self._model = StyleTTS2(
+            self._config.model_params,
+            text_aligner,
+            pitch_extractor,
+            plbert,
+        ).model
 
         self.to_eval()
         self.to_device()
@@ -219,9 +227,9 @@ class PTS:
         Handles loading state dictionaries into model components, with a fallback mechanism
         for models saved with torch.nn.DataParallel.
         This method attempts to load parameters from the provided state dictionary into
-        corresponding model components. If the direct loading fails (typically due to key mismatches),
-        it attempts to remove the 'module.' prefix from keys, which is added when models are
-        saved after training with torch.nn.DataParallel.
+        corresponding model components. If the direct loading fails (typically due to key
+        mismatches), it attempts to remove the 'module.' prefix from keys, which is added when
+        models are saved after training with torch.nn.DataParallel.
         Parameters
         ----------
         params : dict
@@ -234,8 +242,10 @@ class PTS:
         Notes
         -----
         - The method prints confirmation messages for each successfully loaded component.
-        - Uses OrderedDict for maintaining the order of parameters during the prefix removal process.
-        - Performs strict=False loading in the fallback case to allow for partial state dict loading.
+        - Uses OrderedDict for maintaining the order of parameters during the prefix removal
+          process.
+        - Performs strict=False loading in the fallback case to allow for partial state dict
+          loading.
         """
         logger.warning("Hacking model parameters with module prefix handling")
         for key in self.model:
@@ -263,7 +273,7 @@ class PTS:
         Returns:
             tensor: Noise for diffusion.
         """
-        return torch.randn(1, 1, 256, device=self.device)
+        return torch.randn(1, 1, 2 * self.style_dim, device=self.device)
 
     def _setup_sampler(self):
         """Setup diffusion sampler."""
@@ -300,10 +310,12 @@ class PTS:
             ph_strings (list): List of phoneme strings to be converted to speech.
             ref_s (torch.Tensor): Reference speaker style embedding or path to a wav file.
                 If a path is provided, the style embedding will be computed from the wav file.
-                If None, the model will not use speaker style embedding (the case of a single speaker model).
+                If None, the model will not use speaker style embedding
+                (the case of a single speaker model).
                 If a tensor is provided, it should be of shape (1, 256) or (1, 256, 1).
                 The first 128 dimensions are for timbre and the last 128 dimensions are for prosody.
-                If ref_s is None, the model will not use speaker style embedding (the case of a single speaker model).
+                If ref_s is None, the model will not use speaker style embedding
+                (the case of a single speaker model).
 
         Note:
             - This method assumes that the phonetic strings are well-formed
@@ -472,8 +484,8 @@ class PTS:
                 # convex combination of previous and current styles
                 pred_style = self.t * pred_style + (1 - self.t) * s_prev
 
-            pros_style = pred_style[:, 128:]  # prosodic features
-            acoust_style = pred_style[:, :128]  # acoustics/timbre features
+            pros_style = pred_style[:, self.style_dim :]  # prosodic features
+            acoust_style = pred_style[:, : self.style_dim]  # acoustics/timbre features
 
             # If reference speaker style embedding  `ref_s` is provided,
             # combine it with the generated style
@@ -485,8 +497,10 @@ class PTS:
             #   lower = more similar to the reference style)
             if ref_s is not None:
                 logger.debug("Combining styles with reference speaker style embedding")
-                acoust_style = self.alpha * acoust_style + (1 - self.alpha) * ref_s[:, :128]
-                pros_style = self.beta * pros_style + (1 - self.beta) * ref_s[:, 128:]
+                acoust_style = (
+                    self.alpha * acoust_style + (1 - self.alpha) * ref_s[:, : self.style_dim]
+                )
+                pros_style = self.beta * pros_style + (1 - self.beta) * ref_s[:, self.style_dim :]
                 pred_style = torch.cat([acoust_style, pros_style], dim=-1)
 
             # Style-conditioned phonetic features
@@ -538,7 +552,8 @@ class PTS:
             # Decode the waveform
             # - `asr` is the phonetic features aligned with the audio frames (content)
             # - `f0_pred` is the predicted F0 (pitch) features aligned with the audio frames
-            # - `n_pred` is the predicted normalization (loudness) features aligned with the audio frames
+            # - `n_pred` is the predicted normalization (loudness) features aligned
+            #    with the audio frames
             # - `ref` is the style embedding (timbre) aligned with the audio frames
             out = self.model.decoder(asr, f0_pred, n_pred, acoust_style.squeeze().unsqueeze(0))
 
@@ -585,7 +600,7 @@ class PTS:
         """Compute style embedding from a waveform.
 
         Args:
-            wav (torch.Tensor): Waveform numpy array or path to waveform file.
+            wavpath (torch.Tensor): Waveform numpy array or path to waveform file.
             top_db (int): Threshold for trimming silence. Default: 30.
         Note:
             If wav is a path, it will be loaded using librosa.
@@ -599,7 +614,7 @@ class PTS:
         # TODO: Change loading wav to torchaudio
         with torch.no_grad():
             logger.debug("Computing style from wav file: %s", wavpath)
-            wav, sr = librosa.load(wavpath, sr=self._config.preprocess_params.sr)
+            wav, sr = librosa.load(wavpath, sr=None)
 
             if top_db is not None:
                 # Trim silence
@@ -607,17 +622,23 @@ class PTS:
                 wav, _ = librosa.effects.trim(wav, top_db=top_db)
             if sr != self._config.preprocess_params.sr:
                 # Resample if necessary
-                logger.debug("Resampling wav from %d to %d", sr, self._config.preprocess_params.sr)
+                logger.warning(
+                    "Resampling wav from %d to %d", sr, self._config.preprocess_params.sr
+                )
                 wav = librosa.resample(wav, sr, self._config.preprocess_params.sr)
 
             wave_tensor = torch.from_numpy(wav).float()
-            mel_tensor = self.audio_processor(wave_tensor).to(self.device)
+            mel = self.audio_processor(wave_tensor).to(self.device)
+
+            # Prepare inputs for style encoders
+            # - simpler indexing instead of unsqueeze-unsqueeze
+            mel_in = mel[None, None]  # (1,1,T,F)
 
             # Compute style embedding:
-            # - style = timbre
-            ref_acoust_style = self.model.acoustic_style_encoder(mel_tensor.unsqueeze(1))
-            # - style = prosody
-            ref_pros_style = self.model.prosodic_style_encoder(mel_tensor.unsqueeze(1))
+            # style = timbre
+            ref_acoust_style = self.model.acoustic_style_encoder(mel_in)
+            # style = prosody
+            ref_pros_style = self.model.prosodic_style_encoder(mel_in)
 
         return torch.cat([ref_acoust_style, ref_pros_style], dim=1)
 
@@ -668,6 +689,11 @@ class PTS:
         if self._model is not None:
             logger.debug("Model set, automatically switching to evaluation mode")
             self.to_eval()
+
+    @property
+    def style_dim(self):
+        """Get model style dimension."""
+        return self._config.model_params.style_dim
 
     @property
     def offset_beg(self):
