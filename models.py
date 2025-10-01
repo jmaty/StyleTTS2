@@ -1809,10 +1809,10 @@ class StyleTTS2:
 
     def params_for_optimizer(
         self,
-        epochs,
-        steps_per_epoch,
-        optimizer_params,
-        optimizer_overrides=None,
+        # epochs,
+        # steps_per_epoch,
+        # optimizer_params,
+        # optimizer_overrides=None,
     ):
         """
         Prepares parameter groups and scheduler parameters for optimizer initialization.
@@ -1831,16 +1831,20 @@ class StyleTTS2:
                 - scheduler_params_dict (dict): Dictionary mapping module names to their scheduler parameters.
                 - not_trainable_modules (list): List of module names that have no trainable parameters.
         """
-        if optimizer_overrides is None:
-            optimizer_overrides = {}
+        # if optimizer_overrides is None:
+        #     optimizer_overrides = {}
 
-        # Default common scheduler parameters
-        scheduler_params = {
-            "max_lr": optimizer_params.lr,
-            "pct_start": 0.0,
-            "epochs": epochs,
-            "steps_per_epoch": steps_per_epoch,
-        }
+        # # Default common scheduler parameters
+        # scheduler_params = munchify(
+        #     {
+        #         "max_lr": optimizer_params.max_lr,  # optimizer_params.lr
+        #         "pct_start": optimizer_params.pct_start,  # 0.0 for constant lr
+        #         "epochs": epochs,
+        #         "steps_per_epoch": steps_per_epoch,
+        #         "div_factor": optimizer_params.div_factor,  # 1 for constant lr
+        #         "final_div_factor": optimizer_params.final_div_factor,  # 1 for constant lr
+        #     }
+        # )
 
         raw_param_groups = {k: list(self._model[k].parameters()) for k in self._model}
 
@@ -1849,14 +1853,14 @@ class StyleTTS2:
             k: [p for p in v if p.requires_grad] for k, v in raw_param_groups.items()
         }
 
-        not_trainable_modules = [k for k, v in parameters_filtered.items() if len(v) == 0]
+        # not_trainable_modules = [k for k, v in parameters_filtered.items() if len(v) == 0]
         parameters_dict = {k: v for k, v in parameters_filtered.items() if v}
-        scheduler_params_dict = {k: scheduler_params.copy() for k in parameters_dict}
+        # scheduler_params_dict = {k: scheduler_params.copy() for k in parameters_dict}
 
-        # Override default scheduler params if specified for any module
-        for k, uov in optimizer_overrides.items():
-            if k in scheduler_params_dict:
-                # Merge override values
-                scheduler_params_dict[k] = {**scheduler_params_dict[k], **uov}
+        # # Override default scheduler params if specified for any module
+        # for k, uov in optimizer_overrides.items():
+        #     if k in scheduler_params_dict:
+        #         # Merge override values
+        #         scheduler_params_dict[k] = {**scheduler_params_dict[k], **uov}
 
-        return parameters_dict, scheduler_params_dict, not_trainable_modules
+        return parameters_dict  # , scheduler_params_dict

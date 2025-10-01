@@ -106,20 +106,23 @@ class MultiOptimizer:
         return self.optimizers[key].param_groups[0]
 
 
-def define_scheduler(optimizer, params):
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr=params.get("max_lr", 2e-4),
-        epochs=params.get("epochs", 200),
-        steps_per_epoch=params.get("steps_per_epoch", 1000),
-        pct_start=params.get("pct_start", 0.0),
-        div_factor=params.get("div_factor", 1),
-        final_div_factor=params.get("final_div_factor", 1),
-    )
+def define_scheduler(optimizer, optimizer_params, epochs, steps_per_epoch):
+    if optimizer_params.scheduler == "OneCycleLR":
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=optimizer_params.scheduler_params.max_lr,
+            epochs=epochs,
+            steps_per_epoch=steps_per_epoch,
+            pct_start=optimizer_params.scheduler_params.pct_start,
+            div_factor=optimizer_params.scheduler_params.div_factor,
+            final_div_factor=optimizer_params.scheduler_params.final_div_factor,
+        )
+    else:
+        raise ValueError(f"Unsupported scheduler type: {optimizer_params.scheduler}")
     return scheduler
 
 
-def build_optimizer(parameters_dict, scheduler_params_dict, lr):
+def build_optimizer(parameters_dict, optimizer_params, epochs, steps_per_epoch):
     """
     Builds a multi-optimizer with corresponding learning rate schedulers.
     Args:
@@ -132,12 +135,28 @@ def build_optimizer(parameters_dict, scheduler_params_dict, lr):
         MultiOptimizer: A wrapper containing all optimizers and their schedulers.
             Each optimizer is an AdamW instance with weight_decay=1e-4, betas=(0.0, 0.99), eps=1e-9.
     """
-    optim = {
-        k: AdamW(params, lr=lr, weight_decay=1e-4, betas=(0.0, 0.99), eps=1e-9)
-        for k, params in parameters_dict.items()
+    # Create optimizers
+    if optimizer_params.optimizer == "AdamW":
+        optim = {
+            k: AdamW(
+                params,
+                lr=optimizer_params.lr,
+                weight_decay=optimizer_params.weight_decay,
+                betas=optimizer_params.betas,
+                eps=optimizer_params.eps,
+            )
+            for k, params in parameters_dict.items()
+        }
+    else:
+        raise ValueError(f"Unsupported optimizer type: {optimizer_params.optimizer}")
+
+    # Create schedulers
+    schedulers = {
+        k: define_scheduler(opt, optimizer_params, epochs, steps_per_epoch)
+        for k, opt in optim.items()
     }
 
-    schedulers = {k: define_scheduler(opt, scheduler_params_dict[k]) for k, opt in optim.items()}
-
+    # Combine into MultiOptimizer
     multi_optim = MultiOptimizer(optim, schedulers)
+
     return multi_optim

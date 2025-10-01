@@ -189,20 +189,16 @@ def main():
     model.to(device)
 
     # Create optimizers and schedulers parameters for each module
-    parameters_dict, scheduler_params_dict, not_trainable_modules = model.params_for_optimizer(
-        epochs,
-        updates_per_epoch,
-        cfg.optimizer_params,
-    )
+    parameters_dict = model.params_for_optimizer()
     logger.info("Optimizer groups: %s", list(parameters_dict.keys()))
-    logger.info("Not trainable modules: %s", not_trainable_modules)
-    logger.debug("Scheduler parameters: %s", scheduler_params_dict)
+    # logger.debug("Scheduler parameters: %s", scheduler_params_dict)
 
     # Build combined optimizer and schedulers
     optimizer = build_optimizer(
         parameters_dict,
-        scheduler_params_dict,
-        cfg.optimizer_params.lr,
+        cfg.optimizer_params,
+        epochs,
+        updates_per_epoch,
     )
     logger.debug("Optimizer: %s", optimizer.optimizers)
 
