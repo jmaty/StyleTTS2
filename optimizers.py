@@ -122,7 +122,7 @@ def define_scheduler(optimizer, optimizer_params, epochs, steps_per_epoch):
     return scheduler
 
 
-def build_optimizer(parameters_dict, optimizer_params, epochs, steps_per_epoch):
+def build_optimizer(param_dict, optimizer_params, epochs, steps_per_epoch):
     """
     Builds a multi-optimizer with corresponding learning rate schedulers.
     Args:
@@ -135,6 +135,16 @@ def build_optimizer(parameters_dict, optimizer_params, epochs, steps_per_epoch):
         MultiOptimizer: A wrapper containing all optimizers and their schedulers.
             Each optimizer is an AdamW instance with weight_decay=1e-4, betas=(0.0, 0.99), eps=1e-9.
     """
+    # raw_param_groups = {k: list(self._model[k].parameters()) for k in self._model}
+
+    # # Leave only parameters with requires_grad=True (default),
+    # parameters_filtered = {
+    #     k: [p for p in v if p.requires_grad] for k, v in raw_param_groups.items()
+    # }
+
+    # not_trainable_modules = [k for k, v in parameters_filtered.items() if len(v) == 0]
+    # parameters_dict = {k: v for k, v in param_groups.items() if v}
+
     # Create optimizers
     if optimizer_params.optimizer == "AdamW":
         optim = {
@@ -145,7 +155,7 @@ def build_optimizer(parameters_dict, optimizer_params, epochs, steps_per_epoch):
                 betas=optimizer_params.betas,
                 eps=optimizer_params.eps,
             )
-            for k, params in parameters_dict.items()
+            for k, params in param_dict.items()
         }
     else:
         raise ValueError(f"Unsupported optimizer type: {optimizer_params.optimizer}")
