@@ -14,7 +14,7 @@ INTB=Train_second.ipynb
 MEM=256gb
 LSCRATCH=20gb
 SCRATCH_TYPE="scratch-local"
-NCPUS=8
+NCPUS=16
 NGPUS=2
 
 if [[ "$#" -lt 1 ]]; then
