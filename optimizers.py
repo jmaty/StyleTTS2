@@ -110,12 +110,12 @@ def define_scheduler(optimizer, optimizer_params, epochs, steps_per_epoch):
     if optimizer_params.scheduler == "OneCycleLR":
         scheduler = torch.optim.lr_scheduler.OneCycleLR(
             optimizer,
-            max_lr=optimizer_params.scheduler_params.max_lr,
+            max_lr=optimizer_params.scheduler_params.max_lr,  # paper default: `lr`
             epochs=epochs,
             steps_per_epoch=steps_per_epoch,
-            pct_start=optimizer_params.scheduler_params.pct_start,
-            div_factor=optimizer_params.scheduler_params.div_factor,
-            final_div_factor=optimizer_params.scheduler_params.final_div_factor,
+            pct_start=optimizer_params.scheduler_params.pct_start,  # paper default: 0.0
+            div_factor=optimizer_params.scheduler_params.div_factor,  # paper default: 1
+            final_div_factor=optimizer_params.scheduler_params.final_div_factor,  # paper default: 1
         )
     else:
         raise ValueError(f"Unsupported scheduler type: {optimizer_params.scheduler}")
@@ -150,10 +150,11 @@ def build_optimizer(param_dict, optimizer_params, epochs, steps_per_epoch):
         optim = {
             k: AdamW(
                 params,
-                lr=optimizer_params.lr,
-                weight_decay=optimizer_params.weight_decay,
+                lr=optimizer_params.lr,  # paper default: 1e-4
+                weight_decay=optimizer_params.weight_decay,  # paper default: 1e-4
+                # paper default: (0.0, 0.99), but due to scheduling (0.85, 0.99) was actually used
                 betas=optimizer_params.betas,
-                eps=optimizer_params.eps,
+                eps=optimizer_params.eps,  # default: 1e-9
             )
             for k, params in param_dict.items()
         }
