@@ -119,10 +119,11 @@ def main():
         plbert = load_plbert(cfg.PLBERT_dir)
 
     # Initialize StyleTTS2 model
-    logger.info("Building StyleTTS2 model...")
     model = StyleTTS2(cfg.model_params, text_aligner, pitch_extractor, plbert)
+    logger.info("StyleTTS2 model built with %s", model.keys())
 
-    bert_size = model.bert.config.max_position_embeddings  # ALBERT config
+    # Extract BERT size from ALBERT config
+    bert_size = model.bert.config.max_position_embeddings
 
     # Prepare model for distributed training
     for k in model:
@@ -200,7 +201,7 @@ def main():
         epochs,
         updates_per_epoch,
     )
-    logger.debug("Optimizer: %s", optimizer.optimizers)
+    logger.debug("Optimizers: %s", optimizer.optimizers)
 
     # Prepare optimizers and schedulers for distributed training - safe variant
     optimizer.optimizers = {k: acc.prepare(v) for k, v in optimizer.optimizers.items()}

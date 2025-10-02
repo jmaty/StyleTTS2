@@ -116,6 +116,7 @@ def define_scheduler(optimizer, optimizer_params, epochs, steps_per_epoch):
             pct_start=optimizer_params.scheduler_params.pct_start,  # paper default: 0.0
             div_factor=optimizer_params.scheduler_params.div_factor,  # paper default: 1
             final_div_factor=optimizer_params.scheduler_params.final_div_factor,  # paper default: 1
+            cycle_momentum=optimizer_params.scheduler_params.cycle_momentum,  # paper default: True
         )
     else:
         raise ValueError(f"Unsupported scheduler type: {optimizer_params.scheduler}")

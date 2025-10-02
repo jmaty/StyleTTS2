@@ -1589,6 +1589,8 @@ class StyleTTS2:
             }
         )
 
+        logger.debug("StyleTTS2 model %s built successfully", self.keys())
+
     def to(self, device="cpu"):
         """
         Move model parameters to the specified device.
