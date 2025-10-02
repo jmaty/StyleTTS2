@@ -612,6 +612,7 @@ def main():
                             "train/s2s_loss": loss_s2s,
                             "train/slm_loss": loss_slm,
                             "train/curr_vram": curr_vram,
+                            "train/max_vram": max_vram,
                             "train/epoch": epoch,
                         },
                         step=iters,

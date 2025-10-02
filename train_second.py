@@ -898,6 +898,7 @@ def main():
                         "train/d_loss_slm": loss_disc_slm,
                         "train/gen_loss_slm": loss_gen_lm,
                         "train/curr_vram": curr_vram,
+                        "train/max_vram": max_vram,
                         "train/epoch": epoch,
                     },
                     step=iters,
