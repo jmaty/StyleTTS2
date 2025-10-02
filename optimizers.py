@@ -34,23 +34,23 @@ class MultiOptimizer:
             except Exception:
                 logger.warning("%s not loaded", key)
 
-    def step(self, key=None, scaler=None, step_scheduler: bool = True):
+    def step(self, key=None, scaler=None):
         keys = [key] if key is not None else self.keys
-        _ = [self._step(key, scaler, step_scheduler) for key in keys]
+        _ = [self._step(key, scaler) for key in keys]
 
-    def _step(self, key, scaler=None, step_scheduler=True):
+    def _step(self, key, scaler=None):
         if scaler is not None:
             scaler.step(self.optimizers[key])
             scaler.update()
         else:
             self.optimizers[key].step()
 
-        # Optionally advance the LR scheduler exactly once per logical step.
-        if step_scheduler:
-            # Some schedulers (e.g., OneCycleLR) have a fixed number of total_steps
-            # and raise if stepped beyond that. Guard against over-stepping so that
-            # auxiliary optimizer updates in the training loop do not crash training.
-            self.schedulers[key].step()
+        # # Optionally advance the LR scheduler exactly once per logical step.
+        # if step_scheduler:
+        #     # Some schedulers (e.g., OneCycleLR) have a fixed number of total_steps
+        #     # and raise if stepped beyond that. Guard against over-stepping so that
+        #     # auxiliary optimizer updates in the training loop do not crash training.
+        #     self.schedulers[key].step()
 
     def zero_grad(self, key=None):
         if key is not None:

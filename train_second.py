@@ -814,10 +814,10 @@ def main():
                             p_algn.grad *= slmadv_params.scale
 
                     # Auxiliary optimizer updates for SLM: do not step schedulers
-                    optimizer.step("bert_encoder", step_scheduler=False)
-                    optimizer.step("bert", step_scheduler=False)
-                    optimizer.step("prosodic_predictor", step_scheduler=False)
-                    optimizer.step("diffusion", step_scheduler=False)
+                    optimizer.step("bert_encoder")
+                    optimizer.step("bert")
+                    optimizer.step("prosodic_predictor")
+                    optimizer.step("diffusion")
 
                     # SLM discriminator loss
                     if loss_disc_slm != 0:
