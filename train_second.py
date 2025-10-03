@@ -221,67 +221,38 @@ def main():
         clamp=False,
     )
 
-    # Build parameter groups for optimizer
-    # Optional per-module optimizer overrides from config
-    pre_optim_params = {
-        "bert": {"max_lr": cfg.optimizer_params.bert_lr * 2},
-        "decoder": {"max_lr": cfg.optimizer_params.ft_lr * 2},
-        "acoustic_style_encoder": {"max_lr": cfg.optimizer_params.ft_lr * 2},
-    }
-
-    parameters_dict, scheduler_params_dict, not_trainable_modules = model.params_for_optimizer(
-        epochs,
-        steps_per_epoch,
-        cfg.optimizer_params,
-        optimizer_overrides=pre_optim_params,
-    )
-    logger.info("Optimizer groups: %s", list(parameters_dict.keys()))
-    logger.info("Not trainable modules: %s", not_trainable_modules)
-    logger.debug("Scheduler parameters: %s", scheduler_params_dict)
+    # # Build parameter groups for optimizer
+    # # Optional per-module optimizer overrides from config
+    # pre_optim_params = {
+    #     "bert": {"max_lr": cfg.optimizer_params.bert_lr * 2},
+    #     "decoder": {"max_lr": cfg.optimizer_params.ft_lr * 2},
+    #     "acoustic_style_encoder": {"max_lr": cfg.optimizer_params.ft_lr * 2},
+    # }
 
     # Create optimizer
     optimizer = build_optimizer(
-        parameters_dict,
-        scheduler_params_dict,
-        cfg.optimizer_params.lr,
+        {k: list(model[k].parameters()) for k in model},  # modules to optimize
+        cfg.optimizer_params,
     )
 
     # Adjust optimizers for specific modules
-    post_optim_params = {
+    refined_optim_params = {
         "bert": {
             "lr": cfg.optimizer_params.bert_lr,
-            "betas": (0.9, 0.99),
-            "weight_decay": 0.01,
-            "initial_lr": cfg.optimizer_params.bert_lr,
-            "min_lr": 0,
+            "betas": cfg.optimizer_params.bert_betas,
+            "weight_decay": cfg.optimizer_params.bert_weight_decay,
         },
-        "decoder": {
+        "ft": {
             "lr": cfg.optimizer_params.ft_lr,
-            "betas": (0.0, 0.99),
-            "weight_decay": 1e-4,
-            "initial_lr": cfg.optimizer_params.ft_lr,
-            "min_lr": 0,
-        },
-        # "prosodic_style_encoder": {
-        #     "lr": cfg.optimizer_params.ft_lr,
-        #     "betas": (0.0, 0.99),
-        #     "weight_decay": 1e-4,
-        #     "initial_lr": cfg.optimizer_params.ft_lr,
-        #     "min_lr": 0,
-        # },
-        "acoustic_style_encoder": {
-            "lr": cfg.optimizer_params.ft_lr,
-            "betas": (0.0, 0.99),
-            "weight_decay": 1e-4,
-            "initial_lr": cfg.optimizer_params.ft_lr,
-            "min_lr": 0,
+            "betas": cfg.optimizer_params.ft_betas,
+            "weight_decay": cfg.optimizer_params.ft_weight_decay,
         },
     }
 
-    optimizer["bert"] = post_optim_params["bert"]
-    optimizer["decoder"] = post_optim_params["decoder"]
-    # optimizer["prosodic_style_encoder"] = post_optim_params["prosodic_style_encoder"]
-    optimizer["acoustic_style_encoder"] = post_optim_params["acoustic_style_encoder"]
+    optimizer["bert"] = refined_optim_params["bert"]
+    optimizer["decoder"] = refined_optim_params["ft"]
+    # optimizer["prosodic_style_encoder"] = refined_optim_params["ft"]
+    optimizer["acoustic_style_encoder"] = refined_optim_params["ft"]
 
     logger.debug("Optimizer: %s", optimizer.optimizers)
 

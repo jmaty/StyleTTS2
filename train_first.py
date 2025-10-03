@@ -189,19 +189,11 @@ def main():
     # Move models to device (cuda)
     model.to(device)
 
-    # Create optimizer parameters for each module
-    param_dict = {k: list(model[k].parameters()) for k in model}
-    logger.info("Optimizer groups: %s", list(param_dict.keys()))
-    # logger.debug("Scheduler parameters: %s", scheduler_params_dict)
-
     # Build combined optimizer and schedulers
     optimizer = build_optimizer(
-        param_dict,
+        {k: list(model[k].parameters()) for k in model},  # modules to optimize
         cfg.optimizer_params,
-        epochs,
-        updates_per_epoch,
     )
-    logger.debug("Optimizers: %s", optimizer.optimizers)
 
     # Prepare optimizers and schedulers for distributed training - safe variant
     optimizer.optimizers = {k: acc.prepare(v) for k, v in optimizer.optimizers.items()}
