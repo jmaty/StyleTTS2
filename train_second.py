@@ -101,13 +101,10 @@ def main():
     logger.debug("Number of symbols: %d", len(text_cleaner))
     assert len(text_cleaner) == 81, f"Number of symbols must be 81 but it is {len(text_cleaner)}"
 
-    # Load utility models
-    # Load pretrained ASR model
-    text_aligner = load_ASR_models(cfg.ASR_path, cfg.ASR_config)
-    # Load pretrained F0 model
-    pitch_extractor = load_F0_models(cfg.F0_path)
-    # Load BERT model
-    plbert = load_plbert(cfg.PLBERT_dir)
+    # Load pretrained utility models
+    text_aligner = load_ASR_models(cfg.ASR_path, cfg.ASR_config)  # pretrained ASR model
+    pitch_extractor = load_F0_models(cfg.F0_path)  # pretrained F0 model
+    plbert = load_plbert(cfg.PLBERT_dir)  # pretrained phoneme-level BERT
 
     # Build model
     model = StyleTTS2(cfg.model_params, text_aligner, pitch_extractor, plbert)
@@ -169,7 +166,7 @@ def main():
     start_epoch = 0
     iters = 0
 
-    # Total number of steps given the batch size
+    # Total number of steps per epoch given the batch size
     steps_per_epoch = len(train_dataloader)
 
     load_pretrained = cfg.get("pretrained_model", "") != "" and cfg.get(
@@ -196,8 +193,7 @@ def main():
                     "diffusion",
                 ],
             )
-
-            # these epochs should be counted from the start epoch
+            # These epochs should be counted from the start epoch
             diff_epoch += start_epoch
             joint_epoch += start_epoch
             epochs += start_epoch
@@ -287,6 +283,7 @@ def main():
     # Count of processed epochs stored
     inp_sigma_count = start_epoch - diff_epoch if start_epoch > diff_epoch else 0
 
+    # SLM Adversarial Loss
     slmadv_params = cfg.slmadv_params
     slmadv = (
         SLMAdversarialLoss(
@@ -615,7 +612,7 @@ def main():
             y_rec = model.decoder(ph_algn, f0_fake, n_fake, acoust_style)
 
             # Calculate losses using the extracted/generated segments
-            loss_f0_rec = (F.smooth_l1_loss(f0_real, f0_fake)) / 10
+            loss_f0_rec = F.smooth_l1_loss(f0_real, f0_fake) / 10
             loss_norm_rec = F.smooth_l1_loss(n_real, n_fake)
 
             # --- Discriminator loss ---
@@ -640,6 +637,11 @@ def main():
             loss_gen_all = gl(wav_gt, y_rec).mean() if epoch >= diff_epoch else 0
             loss_lm = wl(wav_gt.detach().squeeze(), y_rec.squeeze()).mean()
 
+            # Duration and alignment losses for phoneme-to-mel mapping
+            # For each sample in batch:
+            #   - Create target alignment matrix (1 for frames belonging to each phoneme)
+            #   - loss_dur: L1 between predicted and GT durations (excluding boundary phonemes)
+            #   - loss_ce: BCE between predicted alignment logits and target binary matrix
             loss_ce, loss_dur = 0, 0
             for _s2s_pred, _text_input, _text_length in zip(d, (d_gt), ph_inp_lens):
                 _s2s_pred = _s2s_pred[:_text_length, :]
@@ -785,10 +787,10 @@ def main():
                             p_algn.grad *= slmadv_params.scale
 
                     # Auxiliary optimizer updates for SLM: do not step schedulers
-                    optimizer.step("bert_encoder", step_scheduler=False)
-                    optimizer.step("bert", step_scheduler=False)
-                    optimizer.step("prosodic_predictor", step_scheduler=False)
-                    optimizer.step("diffusion", step_scheduler=False)
+                    optimizer.step("bert_encoder")
+                    optimizer.step("bert")
+                    optimizer.step("prosodic_predictor")
+                    optimizer.step("diffusion")
 
                     # SLM discriminator loss
                     if loss_disc_slm != 0:
@@ -808,6 +810,7 @@ def main():
             # Increment global step counter
             iters += 1
 
+            # Log training progress
             if (batch_idx + 1) % cfg.log_interval == 0:
                 loss_mel = running_loss / cfg.log_interval
                 logger.info(
@@ -866,7 +869,7 @@ def main():
                         "train/F0_loss": loss_f0_rec,
                         "train/sty_loss": loss_sty,
                         "train/diff_loss": loss_diff,
-                        "train/d_loss_slm": loss_disc_slm,
+                        "train/disc_slm_loss": loss_disc_slm,
                         "train/gen_loss_slm": loss_gen_lm,
                         "train/curr_vram": curr_vram,
                         "train/epoch": epoch,
@@ -1242,6 +1245,8 @@ def main():
     # === End of training loop ================================================
 
     # === Final model saving ==================================================
+
+    wb_logger.summary["max_vram"] = max_vram
 
     # Save the final checkpoint
     final_filepath = model.save(

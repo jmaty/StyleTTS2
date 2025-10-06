@@ -806,6 +806,8 @@ def main():
         acc.wait_for_everyone()
 
     if acc.is_main_process:
+        wb_logger.summary["max_vram"] = max_vram
+        
         # Save final 1st stage model
         final_filepath = model.save(
             optimizer,
