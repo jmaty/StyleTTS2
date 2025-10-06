@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 
 import argparse
-import logging
 import os.path as osp
 import sys
 from argparse import RawTextHelpFormatter
 
-from logger import AlignedColoredFormatter, get_logger, setup_logging
-from Modules.pts import PTS, set_random_seed
+from logger import get_logger, setup_logging
+from Modules.pts import PTS
+from utils import set_random_seed
 
 
 def main():
@@ -138,17 +138,7 @@ def main():
     )
     args = parser.parse_args()
 
-    # Set up logging
-    formatter = AlignedColoredFormatter(
-        fmt="%(asctime)s %(levelname)s %(name)s %(message)s",
-        datefmt="%y%m%d-%H:%M:%S",
-        name_width=15,
-    )
-    setup_logging(
-        level=getattr(logging, args.loglevel, logging.INFO),
-        formatter=formatter,
-        file=None,
-    )
+    setup_logging(args.log_level, log_file=None)
     logger = get_logger(__name__)  # Get a logger
 
     # Set random seed if specified

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
+import random as python_random
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -8,6 +9,35 @@ import torch.distributed as dist
 from monotonic_align.core import maximum_path_c
 from munch import Munch
 from torchaudio.transforms import Resample
+
+
+def h100_fix():
+    """Fix for H100 GPU"""
+    # Disable TF32 computations for cuDNN and matmul for better precision
+    # on H100 GPUs. This may slightly impact performance but improves numerical stability.
+    # Reference: https://pytorch.org/docs/stable/notes/cuda.html#tf32-on-ampere
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    torch.set_float32_matmul_precision("highest")
+
+
+def set_random_seed(seed, deterministic=False):
+    """Set random seed.
+
+    Args:
+        seed (int): Seed to be used.
+        deterministic (bool): Whether to set the deterministic option for
+            CUDNN backend, i.e., set `torch.backends.cudnn.deterministic`
+            to True and `torch.backends.cudnn.benchmark` to False.
+            Default: False.
+    """
+    python_random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 
 def maximum_path(neg_cent, mask):

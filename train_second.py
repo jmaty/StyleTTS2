@@ -22,17 +22,23 @@ from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, cr
 from meldataset import build_dataloader
 from models import StyleTTS2, load_ASR_models, load_F0_models
 from Modules.diffusion.sampler import ADPM2Sampler, DiffusionSampler, KarrasSchedule
-from Modules.pts import PTS, set_random_seed
+from Modules.pts import PTS
 from Modules.slmadv import SLMAdversarialLoss
 from optimizers import build_optimizer
 from text_utils import TextCleaner
-from utils import get_data_path_list, length_to_mask, log_norm, maximum_path
+from utils import (
+    get_data_path_list,
+    length_to_mask,
+    log_norm,
+    maximum_path,
+    set_random_seed,
+    h100_fix,
+)
 from Utils.PLBERT.util import load_plbert
 
 warnings.simplefilter("ignore")
 
-# Disable TF32 computations for cuDNN
-torch.backends.cudnn.allow_tf32 = False
+h100_fix()  # Fix for H100 GPU
 
 
 # simple fix for dataparallel that allows access to class attributes
