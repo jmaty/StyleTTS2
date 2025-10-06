@@ -30,12 +30,12 @@ from optimizers import build_optimizer
 from text_utils import TextCleaner
 from utils import (
     get_data_path_list,
+    h100_fix,
     length_to_mask,
     log_norm,
     maximum_path,
     nccl_warmup,
     set_random_seed,
-    h100_fix,
 )
 from Utils.PLBERT.util import load_plbert
 
@@ -275,13 +275,7 @@ def main():
             logger.info("Starting iterations:       %d", iters)
             logger.info("")
 
-    # n_down = model.text_aligner.n_down
-    # In case not distributed computing
-    try:
-        n_down = model.text_aligner.module.n_down
-    except AttributeError:
-        logger.warning("Distributed computing NOT used")
-        n_down = model.text_aligner.n_down
+    n_down = acc.unwrap_model(model.text_aligner).n_down
 
     best_loss = float("inf")  # best test loss
     # iters = 0  # !!! Should it be resetting?
@@ -476,9 +470,9 @@ def main():
                 if cfg.model_params.diffusion.dist.estimate_sigma_data:
                     # Batch-wise std estimation
                     # Use accelerator's unwrap_model to get the underlying model
-                    diff_model = acc.unwrap_model(model.diffusion)
-                    diff_model.diffusion.sigma_data = target_style.std(axis=-1).mean().item()
-                    running_std.append(diff_model.diffusion.sigma_data)
+                    sigma_data_value = target_style.std(axis=-1).mean().item()
+                    acc.unwrap_model(model.diffusion).diffusion.sigma_data = sigma_data_value
+                    running_std.append(sigma_data_value)
 
                 if model.multispeaker:
                     pred_style = sampler(
@@ -504,8 +498,7 @@ def main():
                         num_steps=num_steps,
                     ).squeeze(1)
                     # EDM loss
-                    diff_model = acc.unwrap_model(model.diffusion)
-                    loss_diff = diff_model(
+                    loss_diff = acc.unwrap_model(model.diffusion)(
                         target_style.unsqueeze(1),
                         embedding=h_bert,
                     ).mean()
