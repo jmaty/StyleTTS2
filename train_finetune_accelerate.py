@@ -14,7 +14,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 import wandb
 import yaml
-from accelerate import Accelerator
+from accelerate import Accelerator, DistributedDataParallelKwargs
 from IPython.core.debugger import set_trace
 from monotonic_align import mask_from_lens
 from munch import munchify
@@ -73,7 +73,8 @@ def main():
         torch.cuda.set_device(local_rank)
 
     # Initialize Accelerator
-    acc = Accelerator(project_dir=log_dir, split_batches=True)
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True, broadcast_buffers=False)
+    acc = Accelerator(project_dir=log_dir, split_batches=True, kwargs_handlers=[ddp_kwargs])
     nccl_warmup(device=getattr(acc, "device", None), local_rank=local_rank)  # NCCL warm-up
 
     # Initialize W&B first (it may add logging handlers); we'll override logging next
@@ -185,6 +186,11 @@ def main():
     #     if key not in ("mpd", "msd", "wd"):
     #         model[key] = MyDataParallel(model[key])
 
+    # Prepare model for distributed training
+    for k in model:
+        if k not in ("mpd", "msd", "wd"):
+            model[k] = acc.prepare(model[k])
+
     start_epoch = 0
     iters = 0
 
@@ -193,12 +199,17 @@ def main():
     dl = DiscriminatorLoss(model.mpd, model.msd).to(device)
     wl = create_slm_loss(cfg.model_params.slm, model.wd, cfg.preprocess_params.sr).to(device)
 
+    # gl = acc.prepare(gl)
+    # dl = acc.prepare(dl)
+    # wl = acc.prepare(wl)
+
     # gl = MyDataParallel(gl)
     # dl = MyDataParallel(dl)
     # wl = MyDataParallel(wl)
 
     sampler = DiffusionSampler(
-        model.diffusion.diffusion,
+        acc.unwrap_model(model.diffusion).diffusion,
+        # model.diffusion.diffusion,
         sampler=ADPM2Sampler(),
         # empirical parameters
         sigma_schedule=KarrasSchedule(sigma_min=0.0001, sigma_max=3.0, rho=9.0),
@@ -283,7 +294,9 @@ def main():
     )
 
     # Prepare model for training
-    model, optimizer = acc.prepare(model, optimizer)
+    # model, optimizer = acc.prepare(model, optimizer)
+    optimizer.optimizers = {k: acc.prepare(v) for k, v in optimizer.optimizers.items()}
+    optimizer.schedulers = {k: acc.prepare(v) for k, v in optimizer.schedulers.items()}
 
     # Create test audio dir under log/eval dir
     if (cfg.data_params.save_val_audio or cfg.data_params.save_test_audio) and not os.path.exists(
@@ -343,6 +356,9 @@ def main():
             "prosodic_style_encoder",
             "msd",
             "mpd",
+            # The following components were originally not set to train mode
+            # => was it intentional? (They are still updated!)
+            # It might be better for finetuning stability to leave them in eval mode
             "acoustic_style_encoder",
             "prosodic_style_encoder",
             "diffusion",
@@ -488,7 +504,8 @@ def main():
             # --- Pre-allocated Segment Extraction ---
 
             # Set up maximum lengths based on `max_len` from config
-            mel_len_gt = min(int(mel_inp_len.min().item() / 2 - 1), cfg.max_len // 2)
+            mel_inp_len_all = acc.gather(mel_inp_len)  # for balanced load
+            mel_len_gt = min(int(mel_inp_len_all.min().item() / 2 - 1), cfg.max_len // 2)
             # Early check for segment length:
             # - mel_len_gt * 2 is the length of the original mel spectrogram
             # - multiplication by 2 is due to the downsampling factor between mel and text aligner
@@ -504,21 +521,6 @@ def main():
 
             # Calculate fixed waveform segment length
             wav_len = (mel_len_gt * 2) * cfg.preprocess_params.spect_params.hop_length
-
-            # Pre-allocate tensors with the calculated fixed length
-            ph_algn = torch.empty(
-                bsize, h_algn.shape[1], mel_len_gt, device=device, dtype=h_algn.dtype
-            )
-            pros_algn = torch.empty(
-                bsize, p_algn.shape[1], mel_len_gt, device=device, dtype=p_algn.dtype
-            )
-            mel_gt = torch.empty(
-                bsize, mels.shape[1], mel_len_gt * 2, device=device, dtype=mels.dtype
-            )
-            mel_st = torch.empty(
-                bsize, mels.shape[1], mel_len_st * 2, device=device, dtype=mels.dtype
-            )
-            wav_gt = torch.empty(bsize, wav_len, device=device, dtype=torch.float)
 
             # Pre-allocate tensors with the calculated fixed length
             ph_algn = torch.empty(
@@ -678,7 +680,9 @@ def main():
                 + cfg.loss_params.lambda_s2s * loss_s2s
             )
 
-            running_loss += loss_mel.item()
+            # Accumulate mean mel-spectrogram loss (over all GPUs) across batches for logging
+            running_loss += acc.gather(loss_mel).mean().item()
+            # running_loss += loss_mel.item()
             acc.backward(loss_gen)
 
             # Gradient clipping
@@ -749,26 +753,23 @@ def main():
                             )
                             acc.clip_grad_norm_(model.diffusion.parameters(), cfg.grad_clip)
 
-                        # compute the gradient norm
+                        # Compute the gradient norm
                         total_norm = {}
-                        for key in model.keys():
-                            total_norm[key] = 0
-                            parameters = [
-                                p
-                                for p in model[key].parameters()
-                                if p.grad is not None and p.requires_grad
-                            ]
-                            for p_algn in parameters:
-                                param_norm = p_algn.grad.detach().data.norm(2)
-                                total_norm[key] += param_norm.item() ** 2
-                            total_norm[key] = total_norm[key] ** 0.5
+                        for name, module in model.items():
+                            sq_sum = 0.0
+                            for p in module.parameters():
+                                if p.grad is not None and p.requires_grad:
+                                    param_norm = p.grad.detach().data.norm(2)
+                                    sq_sum += param_norm.item() ** 2
+                            total_norm[name] = sq_sum**0.5
 
                         # gradient scaling
-                        if total_norm["prosodic_predictor"] > slmadv_params.thresh:
-                            for key in model.keys():
-                                for p_algn in model[key].parameters():
-                                    if p_algn.grad is not None:
-                                        p_algn.grad *= 1 / total_norm["prosodic_predictor"]
+                        if total_norm.get("prosodic_predictor", 0) > slmadv_params.thresh:
+                            scale = 1 / total_norm["prosodic_predictor"]
+                            for module in model.values():
+                                for p in module.parameters():
+                                    if p.grad is not None:
+                                        p.grad *= scale
 
                         for p_algn in model.prosodic_predictor.duration_proj.parameters():
                             if p_algn.grad is not None:
@@ -894,6 +895,8 @@ def main():
                 running_loss = 0  # Reset running loss for next log interval
 
         # === Start of validation part ==============================================
+
+        acc.wait_for_everyone()  # Synchronize processes
 
         loss_test, loss_align, loss_f = 0, 0, 0  # Reset loss for validation
 
@@ -1049,9 +1052,13 @@ def main():
                     loss_f0 = F.l1_loss(f0_real, f0_fake) / 10
 
                     # Aggregate losses (loss_dur is the mean over valid elements)
-                    loss_test += loss_mel.mean()
-                    loss_align += loss_dur.mean()
-                    loss_f += loss_f0.mean()
+                    # loss_test += loss_mel.mean()
+                    # loss_align += loss_dur.mean()
+                    # loss_f += loss_f0.mean()
+
+                    loss_test += acc.gather(loss_mel).mean().item()
+                    loss_align += acc.gather(loss_dur).mean().item()
+                    loss_f += acc.gather(loss_f0).mean().item()
 
                     iters_test += 1
 
@@ -1169,6 +1176,8 @@ def main():
                                 pts.save_wav(wav_gt, os.path.join(test_audio_dir, outfile))
 
             # --- End of validation part ------------------------------------------
+
+            acc.wait_for_everyone()  # Synchronize processes
 
             # --- Start of saving part --------------------------------------------
 
