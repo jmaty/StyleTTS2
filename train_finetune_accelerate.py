@@ -59,6 +59,9 @@ def main():
         cfg = munchify(yaml.safe_load(fr))
     cfg_name, cfg_ext = osp.splitext(osp.basename(args.config_path))
 
+    # Check pre-trained model is provided
+    assert cfg.pretrained_model != "", "You must provide a pre-trained model for fine-tuning."
+
     # Set up logging
     set_random_seed(cfg.seed)  # set random seed
     log_dir = cfg.log_dir
@@ -184,37 +187,6 @@ def main():
     start_epoch = 0
     iters = 0
 
-    # Load model weights
-    load_pretrained = cfg.pretrained_model != "" and cfg.second_stage_load_pretrained
-
-    with acc.main_process_first():
-        if not load_pretrained:
-            if cfg.first_stage_path != "":
-                first_stage_path = osp.join(log_dir, cfg.first_stage_path)
-                logger.info("Loading the first stage model at %s ...", first_stage_path)
-                _, start_epoch, _ = model.load(
-                    first_stage_path,
-                    None,
-                    load_only_params=True,
-                    # keep starting epoch for tensorboard log
-                    ignore_modules=[
-                        "bert",
-                        "bert_encoder",
-                        "prosodic_predictor",
-                        "msd",
-                        "mpd",
-                        "wd",
-                        "diffusion",
-                    ],
-                )
-                # These epochs should be counted from the start epoch
-                diff_epoch += start_epoch
-                joint_epoch += start_epoch
-                epochs += start_epoch
-                model.prosodic_style_encoder = copy.deepcopy(model.acoustic_style_encoder)
-            else:
-                raise ValueError("You need to specify the path to the first stage model.")
-
     stft_loss = MultiResolutionSTFTLoss().to(device)
     gl = GeneratorLoss(model.mpd, model.msd).to(device)
     dl = DiscriminatorLoss(model.mpd, model.msd).to(device)
@@ -260,20 +232,19 @@ def main():
 
     logger.debug("Optimizer updated:\n%s", optimizer.optimizers)
 
-    # Load models if there is a model
-    if load_pretrained:
-        with acc.main_process_first():
-            optimizer, start_epoch, iters = model.load(
-                cfg.pretrained_model,
-                optimizer,
-                load_only_params=cfg.get("load_only_params", True),
-            )
-            # # advance start epoch or we'd re-train and rewrite the last epoch file
-            # start_epoch += 1
-            logger.info("Loading pre-trained model: %s", cfg.pretrained_model)
-            logger.info("Starting epoch:            %d", start_epoch)
-            logger.info("Starting iterations:       %d", iters)
-            logger.info("")
+    # Load pre-trained model
+    with acc.main_process_first():
+        optimizer, start_epoch, iters = model.load(
+            cfg.pretrained_model,
+            optimizer,
+            load_only_params=cfg.get("load_only_params", True),
+        )
+        # # advance start epoch or we'd re-train and rewrite the last epoch file
+        # start_epoch += 1
+        logger.info("Loading pre-trained model: %s", cfg.pretrained_model)
+        logger.info("Starting epoch:            %d", start_epoch)
+        logger.info("Starting iterations:       %d", iters)
+        logger.info("")
 
     n_down = acc.unwrap_model(model.text_aligner).n_down
 
