@@ -141,33 +141,34 @@ def main():
         "use_ref_sample": True,  # TODO: ???
     }
 
-    # Prepare dataloaders
-    logger.info("Building training dataloader...")
-    train_dataloader = build_dataloader(
-        train_list,
-        cfg.data_params.root_path,
-        text_cleaner,
-        validation=False,
-        ood_data=None,  # OOD data not used for 1st stage training
-        batch_size=cfg.batch_size,
-        num_workers=args.num_workers,
-        device=device,
-        dataset_config=dataset_config,
-        use_speaker_sampler=bool(model.multispeaker),
-    )
-    logger.info("Building validation dataloader...")
-    val_dataloader = build_dataloader(
-        val_list,
-        cfg.data_params.root_path,
-        text_cleaner,
-        ood_data=None,  # OOD data not used for validation
-        batch_size=cfg.batch_size,
-        validation=True,
-        num_workers=0,
-        device=device,
-        dataset_config=dataset_config,
-        use_speaker_sampler=False,
-    )
+    with acc.main_process_first():
+        # Prepare dataloaders
+        logger.info("Building training dataloader...")
+        train_dataloader = build_dataloader(
+            train_list,
+            cfg.data_params.root_path,
+            text_cleaner,
+            validation=False,
+            ood_data=None,  # OOD data not used for 1st stage training
+            batch_size=cfg.batch_size,
+            num_workers=args.num_workers,
+            device=device,
+            dataset_config=dataset_config,
+            use_speaker_sampler=bool(model.multispeaker),
+        )
+        logger.info("Building validation dataloader...")
+        val_dataloader = build_dataloader(
+            val_list,
+            cfg.data_params.root_path,
+            text_cleaner,
+            ood_data=None,  # OOD data not used for validation
+            batch_size=cfg.batch_size,
+            validation=True,
+            num_workers=0,
+            device=device,
+            dataset_config=dataset_config,
+            use_speaker_sampler=False,
+        )
     if acc.is_main_process:  # Přidat tuto podmínku
         wb_logger.summary["n_train_samples"] = len(train_dataloader.dataset)
         wb_logger.summary["n_valid_samples"] = len(val_dataloader.dataset)
@@ -282,7 +283,7 @@ def main():
     )
 
     # Prepare model for training
-    model, optimizer, train_dataloader = acc.prepare(model, optimizer, train_dataloader)
+    model, optimizer = acc.prepare(model, optimizer)
 
     # Create test audio dir under log/eval dir
     if (cfg.data_params.save_val_audio or cfg.data_params.save_test_audio) and not os.path.exists(
