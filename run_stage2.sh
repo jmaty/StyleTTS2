@@ -11,7 +11,7 @@ SPEC="gpu3"
 HOURS=72
 INTB=Train_second.ipynb
 # QSUB ARGUMENTS
-MEM=256gb
+MEM=128gb
 LSCRATCH=20gb
 SCRATCH_TYPE="scratch-local"
 NCPUS=16
