@@ -1,5 +1,4 @@
 import argparse
-import copy
 import os
 import os.path as osp
 import random
@@ -353,7 +352,6 @@ def main():
             "prosodic_predictor",
             "bert_encoder",
             "bert",
-            "prosodic_style_encoder",
             "msd",
             "mpd",
             # The following components were originally not set to train mode
@@ -405,7 +403,7 @@ def main():
                 d_algn = d_algn[..., 1:]
                 d_algn = d_algn.transpose(-1, -2)
             except Exception as e:
-                logger.warning("Error: %s", e)
+                logger.warning("Error during text alignment: %s", e)
                 continue  # skip batch
 
             mask_st = mask_from_lens(d_algn, ph_inp_lens, mel_inp_len // (2**n_down))
@@ -453,7 +451,7 @@ def main():
 
             # Denoiser training
             if epoch >= diff_epoch:
-                num_steps = np.random.randint(3, 5)
+                num_diff_steps = np.random.randint(3, 5)
 
                 if cfg.model_params.diffusion.dist.estimate_sigma_data:
                     # Batch-wise std estimation
@@ -469,7 +467,7 @@ def main():
                         embedding_scale=1,
                         features=ref_style,  # reference from the same speaker as the embedding
                         embedding_mask_proba=0.1,
-                        num_steps=num_steps,
+                        num_steps=num_diff_steps,
                     ).squeeze(1)
                     # EDM loss
                     loss_diff = model.diffusion(
@@ -483,14 +481,14 @@ def main():
                         embedding=h_bert,
                         embedding_scale=1,
                         embedding_mask_proba=0.1,
-                        num_steps=num_steps,
+                        num_steps=num_diff_steps,
                     ).squeeze(1)
                     # EDM loss
                     loss_diff = acc.unwrap_model(model.diffusion)(
                         target_style.unsqueeze(1),
                         embedding=h_bert,
                     ).mean()
-                # style reconstruction loss
+                # Style reconstruction loss
                 loss_sty = F.l1_loss(pred_style, target_style.detach())
 
             d, p_algn = model.prosodic_predictor(
@@ -664,7 +662,7 @@ def main():
                 loss_s2s += F.cross_entropy(_s2s_pred[:_text_length], _text_input[:_text_length])
             loss_s2s /= phonemes.size(0)
 
-            loss_mono = F.l1_loss(d_algn, d_algn_mono) * 10
+            loss_mono = F.l1_loss(d_algn, d_algn_mono) * 10  # why *10?
 
             loss_gen = (
                 cfg.loss_params.lambda_mel * loss_mel
@@ -763,7 +761,7 @@ def main():
                                     sq_sum += param_norm.item() ** 2
                             total_norm[name] = sq_sum**0.5
 
-                        # gradient scaling
+                        # Gradient scaling
                         if total_norm.get("prosodic_predictor", 0) > slmadv_params.thresh:
                             scale = 1 / total_norm["prosodic_predictor"]
                             for module in model.values():
@@ -793,7 +791,7 @@ def main():
                         if loss_disc_slm != 0:
                             optimizer.zero_grad()
                             acc.backward(loss_disc_slm)
-                            # JMa: gradient clipping
+                            # Gradient clipping
                             if cfg.grad_clip:
                                 acc.clip_grad_norm_(model.wd.parameters(), cfg.grad_clip)
                             optimizer.step("wd")
@@ -1072,9 +1070,9 @@ def main():
                     continue  # Skipping the batch
 
         # Average validation losses
-        avg_loss_test = loss_test.item() / iters_test
-        avg_loss_align = loss_align.item() / iters_test
-        avg_loss_f = loss_f.item() / iters_test
+        avg_loss_test = loss_test / iters_test
+        avg_loss_align = loss_align / iters_test
+        avg_loss_f = loss_f / iters_test
         # Update best validation loss
         best_loss = min(avg_loss_test, best_loss)
 
@@ -1193,7 +1191,7 @@ def main():
                     cfg.max_saved_models,
                 )
 
-                # if estimate sigma, save the estimated sigma to the config file
+                # If estimate sigma, save the estimated sigma to the config file
                 if epoch >= diff_epoch and cfg.model_params.diffusion.dist.estimate_sigma_data:
                     sigma_sum = inp_sigma_count * inp_sigma_data + np.sum(running_std)
                     sigma_count = inp_sigma_count + len(running_std)
