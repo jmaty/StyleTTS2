@@ -1,4 +1,5 @@
 import argparse
+import copy
 import os
 import os.path as osp
 import random
@@ -13,7 +14,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 import wandb
 import yaml
-from accelerate import Accelerator, DistributedDataParallelKwargs
+from accelerate import Accelerator
 from IPython.core.debugger import set_trace
 from monotonic_align import mask_from_lens
 from munch import munchify
@@ -33,14 +34,24 @@ from utils import (
     length_to_mask,
     log_norm,
     maximum_path,
-    nccl_warmup,
+    # nccl_warmup,
     set_random_seed,
 )
 from Utils.PLBERT.util import load_plbert
 
 warnings.simplefilter("ignore")  # ignore warnings
+h100_fix()  # torch.backends.cudnn.allow_tf32 = False  # Disable TF32 computations for cuDNN
 
-h100_fix()  # Fix for H100 GPU
+acc = Accelerator()  # Initialize the Accelerator
+
+
+# Simple fix for dataparallel that allows access to class attributes
+class MyDataParallel(torch.nn.DataParallel):
+    def __getattr__(self, name):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.module, name)
 
 
 def main():
@@ -51,32 +62,26 @@ def main():
     add_logging_args(parser)  # --log-level, --log-file
     args = parser.parse_args()
 
-    wb_logger = None  # WandB logger
-
     # Load config
     with open(args.config_path, encoding="utf-8") as fr:
         cfg = munchify(yaml.safe_load(fr))
     cfg_name, cfg_ext = osp.splitext(osp.basename(args.config_path))
 
-    # Check pre-trained model is provided
-    assert cfg.pretrained_model != "", "You must provide a pre-trained model for fine-tuning."
-
-    # Set up logging
     set_random_seed(cfg.seed)  # set random seed
     log_dir = cfg.log_dir
     os.makedirs(log_dir, exist_ok=True)
 
-    # must be before Accelerator
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    if torch.cuda.is_available():
-        torch.cuda.set_device(local_rank)
+    # Uniform logging (main process only)
+    log_file = args.log_file or osp.join(log_dir, "train.log")
+    setup_logging(args.log_level, log_file)
+    logger = get_logger(__name__)
 
-    # Initialize Accelerator
-    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True, broadcast_buffers=False)
-    acc = Accelerator(project_dir=log_dir, split_batches=True, kwargs_handlers=[ddp_kwargs])
-    nccl_warmup(device=getattr(acc, "device", None), local_rank=local_rank)  # NCCL warm-up
+    # Basic checks
+    if cfg.slmadv_params.batch_percentage and not cfg.data_params.OOD_data:
+        raise ValueError("OOD data must be provided for SLM adversarial training.")
 
     # Initialize W&B first (it may add logging handlers); we'll override logging next
+    wb_logger = None  # WandB logger
     if acc.is_main_process:
         wb_logger = wandb.init(
             project="StyleTTS2_cs",
@@ -84,11 +89,6 @@ def main():
             config=cfg,
             dir=log_dir,
         )
-
-    # Uniform logging (main process only)
-    log_file = args.log_file or osp.join(log_dir, "train.log")
-    setup_logging(args.log_level, log_file)
-    logger = get_logger(__name__)
 
     # Set up device
     device = acc.device
@@ -129,6 +129,9 @@ def main():
     # Load data & dataloaders
     train_list, val_list = get_data_path_list(cfg.data_params.train_data, cfg.data_params.val_data)
 
+    # Initialize training with device
+    device = acc.device
+
     dataset_config = {
         "sr": cfg.preprocess_params.sr,
         "min_length": cfg.data_params.min_length,
@@ -149,7 +152,7 @@ def main():
             cfg.data_params.root_path,
             text_cleaner,
             validation=False,
-            ood_data=None,  # OOD data not used for 1st stage training
+            ood_data=cfg.data_params.OOD_data,
             batch_size=cfg.batch_size,
             num_workers=args.num_workers,
             device=device,
@@ -169,46 +172,65 @@ def main():
             dataset_config=dataset_config,
             use_speaker_sampler=False,
         )
-    if acc.is_main_process:  # Přidat tuto podmínku
+    if acc.is_main_process:
         wb_logger.summary["n_train_samples"] = len(train_dataloader.dataset)
         wb_logger.summary["n_valid_samples"] = len(val_dataloader.dataset)
         wb_logger.summary["n_ood_texts"] = train_dataloader.dataset.number_ood_texts()
 
-    # Prepare dataloaders for accelerated training
-    train_dataloader, val_dataloader = acc.prepare(train_dataloader, val_dataloader)
-
     # Move models to device (cuda)
     model.to(device)
 
-    # # DP
-    # for key in model:
-    #     if key not in ("mpd", "msd", "wd"):
-    #         model[key] = MyDataParallel(model[key])
-
-    # Prepare model for distributed training
-    for k in model:
-        if k not in ("mpd", "msd", "wd"):
-            model[k] = acc.prepare(model[k])
+    # DP
+    for key in model:
+        if key not in ("mpd", "msd", "wd"):
+            model[key] = MyDataParallel(model[key])
 
     start_epoch = 0
     iters = 0
 
-    stft_loss = MultiResolutionSTFTLoss().to(device)
+    load_pretrained = cfg.get("pretrained_model", "") != "" and cfg.get(
+        "second_stage_load_pretrained", False
+    )
+
+    if not load_pretrained:
+        if cfg.get("first_stage_path", "") != "":
+            first_stage_path = osp.join(log_dir, cfg.get("first_stage_path", "first_stage.pth"))
+            logger.info("Loading the first stage model at %s ...", first_stage_path)
+            _, start_epoch, iters = model.load(
+                first_stage_path,
+                None,
+                load_only_params=True,
+                # keep starting epoch for tensorboard log
+                ignore_modules=[
+                    "bert",
+                    "bert_encoder",
+                    "prosodic_predictor",
+                    "prosodic_encoder",
+                    "msd",
+                    "mpd",
+                    "wd",
+                    "diffusion",
+                ],
+            )
+
+            # these epochs should be counted from the start epoch
+            diff_epoch += start_epoch
+            joint_epoch += start_epoch
+            epochs += start_epoch
+            model.predictor_encoder = copy.deepcopy(model.acoustic_style_encoder)
+        else:
+            raise ValueError("You need to specify the path to the first stage model.")
+
     gl = GeneratorLoss(model.mpd, model.msd).to(device)
     dl = DiscriminatorLoss(model.mpd, model.msd).to(device)
     wl = create_slm_loss(cfg.model_params.slm, model.wd, cfg.preprocess_params.sr).to(device)
 
-    # gl = acc.prepare(gl)
-    # dl = acc.prepare(dl)
-    # wl = acc.prepare(wl)
-
-    # gl = MyDataParallel(gl)
-    # dl = MyDataParallel(dl)
-    # wl = MyDataParallel(wl)
+    gl = MyDataParallel(gl)
+    dl = MyDataParallel(dl)
+    wl = MyDataParallel(wl)
 
     sampler = DiffusionSampler(
-        acc.unwrap_model(model.diffusion).diffusion,
-        # model.diffusion.diffusion,
+        model.diffusion.diffusion,
         sampler=ADPM2Sampler(),
         # empirical parameters
         sigma_schedule=KarrasSchedule(sigma_min=0.0001, sigma_max=3.0, rho=9.0),
@@ -243,29 +265,26 @@ def main():
 
     logger.debug("Optimizer updated:\n%s", optimizer.optimizers)
 
-    # Load pre-trained model
-    with acc.main_process_first():
+    # Load models if there is a model
+    if load_pretrained:
         optimizer, start_epoch, iters = model.load(
             cfg.pretrained_model,
             optimizer,
             load_only_params=cfg.get("load_only_params", True),
         )
-        # # advance start epoch or we'd re-train and rewrite the last epoch file
-        # start_epoch += 1
-        logger.info("Loading pre-trained model: %s", cfg.pretrained_model)
-        logger.info("Starting epoch:            %d", start_epoch)
-        logger.info("Starting iterations:       %d", iters)
+        logger.info("Loading pre-trained model: %s", cfg["pretrained_model"])
+        logger.info("Starting epoch:      %d", start_epoch)
+        logger.info("Starting iterations: %d", iters)
         logger.info("")
 
-    n_down = acc.unwrap_model(model.text_aligner).n_down
+    n_down = model.text_aligner.n_down
 
     best_loss = float("inf")  # best test loss
     # iters = 0  # !!! Should it be resetting?
 
     torch.cuda.empty_cache()  # clear cache
 
-    # print("BERT", optimizer.optimizers["bert"])
-    # print("decoder", optimizer.optimizers["decoder"])
+    stft_loss = MultiResolutionSTFTLoss().to(device)
 
     # === Change sigma data calculation ===
     # Working with running values to enable following calculation from already saved model
@@ -287,15 +306,14 @@ def main():
             batch_percentage=slmadv_params.batch_percentage,
             skip_update=slmadv_params.iter,
             sig=slmadv_params.sig,
+            hop_len=cfg.preprocess_params.spect_params.hop_length,
         )
         if slmadv_params.batch_percentage is not None
         else None
     )
 
     # Prepare model for training
-    # model, optimizer = acc.prepare(model, optimizer)
-    optimizer.optimizers = {k: acc.prepare(v) for k, v in optimizer.optimizers.items()}
-    optimizer.schedulers = {k: acc.prepare(v) for k, v in optimizer.schedulers.items()}
+    model, optimizer, train_dataloader = acc.prepare(model, optimizer, train_dataloader)
 
     # Create test audio dir under log/eval dir
     if (cfg.data_params.save_val_audio or cfg.data_params.save_test_audio) and not os.path.exists(
@@ -307,8 +325,8 @@ def main():
     # - use global noise for speed
     pts = PTS(cfg, model, use_glob_noise=True)
 
-    # Total number of steps per epoch given the batch size
-    steps_per_epoch = len(train_dataloader)
+    # Total number of steps given the batch size
+    steps_per_epoch = len(train_list) // cfg.batch_size
 
     logger.info(" > Start training cycles:")
     logger.info(" | > Random seed:        %s", cfg.seed)
@@ -388,6 +406,15 @@ def main():
                 mel_mask = length_to_mask(mel_inp_len // (2**n_down)).to(device)
                 ph_mask = length_to_mask(ph_inp_lens).to(phonemes.device)
 
+                # # --- Original code ---
+                # # Compute reference styles
+                # ref = None
+                # if multispeaker and epoch >= diff_epoch:
+                #     ref_ss = model.style_encoder(ref_mels.unsqueeze(1))
+                #     ref_sp = model.predictor_encoder(ref_mels.unsqueeze(1))
+                #     ref = torch.cat([ref_ss, ref_sp], dim=1)
+                # # --- End of Original code ---
+
                 # Compute reference styles
                 ref_style = None
                 if model.multispeaker and epoch >= diff_epoch:
@@ -409,11 +436,12 @@ def main():
             mask_st = mask_from_lens(d_algn, ph_inp_lens, mel_inp_len // (2**n_down))
             d_algn_mono = maximum_path(d_algn, mask_st)
 
-            # Encode
+            # encode
             h_ph = model.text_encoder(phonemes, ph_inp_lens, ph_mask)
 
             # Randomly choose between using the monotonic version or not.
-            # This helps in regularizing the model by providing different alignment paths during training.
+            # This helps in regularizing the model by providing different alignment paths
+            # during training.
             h_algn = h_ph @ d_algn if bool(random.getrandbits(1)) else h_ph @ d_algn_mono
             d_gt = d_algn_mono.sum(axis=-1).detach()
 
@@ -455,10 +483,9 @@ def main():
 
                 if cfg.model_params.diffusion.dist.estimate_sigma_data:
                     # Batch-wise std estimation
-                    # Use accelerator's unwrap_model to get the underlying model
                     sigma_data_value = target_style.std(axis=-1).mean().item()
-                    acc.unwrap_model(model.diffusion).diffusion.sigma_data = sigma_data_value
-                    running_std.append(sigma_data_value)
+                    model.diffusion.module.diffusion.sigma_data = sigma_data_value
+                    running_std.append(sigma_data_value)  # Update running std values
 
                 if model.multispeaker:
                     pred_style = sampler(
@@ -484,14 +511,14 @@ def main():
                         num_steps=num_diff_steps,
                     ).squeeze(1)
                     # EDM loss
-                    loss_diff = acc.unwrap_model(model.diffusion)(
+                    loss_diff = model.diffusion.module.diffusion(
                         target_style.unsqueeze(1),
                         embedding=h_bert,
                     ).mean()
                 # Style reconstruction loss
                 loss_sty = F.l1_loss(pred_style, target_style.detach())
 
-            d, p_algn = model.prosodic_predictor(
+            dur, p_algn = model.prosodic_predictor(
                 h_bert_en,
                 pros_style,
                 ph_inp_lens,
@@ -502,8 +529,7 @@ def main():
             # --- Pre-allocated Segment Extraction ---
 
             # Set up maximum lengths based on `max_len` from config
-            mel_inp_len_all = acc.gather(mel_inp_len)  # for balanced load
-            mel_len_gt = min(int(mel_inp_len_all.min().item() / 2 - 1), cfg.max_len // 2)
+            mel_len_gt = min(int(mel_inp_len.min().item() / 2 - 1), cfg.max_len // 2)
             # Early check for segment length:
             # - mel_len_gt * 2 is the length of the original mel spectrogram
             # - multiplication by 2 is due to the downsampling factor between mel and text aligner
@@ -522,11 +548,7 @@ def main():
 
             # Pre-allocate tensors with the calculated fixed length
             ph_algn = torch.empty(
-                bsize,
-                h_algn.shape[1],
-                mel_len_gt,
-                device=device,
-                dtype=h_algn.dtype,
+                bsize, h_algn.shape[1], mel_len_gt, device=device, dtype=h_algn.dtype
             )
             pros_algn = torch.empty(
                 bsize,
@@ -573,7 +595,7 @@ def main():
                 # --- Segment for mel_st ---
                 # Style reference (better to be different from the GT)
                 beg_st = np.random.randint(0, mel_len - mel_len_st)
-                # Extract style reference mel spectrogram for style conditioning and assign to tensor
+                # Extract style reference mel spectrogram for style conditioning
                 mel_st[bidx] = mels[bidx, :, (beg_st * 2) : ((beg_st + mel_len_st) * 2)]
 
             # Detach tensors to avoid unnecessary gradient tracking
@@ -611,7 +633,7 @@ def main():
             y_rec = model.decoder(ph_algn, f0_fake, n_fake, acoust_style)
 
             # Calculate losses using the extracted/generated segments
-            loss_f0_rec = F.smooth_l1_loss(f0_real, f0_fake) / 10  # why /10?
+            loss_f0_rec = (F.smooth_l1_loss(f0_real, f0_fake)) / 10  # why /10?
             loss_norm_rec = F.smooth_l1_loss(n_real, n_fake)
 
             # --- Discriminator loss ---
@@ -639,7 +661,7 @@ def main():
             #   - loss_dur: L1 between predicted and GT durations (excluding boundary phonemes)
             #   - loss_ce: BCE between predicted alignment logits and target binary matrix
             loss_ce, loss_dur = 0, 0
-            for _s2s_pred, _text_input, _text_length in zip(d, (d_gt), ph_inp_lens):
+            for _s2s_pred, _text_input, _text_length in zip(dur, (d_gt), ph_inp_lens):
                 _s2s_pred = _s2s_pred[:_text_length, :]
                 _text_input = _text_input[:_text_length].long()
                 _s2s_trg = torch.zeros_like(_s2s_pred)
@@ -679,9 +701,13 @@ def main():
             )
 
             # Accumulate mean mel-spectrogram loss (over all GPUs) across batches for logging
-            running_loss += acc.gather(loss_mel).mean().item()
-            # running_loss += loss_mel.item()
+            running_loss += loss_mel.item()
             acc.backward(loss_gen)
+            if torch.isnan(loss_gen):
+                logger.warning(
+                    "NaN detected in generator loss at batch %d, step %d", batch_idx, iters
+                )
+                set_trace()
 
             # Gradient clipping
             if cfg.grad_clip:
@@ -693,8 +719,6 @@ def main():
                 acc.clip_grad_norm_(model.decoder.parameters(), cfg.grad_clip)
                 acc.clip_grad_norm_(model.text_encoder.parameters(), cfg.grad_clip)
                 acc.clip_grad_norm_(model.text_aligner.parameters(), cfg.grad_clip)
-            if torch.isnan(loss_gen):
-                set_trace()
 
             optimizer.step("bert_encoder")
             optimizer.step("bert")
@@ -739,9 +763,33 @@ def main():
                     if slm_out is not None:
                         loss_disc_slm, loss_gen_lm, _ = slm_out
 
+                        # # Check for NaN in SLM losses
+                        # if isinstance(loss_disc_slm, torch.Tensor) and torch.isnan(loss_disc_slm):
+                        #     logger.warning(
+                        #         "NaN detected in loss_disc_slm at batch %d, iteration %d => skipping SLM training",
+                        #         batch_idx, iters
+                        #     )
+                        #     loss_disc_slm = 0
+                        #     loss_gen_lm = 0
+                        #     del slm_out, y_rec_gt, y_rec_gt_pred, target_style
+                        #     torch.cuda.empty_cache()
+                        #     continue
+
+                        # if torch.isnan(loss_gen_lm):
+                        #     logger.warning(
+                        #         "NaN detected in loss_gen_lm at batch %d, iteration %d => skipping SLM training",
+                        #         batch_idx, iters
+                        #     )
+                        #     loss_disc_slm = 0
+                        #     loss_gen_lm = 0
+                        #     del slm_out, y_rec_gt, y_rec_gt_pred, target_style
+                        #     torch.cuda.empty_cache()
+                        #     continue
+
                         # SLM generator loss
                         optimizer.zero_grad()
                         acc.backward(loss_gen_lm)
+
                         # JMa: gradient clipping
                         if cfg.grad_clip:
                             acc.clip_grad_norm_(model.bert_encoder.parameters(), cfg.grad_clip)
@@ -781,7 +829,6 @@ def main():
                             if p_algn.grad is not None:
                                 p_algn.grad *= slmadv_params.scale
 
-                        # Auxiliary optimizer updates for SLM: do not step schedulers
                         optimizer.step("bert_encoder")
                         optimizer.step("bert")
                         optimizer.step("prosodic_predictor")
@@ -795,6 +842,7 @@ def main():
                             if cfg.grad_clip:
                                 acc.clip_grad_norm_(model.wd.parameters(), cfg.grad_clip)
                             optimizer.step("wd")
+
                     else:
                         logger.warning(
                             "SLM discriminator training not performed => skipping batch %d",
@@ -847,59 +895,53 @@ def main():
                     loss_s2s,
                     loss_mono,
                 )
+                # Check current VRAM usage
+                curr_vrams = [
+                    nvidia_smi.nvmlDeviceGetMemoryInfo(
+                        nvidia_smi.nvmlDeviceGetHandleByIndex(device_idx)
+                    ).used
+                    for device_idx in range(n_gpus)
+                ]
+                # Update max VRAM usage
+                curr_vram = max(curr_vrams) >> 30  # Convert bytes to GB
+                max_vram = max(max_vram, curr_vram)
 
-                if acc.is_main_process:
-                    # Check current VRAM usage
-                    curr_vrams = [
-                        nvidia_smi.nvmlDeviceGetMemoryInfo(
-                            nvidia_smi.nvmlDeviceGetHandleByIndex(device_idx)
-                        ).used
-                        for device_idx in range(n_gpus)
-                    ]
-                    # Update max VRAM usage
-                    curr_vram = max(curr_vrams) >> 30  # Convert bytes to GB
-                    max_vram = max(max_vram, curr_vram)
+                wb_logger.log(
+                    {
+                        "train/mel_loss": loss_mel,
+                        "train/gen_loss": loss_gen_all,
+                        "train/d_loss": loss_disc,
+                        "train/ce_loss": loss_ce,
+                        "train/dur_loss": loss_dur,
+                        "train/slm_loss": loss_lm,
+                        "train/norm_loss": loss_norm_rec,
+                        "train/F0_loss": loss_f0_rec,
+                        "train/sty_loss": loss_sty,
+                        "train/diff_loss": loss_diff,
+                        "train/disc_slm_loss": loss_disc_slm,
+                        "train/gen_loss_slm": loss_gen_lm,
+                        "train/s2s_loss": loss_s2s,
+                        "train/mono_loss": loss_mono,
+                        "train/curr_vram": curr_vram,
+                        "train/epoch": epoch,
+                    },
+                    step=iters,
+                )
 
-                    wb_logger.log(
-                        {
-                            "train/mel_loss": loss_mel,
-                            "train/gen_loss": loss_gen_all,
-                            "train/d_loss": loss_disc,
-                            "train/ce_loss": loss_ce,
-                            "train/dur_loss": loss_dur,
-                            "train/slm_loss": loss_lm,
-                            "train/norm_loss": loss_norm_rec,
-                            "train/F0_loss": loss_f0_rec,
-                            "train/sty_loss": loss_sty,
-                            "train/diff_loss": loss_diff,
-                            "train/disc_slm_loss": loss_disc_slm,
-                            "train/gen_loss_slm": loss_gen_lm,
-                            "train/s2s_loss": loss_s2s,
-                            "train/mono_loss": loss_mono,
-                            "train/curr_vram": curr_vram,
-                            "train/epoch": epoch,
-                        },
-                        step=iters,
-                    )
+                logger.info(
+                    "Max VRAM usage: %d/%d GB (%.2f%%)",
+                    max_vram,
+                    total_vram,
+                    max_vram / total_vram * 100,
+                )
+                logger.info("Time elapsed: %.2f seconds", time.time() - start_time)
 
-                    logger.info(
-                        "Max VRAM usage: %d/%d GB (%.2f%%)",
-                        max_vram,
-                        total_vram,
-                        max_vram / total_vram * 100,
-                    )
-                    logger.info("Time elapsed: %.2f seconds", time.time() - start_time)
-
-                running_loss = 0  # Reset running loss for next log interval
+            running_loss = 0  # Reset running loss for next log interval
 
         # === Start of validation part ==============================================
 
-        acc.wait_for_everyone()  # Synchronize processes
-
         loss_test, loss_align, loss_f = 0, 0, 0  # Reset loss for validation
-
-        # Set all models to eval mode
-        model.set_mode("eval")
+        model.set_mode("eval")  # Set all models to eval mode
 
         with torch.no_grad():
             iters_test = 0
@@ -922,7 +964,7 @@ def main():
                     # Current batch size
                     bsize = mel_inp_len.shape[0]
 
-                    mel_mask = length_to_mask(mel_inp_len // (2**n_down)).to(device)
+                    mel_mask = length_to_mask(mel_inp_len // (2**n_down)).to("cuda")
                     ph_mask = length_to_mask(ph_inp_lens).to(phonemes.device)
 
                     _, _, d_algn = model.text_aligner(mels, mel_mask, phonemes)
@@ -939,6 +981,20 @@ def main():
 
                     d_gt = d_algn_mono.sum(axis=-1).detach()
 
+                    # # --- Original code ---
+                    # ss, gs = [], []
+                    # for idx, m in enumerate(mel_input_length):
+                    #     mel_length = int(m.item())
+                    #     mel = mels[idx, :, :m]
+                    #     ss.append(model.predictor_encoder(mel.unsqueeze(0).unsqueeze(1)))
+                    #     gs.append(model.style_encoder(mel.unsqueeze(0).unsqueeze(1)))
+
+                    # s = torch.stack(ss).squeeze(dim=1)
+                    # # TODO: not used anymore!?
+                    # # gs = torch.stack(gs).squeeze(dim=1)
+                    # # s_trg = torch.cat([s, gs], dim=-1).detach()
+                    # # --- End of Original code ---
+
                     # Compute prosodic style for the entire utterance
                     # This operation cannot be done in batch because of the avgpool layer
                     # (may need to work on masked avgpool)
@@ -949,11 +1005,11 @@ def main():
                             mels_ok.unsqueeze(0).unsqueeze(1)
                         )
 
-                    h_bert = model.bert(phonemes, attention_mask=(~ph_mask).int())  # [B, T, 768]
-                    h_bert_en = model.bert_encoder(h_bert).transpose(-1, -2)  # [B, 256, T]
+                    h_bert = model.bert(phonemes, attention_mask=(~ph_mask).int())
+                    h_bert_en = model.bert_encoder(h_bert).transpose(-1, -2)
 
                     # Predict duration and pitch [B, 256, T]
-                    d, p_algn = model.prosodic_predictor(
+                    dur, p_algn = model.prosodic_predictor(
                         h_bert_en,
                         pros_style,
                         ph_inp_lens,
@@ -965,6 +1021,7 @@ def main():
                     # Get clips
                     mel_len_gt = int(mel_inp_len.min().item() / 2 - 1)
 
+                    bsize = mel_inp_len.shape[0]  # Use current batch size
                     # Calculate fixed waveform segment length
                     wav_len = (mel_len_gt * 2) * cfg.preprocess_params.spect_params.hop_length
 
@@ -1015,6 +1072,7 @@ def main():
                     # # There is no need to detach tensors as in training loop
                     # wav_gt = wav_gt.detach()
                     # mel_gt = mel_gt.detach()
+
                     # --- End of Pre-allocated Segment Extraction ---
 
                     # Recompute style using style_encoder for decoder input
@@ -1029,7 +1087,7 @@ def main():
 
                     # Compute duration prediction loss for validation
                     loss_dur = 0
-                    for _s2s_pred, _text_input, _text_length in zip(d, (d_gt), ph_inp_lens):
+                    for _s2s_pred, _text_input, _text_length in zip(dur, (d_gt), ph_inp_lens):
                         _s2s_pred = _s2s_pred[:_text_length, :]
                         _text_input = _text_input[:_text_length].long()
                         _s2s_trg = torch.zeros_like(_s2s_pred)
@@ -1047,16 +1105,12 @@ def main():
                     y_rec = model.decoder(ph_algn, f0_fake, n_fake, acoust_style)
                     loss_mel = stft_loss(y_rec.squeeze(), wav_gt.detach())
                     f0_real, _, _ = model.pitch_extractor(mel_gt.unsqueeze(1))
-                    loss_f0 = F.l1_loss(f0_real, f0_fake) / 10
+                    loss_f0 = F.l1_loss(f0_real, f0_fake) / 10  # why /10?
 
                     # Aggregate losses (loss_dur is the mean over valid elements)
-                    # loss_test += loss_mel.mean()
-                    # loss_align += loss_dur.mean()
-                    # loss_f += loss_f0.mean()
-
-                    loss_test += acc.gather(loss_mel).mean().item()
-                    loss_align += acc.gather(loss_dur).mean().item()
-                    loss_f += acc.gather(loss_f0).mean().item()
+                    loss_test += loss_mel.mean()
+                    loss_align += loss_dur.mean()
+                    loss_f += loss_f0.mean()
 
                     iters_test += 1
 
@@ -1070,11 +1124,10 @@ def main():
                     continue  # Skipping the batch
 
         # Average validation losses
-        avg_loss_test = loss_test / iters_test
-        avg_loss_align = loss_align / iters_test
-        avg_loss_f = loss_f / iters_test
-        # Update best validation loss
-        best_loss = min(avg_loss_test, best_loss)
+        avg_loss_test = loss_test.item() / iters_test
+        avg_loss_align = loss_align.item() / iters_test
+        avg_loss_f = loss_f.item() / iters_test
+        best_loss = min(avg_loss_test, best_loss)  # Update best validation loss
 
         logger.info(
             "Validation loss: %.3f (best: %.3f), Dur loss: %.3f, F0 loss: %.3f",
@@ -1083,247 +1136,239 @@ def main():
             avg_loss_align,
             avg_loss_f,
         )
-        if acc.is_main_process:
-            wb_logger.log(
-                {
-                    "eval/mel_loss": avg_loss_test,
-                    "eval/dur_loss": avg_loss_align,
-                    "eval/F0_loss": avg_loss_f,
-                },
-                step=iters,
+        wb_logger.log(
+            {
+                "eval/mel_loss": avg_loss_test,
+                "eval/dur_loss": avg_loss_align,
+                "eval/F0_loss": avg_loss_f,
+            },
+            step=iters,
+        )
+        wb_logger.summary["max_vram"] = max_vram  # Log max VRAM usage per epoch
+
+        # Generate validation samples
+        n_val_samples = min(cfg.data_params.n_val_audios, bsize)
+        if epoch < joint_epoch:
+            # Generating reconstruction examples with GT duration
+            with torch.no_grad():
+                # Iterate over the defined number of validation samples
+                for idx in range(n_val_samples):
+                    mel_len = int(mel_inp_len[idx].item())
+
+                    # Reconstruct audio from ground-truth mel spectrogram,
+                    # and extracted and predicted phoneme-audio alignment encoding
+                    # TODO: Enable reconstruction from multiple tensors
+                    wav_pred = pts.reconstruct(
+                        mels[idx, :, :mel_len].unsqueeze(0),  # Ground-truth mel spectrogram
+                        # Ground-truth phonemes-audio alignment
+                        h_algn[idx, :, : mel_len // 2].unsqueeze(0),
+                        # Predicted phonemes-audio alignment encoding
+                        p_en=p_algn[idx, :, : mel_len // 2].unsqueeze(0),
+                    )
+
+                    # Write and save val audio
+                    if cfg.data_params.save_val_audio and epoch % cfg.save_freq == 0:
+                        outfile = f"epoch_2nd_{epoch:0>5}_val-pred-{idx}.wav"
+                        pts.save_wav(wav_pred, os.path.join(test_audio_dir, outfile))
+
+                    # Save ground truth
+                    if epoch in (0, diff_epoch, joint_epoch):
+                        wav_gt = waves[idx].squeeze()
+                        if cfg.data_params.save_val_audio and epoch % cfg.save_freq == 0:
+                            outfile = f"epoch_2nd_{epoch:0>5}_gt-{idx}.wav"
+                            pts.save_wav(wav_gt, os.path.join(test_audio_dir, outfile))
+
+        else:
+            # Generating sampled speech from text directly
+            with torch.no_grad():
+                ref_style = None
+                # --- Vectorized style computation ---
+                if model.multispeaker and epoch >= diff_epoch:
+                    # Take only the first `n_val_samples` samples
+                    # Add channel dimension
+                    # Shape: [n_val_samples, 1, n_mels, max_len]
+                    ref_mels_val = ref_mels[:n_val_samples].unsqueeze(1)
+
+                    # Call encoders with the entire batch
+                    # Shape: [ref_mels_val, style_dim]
+                    ref_acoust_style = model.acoustic_style_encoder(ref_mels_val)
+                    # Shape: [ref_mels_val, style_dim]
+                    ref_pros_style = model.prosodic_style_encoder(ref_mels_val)
+                    # Combined style [B, 256, T]
+                    ref_style = torch.cat([ref_acoust_style, ref_pros_style], dim=1)
+                # --- End of Vectorized style computation ---
+
+                # Iterate over the defined number of validation samples
+                for idx in range(n_val_samples):
+                    # Generate audio from phoneme features of the `idx`-th validation file
+                    curr_ref_style = ref_style[idx].unsqueeze(0) if ref_style else None
+
+                    # TODO: Enable reconstruction from multiple tensors
+                    wav_pred, _ = pts.infer_from_ph_features(
+                        ph_inp_lens[idx, ...].unsqueeze(0),
+                        ph_mask[idx, : ph_inp_lens[idx]].unsqueeze(0),
+                        h_ph[idx, :, : ph_inp_lens[idx]].unsqueeze(0),
+                        h_bert[idx].unsqueeze(0),
+                        h_bert_en[idx, :, : ph_inp_lens[idx]].unsqueeze(0),
+                        ref_s=curr_ref_style,
+                    )
+
+                    # Write and save val audio
+                    if cfg.data_params.save_val_audio and epoch % cfg.save_freq == 0:
+                        outfile = f"epoch_2nd_{epoch:0>5}_val-pred-{idx}.wav"
+                        pts.save_wav(wav_pred, os.path.join(test_audio_dir, outfile))
+                    # Save ground truth
+                    if epoch in (0, diff_epoch, joint_epoch):
+                        wav_gt = waves[idx].squeeze()
+                        if cfg.data_params.save_val_audio and epoch % cfg.save_freq == 0:
+                            outfile = f"epoch_2nd_{epoch:0>5}_gt-{idx}.wav"
+                            pts.save_wav(wav_gt, os.path.join(test_audio_dir, outfile))
+
+        # --- End of validation part ------------------------------------------
+
+        # --- Start of saving part --------------------------------------------
+
+        # Save progress
+        if epoch % cfg.save_freq == 0:
+            model.save(
+                optimizer,
+                epoch,
+                iters,
+                avg_loss_test,
+                "epoch_2nd",
+                log_dir,
+                cfg.max_saved_models,
             )
 
-            # Generate validation samples
-            n_val_samples = min(cfg.data_params.n_val_audios, bsize)
-            if epoch < joint_epoch:
-                # Generating reconstruction examples with GT duration
-                with torch.no_grad():
-                    # Iterate over the defined number of validation samples
-                    for idx in range(n_val_samples):
-                        mel_len = int(mel_inp_len[idx].item())
+            # If estimate sigma, save the estimated sigma to the config file
+            if epoch >= diff_epoch and cfg.model_params.diffusion.dist.estimate_sigma_data:
+                sigma_sum = inp_sigma_count * inp_sigma_data + np.sum(running_std)
+                sigma_count = inp_sigma_count + len(running_std)
+                cfg["model_params"]["diffusion"]["dist"]["sigma_data"] = float(
+                    sigma_sum / sigma_count
+                )
+                logger.info("Estimated sigma: %f", cfg.model_params.diffusion.dist.sigma_data)
 
-                        # Reconstruct audio from ground-truth mel spectrogram,
-                        # and extracted and predicted phoneme-audio alignment encoding
-                        # TODO: Enable reconstruction from multiple tensors
-                        wav_pred = pts.reconstruct(
-                            mels[idx, :, :mel_len].unsqueeze(0),  # Ground-truth mel spectrogram
-                            # Ground-truth phonemes-audio alignment
-                            h_algn[idx, :, : mel_len // 2].unsqueeze(0),
-                            # Predicted phonemes-audio alignment encoding
-                            p_en=p_algn[idx, :, : mel_len // 2].unsqueeze(0),
-                        )
+                # Save config file updated with estimated sigma
+                cfg_path = osp.join(log_dir, f"{cfg_name}.processed{cfg_ext}")
+                with open(cfg_path, "w", encoding="utf-8") as outfile:
+                    yaml.dump(cfg, outfile, default_flow_style=False)
 
-                        # Write and save val audio
-                        if cfg.data_params.save_val_audio and epoch % cfg.save_freq == 0:
-                            outfile = f"epoch_2nd_{epoch:0>5}_val-pred-{idx}.wav"
-                            pts.save_wav(wav_pred, os.path.join(test_audio_dir, outfile))
+            # Synthesize test audios to evaluate the model's performance
+            # after diffusion training has started.
+            if cfg.data_params.save_test_audio and epoch >= joint_epoch:
+                # Set up number of speakers to test if multispeaker is enabled
+                n_speakers = min(3, len(ref_style)) if model.multispeaker else 1
+                logger.debug(
+                    "Synthesizing %d test sentences for %d speakers",
+                    len(cfg.data_params.test_sentences),
+                    n_speakers,
+                )
+                # Iterate over the defined number of validation test speakers
+                for sidx in range(n_speakers):
+                    # Generate test sentences for each speaker
+                    test_wavs = pts(
+                        cfg.data_params.test_sentences,
+                        ref_s=ref_style[sidx].unsqueeze(0) if model.multispeaker else None,
+                    )
+                    # Save test sentences
+                    for widx, w in enumerate(test_wavs):
+                        outfile = f"epoch_2nd_{epoch:0>5}_test-{sidx}{widx}.wav"
+                        pts.save_wav(w, os.path.join(test_audio_dir, outfile))
 
-                        # Save ground truth
-                        if epoch in (0, diff_epoch, joint_epoch):
-                            wav_gt = waves[idx].squeeze()
-                            if cfg.data_params.save_val_audio and epoch % cfg.save_freq == 0:
-                                outfile = f"epoch_2nd_{epoch:0>5}_gt-{idx}.wav"
-                                pts.save_wav(wav_gt, os.path.join(test_audio_dir, outfile))
-
-            else:
-                # Generating sampled speech from text directly
-                with torch.no_grad():
-                    ref_style = None
-
-                    # --- Vectorized style computation ---
-                    if model.multispeaker and epoch >= diff_epoch:
-                        # Take only the first `n_val_samples` samples
-                        # Add channel dimension
-                        # Shape: [n_val_samples, 1, n_mels, max_len]
-                        ref_mels_val = ref_mels[:n_val_samples].unsqueeze(1)
-
-                        # Call encoders with the entire batch
-                        # Shape: [ref_mels_val, style_dim]
-                        ref_acoust_style = model.acoustic_style_encoder(ref_mels_val)
-                        # Shape: [ref_mels_val, style_dim]
-                        ref_pros_style = model.prosodic_style_encoder(ref_mels_val)
-                        # Combined style [B, 256, T]
-                        ref_style = torch.cat([ref_acoust_style, ref_pros_style], dim=1)
-                    # --- End of Vectorized style computation ---
-
-                    # Iterate over the defined number of validation samples
-                    for idx in range(n_val_samples):
-                        # Generate audio from phoneme features of the `idx`-th validation file
-                        curr_ref_style = (
-                            ref_style[idx].unsqueeze(0) if ref_style is not None else None
-                        )
-                        # TODO: Enable reconstruction from multiple tensors
-                        wav_pred, _ = pts.infer_from_ph_features(
-                            ph_inp_lens[idx, ...].unsqueeze(0),
-                            ph_mask[idx, : ph_inp_lens[idx]].unsqueeze(0),
-                            h_ph[idx, :, : ph_inp_lens[idx]].unsqueeze(0),
-                            h_bert[idx].unsqueeze(0),
-                            h_bert_en[idx, :, : ph_inp_lens[idx]].unsqueeze(0),
-                            ref_s=curr_ref_style,
-                        )
-
-                        # Write and save val audio
-                        if cfg.data_params.save_val_audio and epoch % cfg.save_freq == 0:
-                            outfile = f"epoch_2nd_{epoch:0>5}_val-pred-{idx}.wav"
-                            pts.save_wav(wav_pred, os.path.join(test_audio_dir, outfile))
-                        # Save ground truth
-                        if epoch in (0, diff_epoch, joint_epoch):
-                            wav_gt = waves[idx].squeeze()
-                            if cfg.data_params.save_val_audio and epoch % cfg.save_freq == 0:
-                                outfile = f"epoch_2nd_{epoch:0>5}_gt-{idx}.wav"
-                                pts.save_wav(wav_gt, os.path.join(test_audio_dir, outfile))
-
-            # --- End of validation part ------------------------------------------
-
-            acc.wait_for_everyone()  # Synchronize processes
-
-            # --- Start of saving part --------------------------------------------
-
-            # Save progress
-            if epoch % cfg.save_freq == 0:
+        # Save milestone models
+        if cfg.save_milestones:
+            if epoch == diff_epoch - 1:
                 model.save(
                     optimizer,
                     epoch,
                     iters,
-                    avg_loss_test,
-                    "epoch_2nd",
+                    loss_test / iters_test,
+                    "stage2_pre-diff",
                     log_dir,
-                    cfg.max_saved_models,
+                    use_epoch_in_name=False,
                 )
+            if epoch == joint_epoch - 1:
+                model.save(
+                    optimizer,
+                    epoch,
+                    iters,
+                    loss_test / iters_test,
+                    "stage2_pre-joint",
+                    log_dir,
+                    use_epoch_in_name=False,
+                )
+        # --- End of saving part ----------------------------------------------
 
-                # If estimate sigma, save the estimated sigma to the config file
-                if epoch >= diff_epoch and cfg.model_params.diffusion.dist.estimate_sigma_data:
-                    sigma_sum = inp_sigma_count * inp_sigma_data + np.sum(running_std)
-                    sigma_count = inp_sigma_count + len(running_std)
-                    cfg["model_params"]["diffusion"]["dist"]["sigma_data"] = float(
-                        sigma_sum / sigma_count
-                    )
-                    logger.info("Estimated sigma: %f", cfg.model_params.diffusion.dist.sigma_data)
-
-                    # Save config file updated with estimated sigma
-                    cfg_path = osp.join(log_dir, f"{cfg_name}.processed{cfg_ext}")
-                    with open(cfg_path, "w", encoding="utf-8") as outfile:
-                        yaml.dump(cfg, outfile, default_flow_style=False)
-
-                # Synthesize test audios to evaluate the model's performance
-                # after joint training has started.
-                if cfg.data_params.save_test_audio and epoch >= joint_epoch:
-                    # Set up number of speakers to test if multispeaker is enabled
-                    n_speakers = min(3, len(ref_style)) if model.multispeaker else 1
-                    logger.debug(
-                        "Synthesizing %d test sentences for %d speakers",
-                        len(cfg.data_params.test_sentences),
-                        n_speakers,
-                    )
-                    # Iterate over the defined number of validation test speakers
-                    for sidx in range(n_speakers):
-                        # Generate test sentences for each speaker
-                        test_wavs = pts(
-                            cfg.data_params.test_sentences,
-                            ref_s=ref_style[sidx].unsqueeze(0) if model.multispeaker else None,
-                        )
-                        # Save test sentences
-                        for widx, w in enumerate(test_wavs):
-                            outfile = f"epoch_2nd_{epoch:0>5}_test-{sidx}{widx}.wav"
-                            pts.save_wav(w, os.path.join(test_audio_dir, outfile))
-
-            # Save milestone models
-            if cfg.save_milestones:
-                if epoch == diff_epoch - 1:
-                    model.save(
-                        optimizer,
-                        epoch,
-                        iters,
-                        loss_test / iters_test,
-                        "stage2_pre-diff",
-                        log_dir,
-                        use_epoch_in_name=False,
-                    )
-                if epoch == joint_epoch - 1:
-                    model.save(
-                        optimizer,
-                        epoch,
-                        iters,
-                        loss_test / iters_test,
-                        "stage2_pre-joint",
-                        log_dir,
-                        use_epoch_in_name=False,
-                    )
-            # --- End of saving part ----------------------------------------------
-
-        # === End of training loop ================================================
-
-        # Sync after I/O so other processes wait for the main process
-        acc.wait_for_everyone()
+    # === End of training loop ================================================
 
     # === Final model saving ==================================================
 
-    if acc.is_main_process:
-        # Save the final checkpoint
-        final_filepath = model.save(
-            optimizer,
-            epoch,
-            iters,
-            loss_test / iters_test,
-            "epoch_2nd",
-            log_dir,
-            cfg.max_saved_models,
+    # Save the final checkpoint
+    final_filepath = model.save(
+        optimizer,
+        epoch,
+        iters,
+        loss_test / iters_test,
+        "epoch_2nd",
+        log_dir,
+        cfg.max_saved_models,
+    )
+    try:
+        if epoch > joint_epoch - 1:
+            # Create a symlink to the final model
+            final_model_symlink = osp.join(log_dir, "second_stage.pth")
+            os.symlink(osp.basename(final_filepath), final_model_symlink)
+            print(f"Final second-stage model saved to {final_filepath}")
+
+            # Reduce the final model size by removing the optimizer state
+            del model["mpd"]
+            del model["msd"]
+            del model["wd"]
+            del model["text_aligner"]
+            del model["pitch_extractor"]
+            if not model.multispeaker:
+                del model["acoustic_style_encoder"]
+                del model["prosodic_style_encoder"]
+            # Save the reduced model
+            state_dict = {key: model[key].state_dict() for key in model}
+            filepath = osp.join(log_dir, "model4tts.pth")
+            torch.save(state_dict, filepath)
+            logger.info("Reduced model saved to %s", filepath)
+
+    except FileExistsError:
+        logger.warning(
+            "Symlink or file %s already exists => %s was not symlinked!",
+            final_model_symlink,
+            final_filepath,
         )
-        try:
-            if epoch > joint_epoch - 1:
-                # Create a symlink to the final model
-                final_model_symlink = osp.join(log_dir, "second_stage.pth")
-                os.symlink(osp.basename(final_filepath), final_model_symlink)
-                print(f"Final second-stage model saved to {final_filepath}")
+    except Exception as e:
+        logger.error("Error when reducing model: %s", e)
 
-                # Reduce the final model size by removing the optimizer state
-                del model["mpd"]
-                del model["msd"]
-                del model["wd"]
-                del model["text_aligner"]
-                del model["pitch_extractor"]
-                if not model.multispeaker:
-                    del model["acoustic_style_encoder"]
-                    del model["prosodic_style_encoder"]
-                # Save the reduced model
-                state_dict = {key: model[key].state_dict() for key in model}
-                filepath = osp.join(log_dir, "model4tts.pth")
-                torch.save(state_dict, filepath)
-                logger.info("Reduced model saved to %s", filepath)
+    # if estimate sigma, save the estimated sigma to the config file
+    if epoch >= diff_epoch and cfg.model_params.diffusion.dist.estimate_sigma_data:
+        sigma_sum = inp_sigma_count * inp_sigma_data + np.sum(running_std)
+        sigma_count = inp_sigma_count + len(running_std)
+        cfg["model_params"]["diffusion"]["dist"]["sigma_data"] = float(sigma_sum / sigma_count)
 
-        except FileExistsError:
-            logger.warning(
-                "Symlink or file %s already exists => %s was not symlinked!",
-                final_model_symlink,
-                final_filepath,
-            )
-        except Exception as e:
-            logger.error("Error when reducing model: %s", e)
+        cfg_path = osp.join(log_dir, f"{cfg_name}.processed{cfg_ext}")
+        with open(cfg_path, "w", encoding="utf-8") as outfile:
+            yaml.dump(cfg, outfile, default_flow_style=False)
 
-        # If estimate sigma, save the estimated sigma to the config file
-        if epoch >= diff_epoch and cfg.model_params.diffusion.dist.estimate_sigma_data:
-            sigma_sum = inp_sigma_count * inp_sigma_data + np.sum(running_std)
-            sigma_count = inp_sigma_count + len(running_std)
-            cfg["model_params"]["diffusion"]["dist"]["sigma_data"] = float(sigma_sum / sigma_count)
+        logger.info("Estimated sigma: %f", cfg["model_params"]["diffusion"]["dist"]["sigma_data"])
 
-            cfg_path = osp.join(log_dir, f"{cfg_name}.processed{cfg_ext}")
-            with open(cfg_path, "w", encoding="utf-8") as outfile:
-                yaml.dump(cfg, outfile, default_flow_style=False)
+    # Ending work with NVIDIA NVLM
+    nvidia_smi.nvmlShutdown()
+    logger.info(
+        "Max VRAM usage: %d/%d GB (%.2f%%)",
+        max_vram,
+        total_vram,
+        max_vram / total_vram * 100,
+    )
+    logger.info("NVLM shutdown")
 
-            logger.info("Estimated sigma: %f", cfg.model_params.diffusion.dist.sigma_data)
-
-        # Ending work with NVIDIA NVLM
-        nvidia_smi.nvmlShutdown()
-        logger.info(
-            "Max VRAM usage: %d/%d GB (%.2f%%)",
-            max_vram,
-            total_vram,
-            max_vram / total_vram * 100,
-        )
-        logger.info("NVLM shutdown")
-
-        # End logging
-        wandb.finish()
+    # End logging
+    wandb.finish()
 
 
 if __name__ == "__main__":
