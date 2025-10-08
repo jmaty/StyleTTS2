@@ -761,6 +761,7 @@ def main():
                 {"eval/mel_loss": curr_loss},
                 step=iters,
             )
+            wb_logger.summary["max_vram"] = max_vram  # Log max VRAM usage per epoch
 
             # Generate validation samples
             with torch.no_grad():

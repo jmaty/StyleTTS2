@@ -67,6 +67,15 @@ def main():
     set_random_seed(cfg.seed)
     log_dir = cfg.log_dir
     os.makedirs(log_dir, exist_ok=True)
+    # Unified logging (console + file). Without Accelerate => logs this process.
+    log_file = args.log_file or osp.join(log_dir, "train.log")
+    setup_logging(args.log_level, log_file)
+    logger = get_logger(__name__)
+
+    # Basic checks
+    if cfg.slmadv_params.batch_percentage and not cfg.data_params.OOD_data:
+        raise ValueError("OOD data must be provided for SLM adversarial training.")
+
     # Initialize W&B first (it may add logging handlers); we'll override logging next
     wb_logger = wandb.init(
         project="StyleTTS2_cs",
@@ -74,11 +83,6 @@ def main():
         config=cfg,
         dir=log_dir,
     )
-
-    # Unified logging (console + file). Without Accelerate => logs this process.
-    log_file = args.log_file or osp.join(log_dir, "train.log")
-    setup_logging(args.log_level, log_file)
-    logger = get_logger(__name__)
 
     # Init NVLM
     nvidia_smi.nvmlInit()
@@ -1089,6 +1093,7 @@ def main():
             },
             step=iters,
         )
+        wb_logger.summary["max_vram"] = max_vram  # Log max VRAM usage per epoch
 
         # Generate validation samples
         n_val_samples = min(cfg.data_params.n_val_audios, bsize)
@@ -1251,8 +1256,6 @@ def main():
     # === End of training loop ================================================
 
     # === Final model saving ==================================================
-
-    wb_logger.summary["max_vram"] = max_vram
 
     # Save the final checkpoint
     final_filepath = model.save(
