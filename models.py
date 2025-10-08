@@ -1327,6 +1327,13 @@ class StyleTTS2:
     def model(self):
         return self._model
 
+    @model.setter
+    def model(self, value):
+        try:
+            self._model = munchify(value)
+        except (TypeError, AttributeError) as exc:
+            raise TypeError("Model must be a dictionary or Munch-compatible object") from exc
+
     @property
     def multispeaker(self):
         return self._params.multispeaker
@@ -1334,13 +1341,6 @@ class StyleTTS2:
     @property
     def slm(self):
         return self._params.slm
-
-    @model.setter
-    def model(self, value):
-        try:
-            self._model = munchify(value)
-        except (TypeError, AttributeError) as exc:
-            raise TypeError("Model must be a dictionary or Munch-compatible object") from exc
 
     def __getattr__(self, item):
         """
@@ -1419,6 +1419,10 @@ class StyleTTS2:
             bool: True if the key exists in self._model, False otherwise
         """
         return key in self._model
+
+    @property
+    def style_dim(self):
+        return self._params.style_dim
 
     def _build(self, args, text_aligner, pitch_extractor, bert):
         """
