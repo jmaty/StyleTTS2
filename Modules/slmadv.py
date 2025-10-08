@@ -126,7 +126,6 @@ class SLMAdversarialLoss(torch.nn.Module):
                 ).squeeze(1)
 
         s_dur = s_preds[:, 128:]
-        # s = s_preds[:, :128]
 
         # Predict durations
         d, _ = self.model.prosodic_predictor(
@@ -194,10 +193,18 @@ class SLMAdversarialLoss(torch.nn.Module):
 
         # Pre-allocate tensors with the calculated fixed length
         en = torch.empty(
-            bsize, asr_pred.shape[1], mel_len, device=asr_pred.device, dtype=asr_pred.dtype
+            bsize,
+            asr_pred.shape[1],
+            mel_len,
+            device=asr_pred.device,
+            dtype=asr_pred.dtype,
         )
         p_en = torch.empty(
-            bsize, p_pred.shape[1], mel_len, device=p_pred.device, dtype=p_pred.dtype
+            bsize,
+            p_pred.shape[1],
+            mel_len,
+            device=p_pred.device,
+            dtype=p_pred.dtype,
         )
         wav_gt = torch.empty(bsize, wav_len, device=p_pred.device, dtype=torch.float)
         # Predicted styles: 'voice' style (128) + prosodic style (128)
@@ -224,7 +231,7 @@ class SLMAdversarialLoss(torch.nn.Module):
             wav_gt[bidx] = waves[bidx][beg_idx:end_idx]
         # --- End of Pre-allocate Segment Extraction ---
 
-        f0_fake, n_fake = self.model.prosodic_predictor.F0Ntrain(p_en, sp[:, 128:])
+        f0_fake, n_fake = self.model.prosodic_predictor(p_en, sp[:, 128:], compute_f0=True)
         y_pred = self.model.decoder(en, f0_fake, n_fake, sp[:, :128])
 
         # discriminator loss
