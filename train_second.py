@@ -305,6 +305,7 @@ def main():
             batch_percentage=slmadv_params.batch_percentage,
             skip_update=slmadv_params.iter,
             sig=slmadv_params.sig,
+            hop_len=cfg.preprocess_params.spect_params.hop_length,
         )
         if slmadv_params.batch_percentage is not None
         else None
@@ -871,7 +872,7 @@ def main():
                     {
                         "train/mel_loss": loss_mel,
                         "train/gen_loss": loss_gen_all,
-                        "train/d_loss": loss_disc,
+                        "train/disc_loss": loss_disc,
                         "train/ce_loss": loss_ce,
                         "train/dur_loss": loss_dur,
                         "train/slm_loss": loss_lm,
