@@ -297,7 +297,8 @@ class SLMAdversarialLoss(torch.nn.Module):
 
             else:
                 loss_disc = self.wl.discriminator(
-                    wav.detach().squeeze(1), y_pred.detach().squeeze(1)
+                    wav.detach().squeeze(1),
+                    y_pred.detach().squeeze(1),
                 ).mean()
         else:
             loss_disc = 0
