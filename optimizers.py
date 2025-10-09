@@ -45,24 +45,25 @@ class MultiOptimizer:
         else:
             self.optimizers[key].step()
 
-        # # Optionally advance the LR scheduler exactly once per logical step.
-        # if step_scheduler:
-        #     # Some schedulers (e.g., OneCycleLR) have a fixed number of total_steps
-        #     # and raise if stepped beyond that. Guard against over-stepping so that
-        #     # auxiliary optimizer updates in the training loop do not crash training.
-        #     self.schedulers[key].step()
-
     def zero_grad(self, key=None):
         if key is not None:
             self.optimizers[key].zero_grad()
         else:
             _ = [self.optimizers[key].zero_grad() for key in self.keys]
 
+    # Not used
     def scheduler(self, *args, key=None):
         if key is not None:
-            self.schedulers[key].step(*args)
+            try:
+                self.schedulers[key].step(*args)
+            except KeyError:
+                logger.warning("Scheduler for key '%s' not found", key)
         else:
-            _ = [self.schedulers[key].step(*args) for key in self.keys]
+            for key in self.keys:
+                try:
+                    self.schedulers[key].step(*args)
+                except KeyError:
+                    logger.warning("Scheduler for key '%s' not found", key)
 
     def __setitem__(self, key, params_dict):
         """
@@ -106,20 +107,25 @@ class MultiOptimizer:
         return self.optimizers[key].param_groups[0]
 
 
-def define_scheduler(optimizer, params):
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr=params.get("max_lr", 2e-4),
-        epochs=params.get("epochs", 200),
-        steps_per_epoch=params.get("steps_per_epoch", 1000),
-        pct_start=params.get("pct_start", 0.0),
-        div_factor=params.get("div_factor", 1),
-        final_div_factor=params.get("final_div_factor", 1),
-    )
-    return scheduler
+# # Not used
+# def define_scheduler(optimizer, optimizer_params, epochs, steps_per_epoch):
+#     if optimizer_params.scheduler == "OneCycleLR":
+#         scheduler = torch.optim.lr_scheduler.OneCycleLR(
+#             optimizer,
+#             max_lr=optimizer_params.scheduler_params.max_lr,  # paper default: `lr`
+#             epochs=epochs,
+#             steps_per_epoch=steps_per_epoch,
+#             pct_start=optimizer_params.scheduler_params.pct_start,  # paper default: 0.0
+#             div_factor=optimizer_params.scheduler_params.div_factor,  # paper default: 1
+#             final_div_factor=optimizer_params.scheduler_params.final_div_factor,  # paper default: 1
+#             cycle_momentum=optimizer_params.scheduler_params.cycle_momentum,  # paper default: True
+#         )
+#     else:
+#         raise ValueError(f"Unsupported scheduler type: {optimizer_params.scheduler}")
+#     return scheduler
 
 
-def build_optimizer(parameters_dict, scheduler_params_dict, lr):
+def build_optimizer(param_dict, optimizer_params):
     """
     Builds a multi-optimizer with corresponding learning rate schedulers.
     Args:
@@ -132,12 +138,44 @@ def build_optimizer(parameters_dict, scheduler_params_dict, lr):
         MultiOptimizer: A wrapper containing all optimizers and their schedulers.
             Each optimizer is an AdamW instance with weight_decay=1e-4, betas=(0.0, 0.99), eps=1e-9.
     """
-    optim = {
-        k: AdamW(params, lr=lr, weight_decay=1e-4, betas=(0.0, 0.99), eps=1e-9)
-        for k, params in parameters_dict.items()
-    }
+    # raw_param_groups = {k: list(self._model[k].parameters()) for k in self._model}
 
-    schedulers = {k: define_scheduler(opt, scheduler_params_dict[k]) for k, opt in optim.items()}
+    # # Leave only parameters with requires_grad=True (default),
+    # parameters_filtered = {
+    #     k: [p for p in v if p.requires_grad] for k, v in raw_param_groups.items()
+    # }
 
+    # not_trainable_modules = [k for k, v in parameters_filtered.items() if len(v) == 0]
+    # parameters_dict = {k: v for k, v in param_groups.items() if v}
+
+    # Create optimizers
+    if optimizer_params.optimizer == "AdamW":
+        optim = {
+            k: AdamW(
+                params,
+                lr=optimizer_params.lr,  # paper default: 1e-4
+                weight_decay=optimizer_params.weight_decay,  # paper default: 1e-4
+                # paper default: (0.0, 0.99), but due to scheduling (0.85, 0.99) was actually used
+                betas=optimizer_params.betas,
+                eps=optimizer_params.eps,  # default: 1e-9
+            )
+            for k, params in param_dict.items()
+        }
+    else:
+        raise ValueError(f"Unsupported optimizer type: {optimizer_params.optimizer}")
+
+    # Create schedulers
+    schedulers = {}  # Schedulers are not used => learning rate is constant
+
+    # schedulers = {
+    #     k: define_scheduler(opt, optimizer_params, epochs, steps_per_epoch)
+    #     for k, opt in optim.items()
+    # }
+
+    logger.debug("Optimizers: %s", optim)
+    logger.debug("Schedulers: %s", schedulers)
+
+    # Combine into MultiOptimizer
     multi_optim = MultiOptimizer(optim, schedulers)
+
     return multi_optim

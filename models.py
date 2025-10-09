@@ -1327,6 +1327,13 @@ class StyleTTS2:
     def model(self):
         return self._model
 
+    @model.setter
+    def model(self, value):
+        try:
+            self._model = munchify(value)
+        except (TypeError, AttributeError) as exc:
+            raise TypeError("Model must be a dictionary or Munch-compatible object") from exc
+
     @property
     def multispeaker(self):
         return self._params.multispeaker
@@ -1334,13 +1341,6 @@ class StyleTTS2:
     @property
     def slm(self):
         return self._params.slm
-
-    @model.setter
-    def model(self, value):
-        try:
-            self._model = munchify(value)
-        except (TypeError, AttributeError) as exc:
-            raise TypeError("Model must be a dictionary or Munch-compatible object") from exc
 
     def __getattr__(self, item):
         """
@@ -1419,6 +1419,10 @@ class StyleTTS2:
             bool: True if the key exists in self._model, False otherwise
         """
         return key in self._model
+
+    @property
+    def style_dim(self):
+        return self._params.style_dim
 
     def _build(self, args, text_aligner, pitch_extractor, bert):
         """
@@ -1588,6 +1592,8 @@ class StyleTTS2:
                 "wd": WavDiscriminator(args.slm.hidden, args.slm.nlayers, args.slm.initial_channel),
             }
         )
+
+        logger.debug("StyleTTS2 model %s built successfully", self.keys())
 
     def to(self, device="cpu"):
         """
@@ -1807,56 +1813,60 @@ class StyleTTS2:
 
         return optimizer, epoch, iters
 
-    def params_for_optimizer(
-        self,
-        epochs,
-        steps_per_epoch,
-        optimizer_params,
-        optimizer_overrides=None,
-    ):
-        """
-        Prepares parameter groups and scheduler parameters for optimizer initialization.
-        This method filters out parameters that don't require gradients, handles speaker encoder
-        parameters according to training configuration, and applies custom learning rate
-        schedules per module.
-        Args:
-            epochs (int): Total number of training epochs.
-            optimizer_params (object): Base optimizer parameters containing at least 'lr'.
-            steps_per_epoch (int): Number of training steps per epoch.
-            optimizer_overrides (dict, optional): Dictionary of module-specific overrides for
-                                                 scheduler parameters. Defaults to None.
-        Returns:
-            tuple: A tuple containing:
-                - parameters_dict (dict): Dictionary mapping module names to their trainable parameters.
-                - scheduler_params_dict (dict): Dictionary mapping module names to their scheduler parameters.
-                - not_trainable_modules (list): List of module names that have no trainable parameters.
-        """
-        if optimizer_overrides is None:
-            optimizer_overrides = {}
+    # def params_for_optimizer(
+    #     self,
+    #     # epochs,
+    #     # steps_per_epoch,
+    #     # optimizer_params,
+    #     # optimizer_overrides=None,
+    # ):
+    #     """
+    #     Prepares parameter groups and scheduler parameters for optimizer initialization.
+    #     This method filters out parameters that don't require gradients, handles speaker encoder
+    #     parameters according to training configuration, and applies custom learning rate
+    #     schedules per module.
+    #     Args:
+    #         epochs (int): Total number of training epochs.
+    #         optimizer_params (object): Base optimizer parameters containing at least 'lr'.
+    #         steps_per_epoch (int): Number of training steps per epoch.
+    #         optimizer_overrides (dict, optional): Dictionary of module-specific overrides for
+    #                                              scheduler parameters. Defaults to None.
+    #     Returns:
+    #         tuple: A tuple containing:
+    #             - parameters_dict (dict): Dictionary mapping module names to their trainable parameters.
+    #             - scheduler_params_dict (dict): Dictionary mapping module names to their scheduler parameters.
+    #             - not_trainable_modules (list): List of module names that have no trainable parameters.
+    #     """
+    #     # if optimizer_overrides is None:
+    #     #     optimizer_overrides = {}
 
-        # Default common scheduler parameters
-        scheduler_params = {
-            "max_lr": optimizer_params.lr,
-            "pct_start": 0.0,
-            "epochs": epochs,
-            "steps_per_epoch": steps_per_epoch,
-        }
+    #     # # Default common scheduler parameters
+    #     # scheduler_params = munchify(
+    #     #     {
+    #     #         "max_lr": optimizer_params.max_lr,  # optimizer_params.lr
+    #     #         "pct_start": optimizer_params.pct_start,  # 0.0 for constant lr
+    #     #         "epochs": epochs,
+    #     #         "steps_per_epoch": steps_per_epoch,
+    #     #         "div_factor": optimizer_params.div_factor,  # 1 for constant lr
+    #     #         "final_div_factor": optimizer_params.final_div_factor,  # 1 for constant lr
+    #     #     }
+    #     # )
 
-        raw_param_groups = {k: list(self._model[k].parameters()) for k in self._model}
+    #     raw_param_groups = {k: list(self._model[k].parameters()) for k in self._model}
 
-        # Leave only parameters with requires_grad=True (default),
-        parameters_filtered = {
-            k: [p for p in v if p.requires_grad] for k, v in raw_param_groups.items()
-        }
+    #     # Leave only parameters with requires_grad=True (default),
+    #     parameters_filtered = {
+    #         k: [p for p in v if p.requires_grad] for k, v in raw_param_groups.items()
+    #     }
 
-        not_trainable_modules = [k for k, v in parameters_filtered.items() if len(v) == 0]
-        parameters_dict = {k: v for k, v in parameters_filtered.items() if v}
-        scheduler_params_dict = {k: scheduler_params.copy() for k in parameters_dict}
+    #     # not_trainable_modules = [k for k, v in parameters_filtered.items() if len(v) == 0]
+    #     parameters_dict = {k: v for k, v in parameters_filtered.items() if v}
+    #     # scheduler_params_dict = {k: scheduler_params.copy() for k in parameters_dict}
 
-        # Override default scheduler params if specified for any module
-        for k, uov in optimizer_overrides.items():
-            if k in scheduler_params_dict:
-                # Merge override values
-                scheduler_params_dict[k] = {**scheduler_params_dict[k], **uov}
+    #     # # Override default scheduler params if specified for any module
+    #     # for k, uov in optimizer_overrides.items():
+    #     #     if k in scheduler_params_dict:
+    #     #         # Merge override values
+    #     #         scheduler_params_dict[k] = {**scheduler_params_dict[k], **uov}
 
-        return parameters_dict, scheduler_params_dict, not_trainable_modules
+    #     return parameters_dict  # , scheduler_params_dict

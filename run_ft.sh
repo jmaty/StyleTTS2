@@ -13,26 +13,24 @@ INTB=Train_finetune.ipynb
 # QSUB ARGUMENTS
 MEM=128gb
 LSCRATCH=20gb
-NCPUS=8
+SCRATCH_TYPE="scratch-local"
+NCPUS=4
 NGPUS=1
 
+# WARNING: Current accelerate version does not support multi-gpu training => NGPUS=1 !!!
 if [[ "$#" -lt 1 ]]; then
-     printf "Usage: run_ft.sh pretrained_model [specification: iti dgx gpu<3-4>] [hours] [jobid]\n" >&2
+     printf "Usage: run_ft.sh config [specification: iti dgx gpu<3-4>] [hours] [jobid]\n" >&2
      exit 1
 fi
 
-PRETRAINED_MODEL=$1  # Path to the pretrained model
-# Set up experiment directory and config file:
-# - experiment directory is the directory of the pretrained model
-# - config file is the config2b.yml in the experiment directory
-EXPDIR=$(dirname $PRETRAINED_MODEL)
-
+CFG=$1
 # Check that config file exists
-CFG=$EXPDIR/config.yml
 if [[ ! -e $CFG ]]; then
-     printf "Config file $CFG does not exists!\n" >&2
+     printf "Config file $CFG does not exists!" >&2
      exit 1
 fi
+# Experimental directory set to the directory of the config file
+EXPDIR=$(dirname $CFG)
 
 if [[ "$#" -gt 1 ]]; then
      # specification to run on (iti, gdx, gpu<3-4>)
@@ -64,6 +62,7 @@ elif [[ $SPEC == "dgx" ]]; then
      # GDX queue: capy
      QUEUE="-q gpu_dgx"
      CLUSTER=""
+     SCRATCH_TYPE="scratch_ssd"
 elif [[ $SPEC == "gpu3" ]]; then
      # Any cluster with GPU memory > 40gb (zia, black)
      QUEUE="-q gpu"
@@ -72,21 +71,22 @@ elif [[ $SPEC == "gpu4" ]]; then
      # Any cluster with GPU memory > 80gb (bee)
      QUEUE="-q gpu"
      CLUSTER=":gpu_mem=80000mb"
+     SCRATCH_TYPE="scratch_ssd"
 else
      printf "Unsupported cluster/queue" >&2
      exit 1
 fi
 
-# Change GPU queue to gpu_long when number of hours is >24
+# Change GPU queue to gpu_long when number of hours is >48
 [[ $HOURS -gt 48 ]] && [[ $SPEC == gpu? ]] && QUEUE="${QUEUE}_long"
 
 # Select argument
-SELECT="-l select=1:ncpus=$NCPUS:mem=$MEM:scratch_local=$LSCRATCH:ngpus=$NGPUS$CLUSTER"
+SELECT="-l select=1:ncpus=$NCPUS:mem=$MEM:$SCRATCH_TYPE=$LSCRATCH:ngpus=$NGPUS$CLUSTER"
 # Walltime argument
 WALLTIME="-l walltime=$HOURS:00:00"
 
-# Extract name of the experiment
-EXP="$(basename $EXPDIR)"
+# Prepare name of the run
+EXP=$(basename $EXPDIR)
 
 # Timestep to differentiate among runs with the same run name
 TIMESTEP=$(date +"%y%m%d-%H%M%S")
@@ -96,6 +96,7 @@ SINGULARITY=/storage/plzen4-ntis/home/jmatouse/singularity/papermill_24.12-r8.sh
 # Set the log dir according to the input experiment directory
 # (the original log dir in the config file serves just as a placeholder)
 sed -i "/^log_dir:/c\log_dir: $EXPDIR" $CFG
+
 # Transfer sigma_data from stage2a to stage2b
 if [[ -e $EXPDIR/config.processed.yml ]]; then     
      sigma_data=$(grep -E '^[[:space:]]*sigma_data:' $EXPDIR/config.processed.yml)
@@ -106,7 +107,7 @@ fi
 # RUN TRAINING
 # -----------------------------------------------------------------------------
 OLOG=$EXPDIR/ft.$TIMESTEP.log
-ONTB=$EXPDIR/$(basename "$INTB" .ipynb).processed.$TIMESTEP.ipynb
+ONTB=$EXPDIR/ft.$TIMESTEP.ipynb
 
 # Run PBS script
 JOBID=$(qsub -N "$EXP" \

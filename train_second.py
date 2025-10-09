@@ -22,17 +22,23 @@ from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, cr
 from meldataset import build_dataloader
 from models import StyleTTS2, load_ASR_models, load_F0_models
 from Modules.diffusion.sampler import ADPM2Sampler, DiffusionSampler, KarrasSchedule
-from Modules.pts import PTS, set_random_seed
+from Modules.pts import PTS
 from Modules.slmadv import SLMAdversarialLoss
 from optimizers import build_optimizer
 from text_utils import TextCleaner
-from utils import get_data_path_list, length_to_mask, log_norm, maximum_path
+from utils import (
+    get_data_path_list,
+    length_to_mask,
+    log_norm,
+    maximum_path,
+    set_random_seed,
+    h100_fix,
+)
 from Utils.PLBERT.util import load_plbert
 
 warnings.simplefilter("ignore")
 
-# Disable TF32 computations for cuDNN
-torch.backends.cudnn.allow_tf32 = False
+h100_fix()  # Fix for H100 GPU
 
 
 # simple fix for dataparallel that allows access to class attributes
@@ -61,6 +67,15 @@ def main():
     set_random_seed(cfg.seed)
     log_dir = cfg.log_dir
     os.makedirs(log_dir, exist_ok=True)
+    # Unified logging (console + file). Without Accelerate => logs this process.
+    log_file = args.log_file or osp.join(log_dir, "train.log")
+    setup_logging(args.log_level, log_file)
+    logger = get_logger(__name__)
+
+    # Basic checks
+    if cfg.slmadv_params.batch_percentage and not cfg.data_params.OOD_data:
+        raise ValueError("OOD data must be provided for SLM adversarial training.")
+
     # Initialize W&B first (it may add logging handlers); we'll override logging next
     wb_logger = wandb.init(
         project="StyleTTS2_cs",
@@ -68,11 +83,6 @@ def main():
         config=cfg,
         dir=log_dir,
     )
-
-    # Unified logging (console + file). Without Accelerate => logs this process.
-    log_file = args.log_file or osp.join(log_dir, "train.log")
-    setup_logging(args.log_level, log_file)
-    logger = get_logger(__name__)
 
     # Init NVLM
     nvidia_smi.nvmlInit()
@@ -101,13 +111,10 @@ def main():
     logger.debug("Number of symbols: %d", len(text_cleaner))
     assert len(text_cleaner) == 81, f"Number of symbols must be 81 but it is {len(text_cleaner)}"
 
-    # Load utility models
-    # Load pretrained ASR model
-    text_aligner = load_ASR_models(cfg.ASR_path, cfg.ASR_config)
-    # Load pretrained F0 model
-    pitch_extractor = load_F0_models(cfg.F0_path)
-    # Load BERT model
-    plbert = load_plbert(cfg.PLBERT_dir)
+    # Load pretrained utility models
+    text_aligner = load_ASR_models(cfg.ASR_path, cfg.ASR_config)  # pretrained ASR model
+    pitch_extractor = load_F0_models(cfg.F0_path)  # pretrained F0 model
+    plbert = load_plbert(cfg.PLBERT_dir)  # pretrained phoneme-level BERT
 
     # Build model
     model = StyleTTS2(cfg.model_params, text_aligner, pitch_extractor, plbert)
@@ -169,7 +176,7 @@ def main():
     start_epoch = 0
     iters = 0
 
-    # Total number of steps given the batch size
+    # Total number of steps per epoch given the batch size
     steps_per_epoch = len(train_dataloader)
 
     load_pretrained = cfg.get("pretrained_model", "") != "" and cfg.get(
@@ -196,8 +203,7 @@ def main():
                     "diffusion",
                 ],
             )
-
-            # these epochs should be counted from the start epoch
+            # These epochs should be counted from the start epoch
             diff_epoch += start_epoch
             joint_epoch += start_epoch
             epochs += start_epoch
@@ -221,67 +227,38 @@ def main():
         clamp=False,
     )
 
-    # Build parameter groups for optimizer
-    # Optional per-module optimizer overrides from config
-    pre_optim_params = {
-        "bert": {"max_lr": cfg.optimizer_params.bert_lr * 2},
-        "decoder": {"max_lr": cfg.optimizer_params.ft_lr * 2},
-        "acoustic_style_encoder": {"max_lr": cfg.optimizer_params.ft_lr * 2},
-    }
-
-    parameters_dict, scheduler_params_dict, not_trainable_modules = model.params_for_optimizer(
-        epochs,
-        steps_per_epoch,
-        cfg.optimizer_params,
-        optimizer_overrides=pre_optim_params,
-    )
-    logger.info("Optimizer groups: %s", list(parameters_dict.keys()))
-    logger.info("Not trainable modules: %s", not_trainable_modules)
-    logger.debug("Scheduler parameters: %s", scheduler_params_dict)
+    # # Build parameter groups for optimizer
+    # # Optional per-module optimizer overrides from config
+    # pre_optim_params = {
+    #     "bert": {"max_lr": cfg.optimizer_params.bert_lr * 2},
+    #     "decoder": {"max_lr": cfg.optimizer_params.ft_lr * 2},
+    #     "acoustic_style_encoder": {"max_lr": cfg.optimizer_params.ft_lr * 2},
+    # }
 
     # Create optimizer
     optimizer = build_optimizer(
-        parameters_dict,
-        scheduler_params_dict,
-        cfg.optimizer_params.lr,
+        {k: list(model[k].parameters()) for k in model},  # modules to optimize
+        cfg.optimizer_params,
     )
 
     # Adjust optimizers for specific modules
-    post_optim_params = {
+    refined_optim_params = {
         "bert": {
             "lr": cfg.optimizer_params.bert_lr,
-            "betas": (0.9, 0.99),
-            "weight_decay": 0.01,
-            "initial_lr": cfg.optimizer_params.bert_lr,
-            "min_lr": 0,
+            "betas": cfg.optimizer_params.bert_betas,
+            "weight_decay": cfg.optimizer_params.bert_weight_decay,
         },
-        "decoder": {
+        "ft": {
             "lr": cfg.optimizer_params.ft_lr,
-            "betas": (0.0, 0.99),
-            "weight_decay": 1e-4,
-            "initial_lr": cfg.optimizer_params.ft_lr,
-            "min_lr": 0,
-        },
-        # "prosodic_style_encoder": {
-        #     "lr": cfg.optimizer_params.ft_lr,
-        #     "betas": (0.0, 0.99),
-        #     "weight_decay": 1e-4,
-        #     "initial_lr": cfg.optimizer_params.ft_lr,
-        #     "min_lr": 0,
-        # },
-        "acoustic_style_encoder": {
-            "lr": cfg.optimizer_params.ft_lr,
-            "betas": (0.0, 0.99),
-            "weight_decay": 1e-4,
-            "initial_lr": cfg.optimizer_params.ft_lr,
-            "min_lr": 0,
+            "betas": cfg.optimizer_params.ft_betas,
+            "weight_decay": cfg.optimizer_params.ft_weight_decay,
         },
     }
 
-    optimizer["bert"] = post_optim_params["bert"]
-    optimizer["decoder"] = post_optim_params["decoder"]
-    # optimizer["prosodic_style_encoder"] = post_optim_params["prosodic_style_encoder"]
-    optimizer["acoustic_style_encoder"] = post_optim_params["acoustic_style_encoder"]
+    optimizer["bert"] = refined_optim_params["bert"]
+    optimizer["decoder"] = refined_optim_params["ft"]
+    # optimizer["prosodic_style_encoder"] = refined_optim_params["ft"]
+    optimizer["acoustic_style_encoder"] = refined_optim_params["ft"]
 
     logger.debug("Optimizer: %s", optimizer.optimizers)
 
@@ -316,6 +293,7 @@ def main():
     # Count of processed epochs stored
     inp_sigma_count = start_epoch - diff_epoch if start_epoch > diff_epoch else 0
 
+    # SLM Adversarial Loss
     slmadv_params = cfg.slmadv_params
     slmadv = (
         SLMAdversarialLoss(
@@ -327,6 +305,7 @@ def main():
             batch_percentage=slmadv_params.batch_percentage,
             skip_update=slmadv_params.iter,
             sig=slmadv_params.sig,
+            hop_len=cfg.preprocess_params.spect_params.hop_length,
         )
         if slmadv_params.batch_percentage is not None
         else None
@@ -644,7 +623,7 @@ def main():
             y_rec = model.decoder(ph_algn, f0_fake, n_fake, acoust_style)
 
             # Calculate losses using the extracted/generated segments
-            loss_f0_rec = (F.smooth_l1_loss(f0_real, f0_fake)) / 10
+            loss_f0_rec = F.smooth_l1_loss(f0_real, f0_fake) / 10
             loss_norm_rec = F.smooth_l1_loss(n_real, n_fake)
 
             # --- Discriminator loss ---
@@ -669,6 +648,11 @@ def main():
             loss_gen_all = gl(wav_gt, y_rec).mean() if epoch >= diff_epoch else 0
             loss_lm = wl(wav_gt.detach().squeeze(), y_rec.squeeze()).mean()
 
+            # Duration and alignment losses for phoneme-to-mel mapping
+            # For each sample in batch:
+            #   - Create target alignment matrix (1 for frames belonging to each phoneme)
+            #   - loss_dur: L1 between predicted and GT durations (excluding boundary phonemes)
+            #   - loss_ce: BCE between predicted alignment logits and target binary matrix
             loss_ce, loss_dur = 0, 0
             for _s2s_pred, _text_input, _text_length in zip(d, (d_gt), ph_inp_lens):
                 _s2s_pred = _s2s_pred[:_text_length, :]
@@ -837,6 +821,7 @@ def main():
             # Increment global step counter
             iters += 1
 
+            # Log training progress
             if (batch_idx + 1) % cfg.log_interval == 0:
                 loss_mel = running_loss / cfg.log_interval
                 logger.info(
@@ -887,7 +872,7 @@ def main():
                     {
                         "train/mel_loss": loss_mel,
                         "train/gen_loss": loss_gen_all,
-                        "train/d_loss": loss_disc,
+                        "train/disc_loss": loss_disc,
                         "train/ce_loss": loss_ce,
                         "train/dur_loss": loss_dur,
                         "train/slm_loss": loss_lm,
@@ -895,7 +880,7 @@ def main():
                         "train/F0_loss": loss_f0_rec,
                         "train/sty_loss": loss_sty,
                         "train/diff_loss": loss_diff,
-                        "train/d_loss_slm": loss_disc_slm,
+                        "train/disc_slm_loss": loss_disc_slm,
                         "train/gen_loss_slm": loss_gen_lm,
                         "train/curr_vram": curr_vram,
                         "train/max_vram": max_vram,
@@ -1110,6 +1095,7 @@ def main():
             },
             step=iters,
         )
+        wb_logger.summary["max_vram"] = max_vram  # Log max VRAM usage per epoch
 
         # Generate validation samples
         n_val_samples = min(cfg.data_params.n_val_audios, bsize)

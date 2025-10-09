@@ -20,16 +20,23 @@ from logger import add_logging_args, get_logger, setup_logging
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, create_slm_loss
 from meldataset import build_dataloader
 from models import StyleTTS2, load_ASR_models, load_F0_models
-from Modules.pts import PTS, set_random_seed
+from Modules.pts import PTS
 from optimizers import build_optimizer
 from text_utils import TextCleaner
-from utils import get_data_path_list, length_to_mask, log_norm, maximum_path, nccl_warmup
+from utils import (
+    get_data_path_list,
+    length_to_mask,
+    log_norm,
+    maximum_path,
+    nccl_warmup,
+    set_random_seed,
+    h100_fix,
+)
 from Utils.PLBERT.util import load_plbert
 
 warnings.simplefilter("ignore")
 
-# Disable TF32 computations for cuDNN
-torch.backends.cudnn.allow_tf32 = False
+h100_fix()  # Fix for H100 GPU
 
 
 def main():
@@ -119,10 +126,11 @@ def main():
         plbert = load_plbert(cfg.PLBERT_dir)
 
     # Initialize StyleTTS2 model
-    logger.info("Building StyleTTS2 model...")
     model = StyleTTS2(cfg.model_params, text_aligner, pitch_extractor, plbert)
+    logger.info("StyleTTS2 model built with %s", model.keys())
 
-    bert_size = model.bert.config.max_position_embeddings  # ALBERT config
+    # Extract BERT size from ALBERT config
+    bert_size = model.bert.config.max_position_embeddings
 
     # Prepare model for distributed training
     for k in model:
@@ -188,23 +196,11 @@ def main():
     # Move models to device (cuda)
     model.to(device)
 
-    # Create optimizers and schedulers parameters for each module
-    parameters_dict, scheduler_params_dict, not_trainable_modules = model.params_for_optimizer(
-        epochs,
-        updates_per_epoch,
-        cfg.optimizer_params,
-    )
-    logger.info("Optimizer groups: %s", list(parameters_dict.keys()))
-    logger.info("Not trainable modules: %s", not_trainable_modules)
-    logger.debug("Scheduler parameters: %s", scheduler_params_dict)
-
     # Build combined optimizer and schedulers
     optimizer = build_optimizer(
-        parameters_dict,
-        scheduler_params_dict,
-        cfg.optimizer_params.lr,
+        {k: list(model[k].parameters()) for k in model},  # modules to optimize
+        cfg.optimizer_params,
     )
-    logger.debug("Optimizer: %s", optimizer.optimizers)
 
     # Prepare optimizers and schedulers for distributed training - safe variant
     optimizer.optimizers = {k: acc.prepare(v) for k, v in optimizer.optimizers.items()}
@@ -766,6 +762,7 @@ def main():
                 {"eval/mel_loss": curr_loss},
                 step=iters,
             )
+            wb_logger.summary["max_vram"] = max_vram  # Log max VRAM usage per epoch
 
             # Generate validation samples
             with torch.no_grad():
@@ -818,6 +815,8 @@ def main():
         acc.wait_for_everyone()
 
     if acc.is_main_process:
+        wb_logger.summary["max_vram"] = max_vram
+
         # Save final 1st stage model
         final_filepath = model.save(
             optimizer,
