@@ -64,7 +64,12 @@ def main():
         torch.cuda.set_device(local_rank)
 
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
-    acc = Accelerator(project_dir=log_dir, split_batches=True, kwargs_handlers=[ddp_kwargs])
+    acc = Accelerator(
+        project_dir=log_dir,
+        split_batches=True,
+        gradient_accumulation_steps=cfg.grad_accum_steps,
+        kwargs_handlers=[ddp_kwargs],
+    )
 
     # NCCL warm-up
     nccl_warmup(device=getattr(acc, "device", None), local_rank=local_rank)
@@ -136,6 +141,16 @@ def main():
     for k in model:
         model[k] = acc.prepare(model[k])
 
+    # Build combined optimizer and schedulers
+    optimizer = build_optimizer(
+        {k: list(model[k].parameters()) for k in model},  # modules to optimize
+        cfg.optimizer_params,
+    )
+
+    # Prepare optimizers and schedulers for distributed training - safe variant
+    optimizer.optimizers = {k: acc.prepare(v) for k, v in optimizer.optimizers.items()}
+    optimizer.schedulers = {k: acc.prepare(v) for k, v in optimizer.schedulers.items()}
+
     # Load data
     train_list, val_list = get_data_path_list(cfg.data_params.train_data, cfg.data_params.val_data)
 
@@ -193,19 +208,6 @@ def main():
     # Number of update-steps per epoch (accounts for grad accumulation)
     updates_per_epoch = int(np.ceil(steps_per_epoch / max(1, cfg.grad_accum_steps)))
 
-    # Move models to device (cuda)
-    model.to(device)
-
-    # Build combined optimizer and schedulers
-    optimizer = build_optimizer(
-        {k: list(model[k].parameters()) for k in model},  # modules to optimize
-        cfg.optimizer_params,
-    )
-
-    # Prepare optimizers and schedulers for distributed training - safe variant
-    optimizer.optimizers = {k: acc.prepare(v) for k, v in optimizer.optimizers.items()}
-    optimizer.schedulers = {k: acc.prepare(v) for k, v in optimizer.schedulers.items()}
-
     # Load model weights
     with acc.main_process_first():
         if cfg.get("pretrained_model", "") != "":
@@ -225,14 +227,14 @@ def main():
             iters = 0
         logger.info("")
 
-    # in case not distributed computing
+    # In case not distributed computing
     try:
         n_down = model.text_aligner.module.n_down
     except AttributeError:
         logger.warning("Distributed computing NOT used")
         n_down = model.text_aligner.n_down
 
-    # wrapped losses for compatibility with mixed precision
+    # Wrapped losses for compatibility with mixed precision
     stft_loss = MultiResolutionSTFTLoss().to(device)
     gl = GeneratorLoss(model.mpd, model.msd).to(device)
     dl = DiscriminatorLoss(model.mpd, model.msd).to(device)
@@ -287,6 +289,7 @@ def main():
         start_time = time.time()
         train_dataloader.batch_sampler.epoch = epoch  # Set epoch for the sampler
         updates_at_epoch_start = updates
+        updates_at_last_log = updates  # Track updates for loss averaging
 
         # Models in train mode from the beginning
         train_components = [
@@ -308,8 +311,6 @@ def main():
         # Train loop for each epoch
         for batch_idx, batch in enumerate(train_dataloader):
             waves = batch[0]  # Keep ground truth audio
-            # Move other batch tensors to device
-            batch = [b.to(device) for b in batch[1:]]
             # Keep individual batch tensors
             (
                 phonemes,  # Padded input phoneme IDs [B, T_text]
@@ -319,7 +320,7 @@ def main():
                 mels,  # Padded mel spectrograms [B, n_mels, T_mel]
                 mel_inp_len,  # Mel spectrogram lengths [B]
                 _,  # Reference mel spectrograms not used in 1st stage
-            ) = batch
+            ) = batch[1:]
 
             # Generate masks for text and mel spectrograms
             with torch.no_grad():
@@ -472,19 +473,20 @@ def main():
             if epoch >= tma_epoch:
                 # Compute decoder's discriminator loss
                 loss_disc = dl(wav_gt.detach().unsqueeze(1).float(), y_rec.detach()).mean()
-                loss_disc = loss_disc / cfg.grad_accum_steps  # JMa: normalize loss
-                # JMa: Compute gradients only for discriminators
-                acc.backward(
-                    loss_disc,
-                    inputs=list(model.mpd.parameters()) + list(model.msd.parameters()),
-                )
-                # JMa: Gradient accumulation
-                if (batch_idx + 1) % cfg.grad_accum_steps == 0:
-                    # JMa: gradient clipping
+
+                # Use Accelerate's accumulate context manager for proper gradient accumulation
+                with acc.accumulate(model.mpd, model.msd):
+                    # JMa: Compute gradients only for discriminators
+                    acc.backward(
+                        loss_disc,
+                        inputs=list(model.mpd.parameters()) + list(model.msd.parameters()),
+                    )
+
+                    # Gradient clipping
                     if cfg.grad_clip:
-                        _ = [
-                            acc.clip_grad_norm_(model[k].parameters(), cfg.grad_clip) for k in model
-                        ]
+                        acc.clip_grad_norm_(model.mpd.parameters(), cfg.grad_clip)
+                        acc.clip_grad_norm_(model.msd.parameters(), cfg.grad_clip)
+
                     optimizer.step("msd")
                     optimizer.step("mpd")
                     optimizer.zero_grad("msd")
@@ -516,7 +518,7 @@ def main():
                 loss_slm = wl(wav_gt.detach(), y_rec).mean()
 
                 # Final generator loss is a weighted sum of the above losses
-                g_loss = (
+                loss_gen = (
                     cfg.loss_params.lambda_mel * loss_mel
                     + cfg.loss_params.lambda_mono * loss_mono
                     + cfg.loss_params.lambda_s2s * loss_s2s
@@ -529,27 +531,32 @@ def main():
                 loss_mono = 0
                 loss_gen_all = 0
                 loss_slm = 0
-                g_loss = loss_mel
+                loss_gen = loss_mel
 
-            g_loss = g_loss / cfg.grad_accum_steps  # JMa: normalize loss
-            # JMa: Compute gradients only for generator
-            inputs = (
-                list(model.decoder.parameters())
-                + list(model.acoustic_style_encoder.parameters())
-                + list(model.text_encoder.parameters())
-            )
+            # Prepare models for gradient accumulation
+            models_to_accumulate = [model.decoder, model.acoustic_style_encoder, model.text_encoder]
             if epoch >= tma_epoch:
-                inputs += list(model.text_aligner.parameters())
-            acc.backward(g_loss, inputs=inputs)
+                models_to_accumulate.append(model.text_aligner)
 
-            # Accumulate mean mel-spectrogram loss (over all GPUs) across batches for logging
-            running_loss += acc.gather(loss_mel).mean().item()
+            # Use Accelerate's accumulate context manager for proper gradient accumulation
+            with acc.accumulate(*models_to_accumulate):
+                # JMa: Compute gradients only for generator
+                inputs = (
+                    list(model.decoder.parameters())
+                    + list(model.acoustic_style_encoder.parameters())
+                    + list(model.text_encoder.parameters())
+                )
+                if epoch >= tma_epoch:
+                    inputs += list(model.text_aligner.parameters())
+                acc.backward(loss_gen, inputs=inputs)
 
-            # JMa: Gradient accumulation
-            if (batch_idx + 1) % cfg.grad_accum_steps == 0:
-                # JMa: gradient clipping
+                # Gradient clipping
                 if cfg.grad_clip:
-                    _ = [acc.clip_grad_norm_(model[k].parameters(), cfg.grad_clip) for k in model]
+                    acc.clip_grad_norm_(model.text_encoder.parameters(), cfg.grad_clip)
+                    acc.clip_grad_norm_(model.acoustic_style_encoder.parameters(), cfg.grad_clip)
+                    acc.clip_grad_norm_(model.decoder.parameters(), cfg.grad_clip)
+                    if epoch >= tma_epoch:
+                        acc.clip_grad_norm_(model.text_aligner.parameters(), cfg.grad_clip)
 
                 optimizer.step("text_encoder")
                 optimizer.step("acoustic_style_encoder")
@@ -563,13 +570,20 @@ def main():
 
                 # Zero all gradients
                 optimizer.zero_grad()
-                updates += 1  # Increment update counter
+
+            # Accumulate mean mel-spectrogram loss (over all GPUs) across batches for logging
+            # Only accumulate when gradients are synced (actual update step)
+            if acc.sync_gradients:
+                running_loss += acc.gather(loss_mel).mean().item()
+                updates += 1  # Increment update counter only when gradients are actually applied
 
             iters += 1  # Increment iteration counter
 
             # Log training progress
             if (batch_idx + 1) % cfg.log_interval == 0:
-                loss_mel = running_loss / cfg.log_interval
+                # Calculate average loss based on number of actual updates since last log
+                num_updates_since_log = updates - updates_at_last_log
+                avg_loss_mel = running_loss / max(1, num_updates_since_log)
                 curr_updates = min(updates - updates_at_epoch_start, updates_per_epoch)
                 logger.info(
                     "Epoch [%3d/%d], Step [%4d/%d], Upd [%4d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f",
@@ -579,7 +593,7 @@ def main():
                     steps_per_epoch,
                     curr_updates,
                     updates_per_epoch,
-                    loss_mel,
+                    avg_loss_mel,
                     loss_gen_all,
                     loss_disc,
                     loss_mono,
@@ -601,7 +615,7 @@ def main():
 
                     wb_logger.log(
                         {
-                            "train/mel_loss": loss_mel,
+                            "train/mel_loss": avg_loss_mel,
                             "train/gen_loss": loss_gen_all,
                             "train/disc_loss": loss_disc,
                             "train/mono_loss": loss_mono,
@@ -623,6 +637,7 @@ def main():
                     logger.info("Time elapsed: %.2f seconds", time.time() - start_time)
 
                 running_loss = 0  # Reset running loss for next log interval
+                updates_at_last_log = updates  # Update checkpoint for next interval
 
         # === Start of validation part ==============================================
 
