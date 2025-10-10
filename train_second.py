@@ -28,11 +28,12 @@ from optimizers import build_optimizer
 from text_utils import TextCleaner
 from utils import (
     get_data_path_list,
+    h100_fix,
+    is_finite_loss,
     length_to_mask,
     log_norm,
     maximum_path,
     set_random_seed,
-    h100_fix,
 )
 from Utils.PLBERT.util import load_plbert
 
@@ -705,6 +706,10 @@ def main():
                     nn.utils.clip_grad_norm_(model.diffusion.parameters(), cfg.grad_clip)
                 optimizer.step("diffusion")
 
+            # Initialize SLM adversarial losses to 0 by default for the case when
+            # SLM adversarial training is not performed
+            loss_disc_slm, loss_gen_lm = 0, 0
+
             if epoch >= joint_epoch:
                 if cfg.grad_clip:
                     nn.utils.clip_grad_norm_(
@@ -719,10 +724,10 @@ def main():
                 optimizer.step("acoustic_style_encoder")
                 optimizer.step("decoder")
 
-                if slmadv is not None:  # None means no SLM discriminator training
-                    # Do SLM discriminator training
+                if slmadv is not None:
+                    # --- Start SLM adversarial training ---
 
-                    # randomly pick whether to use in-distribution text
+                    # Randomly pick whether to use in-distribution text
                     use_ind = np.random.rand() < 0.5
 
                     if use_ind:
@@ -742,81 +747,92 @@ def main():
                         ref_style if model.multispeaker else None,
                     )
 
-                    if slm_out is None:
+                    if slm_out is not None:
+                        loss_disc_slm, loss_gen_lm, _ = slm_out
+
+                        # Check for NaN/Inf in SLM losses - skip SLM training if detected
+                        # to prevent gradient contamination
+                        if is_finite_loss(loss_disc_slm) and is_finite_loss(loss_gen_lm):
+                            # SLM generator loss
+                            optimizer.zero_grad()
+                            loss_gen_lm.backward()
+                            # JMa: gradient clipping
+                            if cfg.grad_clip:
+                                nn.utils.clip_grad_norm_(
+                                    model.bert_encoder.parameters(), cfg.grad_clip
+                                )
+                                nn.utils.clip_grad_norm_(model.bert.parameters(), cfg.grad_clip)
+                                nn.utils.clip_grad_norm_(
+                                    model.prosodic_predictor.parameters(),
+                                    cfg.grad_clip,
+                                )
+                                nn.utils.clip_grad_norm_(
+                                    model.diffusion.parameters(), cfg.grad_clip
+                                )
+
+                            # compute the gradient norm
+                            total_norm = {}
+                            for name, module in model.items():
+                                sq_sum = 0.0
+                                for p in module.parameters():
+                                    if p.grad is not None and p.requires_grad:
+                                        param_norm = p.grad.detach().data.norm(2)
+                                        sq_sum += param_norm.item() ** 2
+                                total_norm[name] = sq_sum**0.5
+
+                            # gradient scaling
+                            if total_norm.get("prosodic_predictor", 0) > slmadv_params.thresh:
+                                scale = 1 / total_norm["prosodic_predictor"]
+                                for module in model.values():
+                                    for p in module.parameters():
+                                        if p.grad is not None:
+                                            p.grad *= scale
+
+                            for p_algn in model.prosodic_predictor.duration_proj.parameters():
+                                if p_algn.grad is not None:
+                                    p_algn.grad *= slmadv_params.scale
+
+                            for p_algn in model.prosodic_predictor.lstm.parameters():
+                                if p_algn.grad is not None:
+                                    p_algn.grad *= slmadv_params.scale
+
+                            for p_algn in model.diffusion.parameters():
+                                if p_algn.grad is not None:
+                                    p_algn.grad *= slmadv_params.scale
+
+                            # Auxiliary optimizer updates for SLM: do not step schedulers
+                            optimizer.step("bert_encoder")
+                            optimizer.step("bert")
+                            optimizer.step("prosodic_predictor")
+                            optimizer.step("diffusion")
+
+                            # SLM discriminator loss
+                            if loss_disc_slm != 0:
+                                optimizer.zero_grad()
+                                # Note: `retain_graph=True` not needed - discriminator backward
+                                # is independent after generator optimizer step completed
+                                loss_disc_slm.backward()
+                                # Gradient clipping
+                                if cfg.grad_clip:
+                                    nn.utils.clip_grad_norm_(model.wd.parameters(), cfg.grad_clip)
+                                optimizer.step("wd")
+                        else:
+                            logger.warning(
+                                "Non-finite SLM loss detected at batch %d, iteration %d "
+                                "(disc=%s, gen=%s) => skipping SLM update for this batch",
+                                batch_idx,
+                                iters,
+                                loss_disc_slm,
+                                loss_gen_lm,
+                            )
+                            loss_disc_slm, loss_gen_lm = 0, 0
+
+                    else:
                         logger.warning(
-                            "SLM discriminator training not performed => skipping batch %d",
+                            "slmadv returned None at batch %d => skipping SLM training "
+                            "for this batch",
                             batch_idx,
                         )
-                        # Clean up memory
-                        del slm_out, y_rec_gt, y_rec_gt_pred, target_style
-                        torch.cuda.empty_cache()
-                        continue
-
-                    loss_disc_slm, loss_gen_lm, _ = slm_out
-
-                    # SLM generator loss
-                    optimizer.zero_grad()
-                    loss_gen_lm.backward()
-                    # JMa: gradient clipping
-                    if cfg.grad_clip:
-                        nn.utils.clip_grad_norm_(model.bert_encoder.parameters(), cfg.grad_clip)
-                        nn.utils.clip_grad_norm_(model.bert.parameters(), cfg.grad_clip)
-                        nn.utils.clip_grad_norm_(
-                            model.prosodic_predictor.parameters(),
-                            cfg.grad_clip,
-                        )
-                        nn.utils.clip_grad_norm_(model.diffusion.parameters(), cfg.grad_clip)
-
-                    # compute the gradient norm
-                    total_norm = {}
-                    for name, module in model.items():
-                        sq_sum = 0.0
-                        for p in module.parameters():
-                            if p.grad is not None and p.requires_grad:
-                                param_norm = p.grad.detach().data.norm(2)
-                                sq_sum += param_norm.item() ** 2
-                        total_norm[name] = sq_sum**0.5
-
-                    # gradient scaling
-                    if total_norm.get("prosodic_predictor", 0) > slmadv_params.thresh:
-                        scale = 1 / total_norm["prosodic_predictor"]
-                        for module in model.values():
-                            for p in module.parameters():
-                                if p.grad is not None:
-                                    p.grad *= scale
-
-                    for p_algn in model.prosodic_predictor.duration_proj.parameters():
-                        if p_algn.grad is not None:
-                            p_algn.grad *= slmadv_params.scale
-
-                    for p_algn in model.prosodic_predictor.lstm.parameters():
-                        if p_algn.grad is not None:
-                            p_algn.grad *= slmadv_params.scale
-
-                    for p_algn in model.diffusion.parameters():
-                        if p_algn.grad is not None:
-                            p_algn.grad *= slmadv_params.scale
-
-                    # Auxiliary optimizer updates for SLM: do not step schedulers
-                    optimizer.step("bert_encoder")
-                    optimizer.step("bert")
-                    optimizer.step("prosodic_predictor")
-                    optimizer.step("diffusion")
-
-                    # SLM discriminator loss
-                    if loss_disc_slm != 0:
-                        optimizer.zero_grad()
-                        # d_loss_slm.backward(retain_graph=True)
-                        loss_disc_slm.backward()
-                        # JMa: gradient clipping
-                        if cfg.grad_clip:
-                            nn.utils.clip_grad_norm_(model.wd.parameters(), cfg.grad_clip)
-                        optimizer.step("wd")
-                else:
-                    # SLM discriminator training is not used
-                    loss_disc_slm, loss_gen_lm = 0, 0  # zero loss if not using SLM
-            else:  # epoch < joint_epoch
-                loss_disc_slm, loss_gen_lm = 0, 0  # zero loss if not joint training
 
             # Increment global step counter
             iters += 1
