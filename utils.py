@@ -40,6 +40,21 @@ def set_random_seed(seed, deterministic=False):
         torch.backends.cudnn.benchmark = False
 
 
+def is_finite_loss(loss):
+    """Check if loss is finite (not NaN or Inf).
+
+    Args:
+        loss: Loss value to check (torch.Tensor or scalar)
+
+    Returns:
+        bool: True if loss is finite, False otherwise
+    """
+    if isinstance(loss, torch.Tensor):
+        return torch.isfinite(loss).all().item()
+    # Handle scalar (when loss is 0 or other numeric value)
+    return not (loss != loss or abs(loss) == float("inf"))
+
+
 def maximum_path(neg_cent, mask):
     """Cython optimized version.
     neg_cent: [b, t_t, t_s]

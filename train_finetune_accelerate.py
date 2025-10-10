@@ -31,6 +31,7 @@ from text_utils import TextCleaner
 from utils import (
     get_data_path_list,
     h100_fix,
+    is_finite_loss,
     length_to_mask,
     log_norm,
     maximum_path,
@@ -104,7 +105,7 @@ def main():
     logger.info("NVLM initialized")
 
     # Set up epochs
-    epochs = cfg.epochs.total  # total epochs
+    epochs = cfg.epochs.stage2  # total epochs
     diff_epoch = cfg.epochs.diff  # diffusion epoch
     joint_epoch = cfg.epochs.joint  # joint training epoch
 
@@ -734,11 +735,14 @@ def main():
                     acc.clip_grad_norm_(model.diffusion.parameters(), cfg.grad_clip)
                 optimizer.step("diffusion")
 
+            # Initialize SLM adversarial losses to 0 by default for the case when
+            # SLM adversarial training is not performed
             loss_disc_slm, loss_gen_lm = 0, 0
 
             if epoch >= joint_epoch:
 
-                if slmadv is not None:  # None means no SLM discriminator training
+                if slmadv is not None:
+                    # --- Start SLM adversarial training ---
 
                     # Randomly pick whether to use in-distribution text
                     use_ind = np.random.rand() < 0.5
@@ -763,95 +767,84 @@ def main():
                     if slm_out is not None:
                         loss_disc_slm, loss_gen_lm, _ = slm_out
 
-                        # # Check for NaN in SLM losses
-                        # if isinstance(loss_disc_slm, torch.Tensor) and torch.isnan(loss_disc_slm):
-                        #     logger.warning(
-                        #         "NaN detected in loss_disc_slm at batch %d, iteration %d => skipping SLM training",
-                        #         batch_idx, iters
-                        #     )
-                        #     loss_disc_slm = 0
-                        #     loss_gen_lm = 0
-                        #     del slm_out, y_rec_gt, y_rec_gt_pred, target_style
-                        #     torch.cuda.empty_cache()
-                        #     continue
-
-                        # if torch.isnan(loss_gen_lm):
-                        #     logger.warning(
-                        #         "NaN detected in loss_gen_lm at batch %d, iteration %d => skipping SLM training",
-                        #         batch_idx, iters
-                        #     )
-                        #     loss_disc_slm = 0
-                        #     loss_gen_lm = 0
-                        #     del slm_out, y_rec_gt, y_rec_gt_pred, target_style
-                        #     torch.cuda.empty_cache()
-                        #     continue
-
-                        # SLM generator loss
-                        optimizer.zero_grad()
-                        acc.backward(loss_gen_lm)
-
-                        # JMa: gradient clipping
-                        if cfg.grad_clip:
-                            acc.clip_grad_norm_(model.bert_encoder.parameters(), cfg.grad_clip)
-                            acc.clip_grad_norm_(model.bert.parameters(), cfg.grad_clip)
-                            acc.clip_grad_norm_(
-                                model.prosodic_predictor.parameters(), cfg.grad_clip
-                            )
-                            acc.clip_grad_norm_(model.diffusion.parameters(), cfg.grad_clip)
-
-                        # Compute the gradient norm
-                        total_norm = {}
-                        for name, module in model.items():
-                            sq_sum = 0.0
-                            for p in module.parameters():
-                                if p.grad is not None and p.requires_grad:
-                                    param_norm = p.grad.detach().data.norm(2)
-                                    sq_sum += param_norm.item() ** 2
-                            total_norm[name] = sq_sum**0.5
-
-                        # Gradient scaling
-                        if total_norm.get("prosodic_predictor", 0) > slmadv_params.thresh:
-                            scale = 1 / total_norm["prosodic_predictor"]
-                            for module in model.values():
-                                for p in module.parameters():
-                                    if p.grad is not None:
-                                        p.grad *= scale
-
-                        for p_algn in model.prosodic_predictor.duration_proj.parameters():
-                            if p_algn.grad is not None:
-                                p_algn.grad *= slmadv_params.scale
-
-                        for p_algn in model.prosodic_predictor.lstm.parameters():
-                            if p_algn.grad is not None:
-                                p_algn.grad *= slmadv_params.scale
-
-                        for p_algn in model.diffusion.parameters():
-                            if p_algn.grad is not None:
-                                p_algn.grad *= slmadv_params.scale
-
-                        optimizer.step("bert_encoder")
-                        optimizer.step("bert")
-                        optimizer.step("prosodic_predictor")
-                        optimizer.step("diffusion")
-
-                        # SLM discriminator loss
-                        if loss_disc_slm != 0:
+                        # Check for NaN/Inf in SLM losses - skip SLM training if detected
+                        # to prevent gradient contamination
+                        if is_finite_loss(loss_disc_slm) and is_finite_loss(loss_gen_lm):
+                            # SLM generator loss
                             optimizer.zero_grad()
-                            acc.backward(loss_disc_slm)
+                            acc.backward(loss_gen_lm)
+
                             # Gradient clipping
                             if cfg.grad_clip:
-                                acc.clip_grad_norm_(model.wd.parameters(), cfg.grad_clip)
-                            optimizer.step("wd")
+                                acc.clip_grad_norm_(model.bert_encoder.parameters(), cfg.grad_clip)
+                                acc.clip_grad_norm_(model.bert.parameters(), cfg.grad_clip)
+                                acc.clip_grad_norm_(
+                                    model.prosodic_predictor.parameters(), cfg.grad_clip
+                                )
+                                acc.clip_grad_norm_(model.diffusion.parameters(), cfg.grad_clip)
+
+                            # Compute the gradient norm
+                            total_norm = {}
+                            for name, module in model.items():
+                                sq_sum = 0.0
+                                for p in module.parameters():
+                                    if p.grad is not None and p.requires_grad:
+                                        param_norm = p.grad.detach().data.norm(2)
+                                        sq_sum += param_norm.item() ** 2
+                                total_norm[name] = sq_sum**0.5
+
+                            # Gradient scaling
+                            if total_norm.get("prosodic_predictor", 0) > slmadv_params.thresh:
+                                scale = 1 / total_norm["prosodic_predictor"]
+                                for module in model.values():
+                                    for p in module.parameters():
+                                        if p.grad is not None:
+                                            p.grad *= scale
+
+                            for p_algn in model.prosodic_predictor.duration_proj.parameters():
+                                if p_algn.grad is not None:
+                                    p_algn.grad *= slmadv_params.scale
+
+                            for p_algn in model.prosodic_predictor.lstm.parameters():
+                                if p_algn.grad is not None:
+                                    p_algn.grad *= slmadv_params.scale
+
+                            for p_algn in model.diffusion.parameters():
+                                if p_algn.grad is not None:
+                                    p_algn.grad *= slmadv_params.scale
+
+                            optimizer.step("bert_encoder")
+                            optimizer.step("bert")
+                            optimizer.step("prosodic_predictor")
+                            optimizer.step("diffusion")
+
+                            # SLM discriminator loss
+                            # Note: retain_graph=True not needed - discriminator backward
+                            # is independent after generator optimizer step completed
+                            if loss_disc_slm != 0:
+                                optimizer.zero_grad()
+                                acc.backward(loss_disc_slm)
+                                # Gradient clipping
+                                if cfg.grad_clip:
+                                    acc.clip_grad_norm_(model.wd.parameters(), cfg.grad_clip)
+                                optimizer.step("wd")
+                        else:
+                            logger.warning(
+                                "Non-finite SLM loss detected at batch %d, iteration %d "
+                                "(disc=%s, gen=%s) => skipping SLM update for this batch",
+                                batch_idx,
+                                iters,
+                                loss_disc_slm,
+                                loss_gen_lm,
+                            )
+                            loss_disc_slm, loss_gen_lm = 0, 0
 
                     else:
                         logger.warning(
-                            "SLM discriminator training not performed => skipping batch %d",
+                            "slmadv returned None at batch %d => skipping SLM training "
+                            "for this batch",
                             batch_idx,
                         )
-                        # Clean up memory
-                        del slm_out, y_rec_gt, y_rec_gt_pred, target_style
-                        torch.cuda.empty_cache()
-                        continue  # skip batch
 
             # Increment global step counter
             iters += 1
@@ -910,7 +903,7 @@ def main():
                     {
                         "train/mel_loss": loss_mel,
                         "train/gen_loss": loss_gen_all,
-                        "train/d_loss": loss_disc,
+                        "train/disc_loss": loss_disc,
                         "train/ce_loss": loss_ce,
                         "train/dur_loss": loss_dur,
                         "train/slm_loss": loss_lm,
