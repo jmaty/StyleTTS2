@@ -476,14 +476,14 @@ def main():
 
                 # Use Accelerate's accumulate context manager for proper gradient accumulation
                 with acc.accumulate(model.mpd, model.msd):
-                    # JMa: Compute gradients only for discriminators
+                    # Compute gradients only for discriminators
                     acc.backward(
                         loss_disc,
                         inputs=list(model.mpd.parameters()) + list(model.msd.parameters()),
                     )
 
-                    # Gradient clipping
-                    if cfg.grad_clip:
+                    # Gradient clipping should only be applied when gradients are synced
+                    if acc.sync_gradients and cfg.grad_clip:
                         acc.clip_grad_norm_(model.mpd.parameters(), cfg.grad_clip)
                         acc.clip_grad_norm_(model.msd.parameters(), cfg.grad_clip)
 
@@ -540,7 +540,7 @@ def main():
 
             # Use Accelerate's accumulate context manager for proper gradient accumulation
             with acc.accumulate(*models_to_accumulate):
-                # JMa: Compute gradients only for generator
+                # Compute gradients only for generator
                 inputs = (
                     list(model.decoder.parameters())
                     + list(model.acoustic_style_encoder.parameters())
@@ -550,8 +550,8 @@ def main():
                     inputs += list(model.text_aligner.parameters())
                 acc.backward(loss_gen, inputs=inputs)
 
-                # Gradient clipping
-                if cfg.grad_clip:
+                # Gradient clipping should only be applied when gradients are synced
+                if acc.sync_gradients and cfg.grad_clip:
                     acc.clip_grad_norm_(model.text_encoder.parameters(), cfg.grad_clip)
                     acc.clip_grad_norm_(model.acoustic_style_encoder.parameters(), cfg.grad_clip)
                     acc.clip_grad_norm_(model.decoder.parameters(), cfg.grad_clip)
@@ -564,7 +564,7 @@ def main():
 
                 if epoch >= tma_epoch:
                     optimizer.step("text_aligner")
-                    # JMa: pitch extractor should not be updated, see:
+                    # Pitch extractor should not be updated, see:
                     # https://github.com/yl4579/StyleTTS2/issues/10#issuecomment-1783701686
                     # optimizer.step('pitch_extractor')
 
@@ -580,7 +580,7 @@ def main():
             iters += 1  # Increment iteration counter
 
             # Log training progress
-            if (batch_idx + 1) % cfg.log_interval == 0:
+            if (batch_idx + 1) % cfg.log_interval == 0 and acc.is_main_process:
                 # Calculate average loss based on number of actual updates since last log
                 num_updates_since_log = updates - updates_at_last_log
                 avg_loss_mel = running_loss / max(1, num_updates_since_log)
@@ -622,7 +622,6 @@ def main():
                             "train/s2s_loss": loss_s2s,
                             "train/slm_loss": loss_slm,
                             "train/curr_vram": curr_vram,
-                            "train/max_vram": max_vram,
                             "train/epoch": epoch,
                         },
                         step=iters,
@@ -650,9 +649,7 @@ def main():
             iters_test = 0
             for _, batch in enumerate(val_dataloader):
                 # optimizer.zero_grad()
-
                 waves = batch[0]
-                batch = [b.to(device) for b in batch[1:]]
                 (
                     phonemes,  # Padded input phoneme IDs [B, T_text]
                     ph_inp_lens,  # Input phoneme lengths [B]
@@ -661,7 +658,7 @@ def main():
                     mels,  # Padded mel spectrograms [B, n_mels, T_mel]
                     mel_inp_len,  # Mel spectrogram lengths [B]
                     _,  # Reference mel spectrograms not used in 1st stage
-                ) = batch
+                ) = batch[1:]
                 # Current batch size
                 bsize = mel_inp_len.shape[0]
 
@@ -759,20 +756,19 @@ def main():
                 loss_test += acc.gather(loss_mel).mean().item()
                 iters_test += 1
 
-        # Compute average loss over all validation batches
-        curr_loss = loss_test / iters_test
-        # Update best_loss
-        best_loss = min(curr_loss, best_loss)
-
-        logger.info(
-            "Epoch [%3d/%d]: Validation loss: %.3f (best: %.3f)",
-            epoch + 1,
-            epochs,
-            curr_loss,
-            best_loss,
-        )
-
         if acc.is_main_process:
+            # Compute average loss over all validation batches
+            curr_loss = loss_test / iters_test
+            # Update best_loss
+            best_loss = min(curr_loss, best_loss)
+            # Log validation results
+            logger.info(
+                "Epoch [%3d/%d]: Validation loss: %.3f (best: %.3f)",
+                epoch + 1,
+                epochs,
+                curr_loss,
+                best_loss,
+            )
             wb_logger.log(
                 {"eval/mel_loss": curr_loss},
                 step=iters,
