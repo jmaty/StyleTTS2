@@ -647,7 +647,11 @@ class TextEncoder(nn.Module):
         self.post_projection = LinearNorm(channels // 2, channels)
         self.cfg = xLSTMBlockStackConfig(
             mlstm_block=mLSTMBlockConfig(
-                mlstm=mLSTMLayerConfig(conv1d_kernel_size=4, qkv_proj_blocksize=4, num_heads=4)
+                mlstm=mLSTMLayerConfig(
+                    conv1d_kernel_size=4,
+                    qkv_proj_blocksize=4,
+                    num_heads=4,
+                )
             ),
             # slstm_block=sLSTMBlockConfig(
             #     slstm=sLSTMLayerConfig(
@@ -669,7 +673,12 @@ class TextEncoder(nn.Module):
             [
                 nn.Sequential(
                     weight_norm(
-                        nn.Conv1d(channels, channels, kernel_size=kernel_size, padding=padding)
+                        nn.Conv1d(
+                            channels,
+                            channels,
+                            kernel_size=kernel_size,
+                            padding=padding,
+                        )
                     ),
                     LayerNorm(channels),
                     actv,
@@ -685,11 +694,13 @@ class TextEncoder(nn.Module):
         x = self.embedding(x)  # [B, T, emb]
         x = x.transpose(1, 2)  # [B, emb, T]
         m = m.to(input_lengths.device).unsqueeze(1)
-        x.masked_fill_(m, 0.0)
+        # x.masked_fill_(m, 0.0)
+        x = x.masked_fill(m, 0.0)
 
         for c in self.cnn:
             x = c(x)
-            x.masked_fill_(m, 0.0)
+            # x.masked_fill_(m, 0.0)
+            x = x.masked_fill(m, 0.0)
 
         x = x.transpose(1, 2)  # [B, T, chn]
 
@@ -701,7 +712,8 @@ class TextEncoder(nn.Module):
 
         x = x.transpose(-1, -2)
 
-        x.masked_fill_(m, 0.0)
+        # x.masked_fill_(m, 0.0)
+        x = x.masked_fill(m, 0.0)
 
         return x
 
@@ -965,7 +977,11 @@ class ProsodyPredictor(nn.Module):
 
         self.cfg = xLSTMBlockStackConfig(
             mlstm_block=mLSTMBlockConfig(
-                mlstm=mLSTMLayerConfig(conv1d_kernel_size=4, qkv_proj_blocksize=4, num_heads=4)
+                mlstm=mLSTMLayerConfig(
+                    conv1d_kernel_size=4,
+                    qkv_proj_blocksize=4,
+                    num_heads=4,
+                )
             ),
             context_length=d_hid,
             num_blocks=8,
@@ -974,7 +990,11 @@ class ProsodyPredictor(nn.Module):
 
         self.cfg_pred = xLSTMBlockStackConfig(
             mlstm_block=mLSTMBlockConfig(
-                mlstm=mLSTMLayerConfig(conv1d_kernel_size=4, qkv_proj_blocksize=4, num_heads=4)
+                mlstm=mLSTMLayerConfig(
+                    conv1d_kernel_size=4,
+                    qkv_proj_blocksize=4,
+                    num_heads=4,
+                )
             ),
             context_length=4096,
             num_blocks=8,
@@ -1006,7 +1026,13 @@ class ProsodyPredictor(nn.Module):
         self.f0 = nn.ModuleList()
         self.f0.append(AdainResBlk1d(d_hid, d_hid, style_dim, dropout_p=dropout))
         self.f0.append(
-            AdainResBlk1d(d_hid, d_hid // 2, style_dim, upsample=True, dropout_p=dropout)
+            AdainResBlk1d(
+                d_hid,
+                d_hid // 2,
+                style_dim,
+                upsample=True,
+                dropout_p=dropout,
+            )
         )
         self.f0.append(AdainResBlk1d(d_hid // 2, d_hid // 2, style_dim, dropout_p=dropout))
 
@@ -1176,7 +1202,8 @@ class DurationEncoder(nn.Module):
         x = x.permute(2, 0, 1)
         s = style.expand(x.shape[0], x.shape[1], -1)
         x = torch.cat([x, s], axis=-1)
-        x.masked_fill_(masks.unsqueeze(-1).transpose(0, 1), 0.0)
+        # x.masked_fill_(masks.unsqueeze(-1).transpose(0, 1), 0.0)
+        x = x.masked_fill(masks.unsqueeze(-1).transpose(0, 1), 0.0)
 
         x = x.transpose(0, 1)
         input_lengths = text_lengths.cpu().numpy()
@@ -1186,7 +1213,8 @@ class DurationEncoder(nn.Module):
             if isinstance(block, AdaLayerNorm):
                 x = block(x.transpose(-1, -2), style).transpose(-1, -2)
                 x = torch.cat([x, s.permute(1, -1, 0)], axis=1)
-                x.masked_fill_(masks.unsqueeze(-1).transpose(-1, -2), 0.0)
+                # x.masked_fill_(masks.unsqueeze(-1).transpose(0, 1), 0.0)
+                x = x.masked_fill(masks.unsqueeze(-1).transpose(-1, -2), 0.0)
             else:
                 x = x.transpose(-1, -2)
                 x = nn.utils.rnn.pack_padded_sequence(
