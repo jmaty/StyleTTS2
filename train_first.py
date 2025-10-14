@@ -58,7 +58,7 @@ def main():
     log_dir = cfg.log_dir
     os.makedirs(log_dir, exist_ok=True)
 
-    # must be before Accelerator
+    # Must be before Accelerator
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
@@ -207,6 +207,8 @@ def main():
     steps_per_epoch = len(train_dataloader)
     # Number of update-steps per epoch (accounts for grad accumulation)
     updates_per_epoch = int(np.ceil(steps_per_epoch / max(1, cfg.grad_accum_steps)))
+    # Number steps between each logging (`log_interval` counts optimizer updates)
+    steps_per_log = cfg.log_interval * max(1, cfg.grad_accum_steps)
 
     # Load model weights
     with acc.main_process_first():
@@ -261,8 +263,10 @@ def main():
         logger.info(" | > Steps per epoch:     %d", steps_per_epoch)
         logger.info(" | > Updates per epoch:   %d", updates_per_epoch)
         logger.info(" | > Input iterations:    %d", iters)
-        logger.info(" | > Train data:          %s", cfg.data_params.train_data)
-        logger.info(" | > Valid data:          %s", cfg.data_params.val_data)
+        logger.info(
+            " | > Train data:          %s (%d)", cfg.data_params.train_data, len(train_list)
+        )
+        logger.info(" | > Valid data:          %s (%d)", cfg.data_params.val_data, len(val_list))
         logger.info(" | > Pretrained model:    %s", cfg.pretrained_model)
         logger.info(" | > Text aligner:        %s", cfg.ASR_path)
         logger.info(" | > F0 model:            %s", cfg.F0_path)
@@ -285,11 +289,10 @@ def main():
     # Iterate through the defined number of epochs
     for epoch in range(start_epoch, epochs):
         logger.debug("> ----- Epoch %d/%d -----", epoch + 1, epochs)
-        running_loss = 0
         start_time = time.time()
         train_dataloader.batch_sampler.epoch = epoch  # Set epoch for the sampler
         updates_at_epoch_start = updates
-        updates_at_last_log = updates  # Track updates for loss averaging
+        running_loss = 0.0  # Track running loss for logging
 
         # Models in train mode from the beginning
         train_components = [
@@ -305,7 +308,7 @@ def main():
         # Set models to train mode
         model.set_mode("train", train_components)
 
-        # JMa: Zero gradients of all optimizers at each epoch start
+        # Zero gradients of all optimizers at each epoch start
         optimizer.zero_grad()
 
         # Train loop for each epoch
@@ -321,6 +324,8 @@ def main():
                 mel_inp_len,  # Mel spectrogram lengths [B]
                 _,  # Reference mel spectrograms not used in 1st stage
             ) = batch[1:]
+            # Current batch size
+            bsize = mel_inp_len.shape[0]
 
             # Generate masks for text and mel spectrograms
             with torch.no_grad():
@@ -392,7 +397,6 @@ def main():
                 continue
             mel_len_st = int(mel_inp_len.min().item() / 2 - 1)
 
-            bsize = mel_inp_len.shape[0]  # Use current batch size
             # Calculate fixed waveform segment length
             wav_len = (mel_len_gt * 2) * cfg.preprocess_params.spect_params.hop_length
 
@@ -535,19 +539,18 @@ def main():
 
             # Prepare models for gradient accumulation
             models_to_accumulate = [model.decoder, model.acoustic_style_encoder, model.text_encoder]
+            # Compute gradients only for generator
+            inputs = (
+                list(model.decoder.parameters())
+                + list(model.acoustic_style_encoder.parameters())
+                + list(model.text_encoder.parameters())
+            )
             if epoch >= tma_epoch:
                 models_to_accumulate.append(model.text_aligner)
+                inputs += list(model.text_aligner.parameters())
 
             # Use Accelerate's accumulate context manager for proper gradient accumulation
             with acc.accumulate(*models_to_accumulate):
-                # Compute gradients only for generator
-                inputs = (
-                    list(model.decoder.parameters())
-                    + list(model.acoustic_style_encoder.parameters())
-                    + list(model.text_encoder.parameters())
-                )
-                if epoch >= tma_epoch:
-                    inputs += list(model.text_aligner.parameters())
                 acc.backward(loss_gen, inputs=inputs)
 
                 # Gradient clipping should only be applied when gradients are synced
@@ -571,72 +574,70 @@ def main():
                 # Zero all gradients
                 optimizer.zero_grad()
 
+            running_loss += acc.gather(loss_mel).mean().item()  # Accumulate mel loss over all GPUs
+
             # Accumulate mean mel-spectrogram loss (over all GPUs) across batches for logging
             # Only accumulate when gradients are synced (actual update step)
             if acc.sync_gradients:
-                running_loss += acc.gather(loss_mel).mean().item()
                 updates += 1  # Increment update counter only when gradients are actually applied
 
-            iters += 1  # Increment iteration counter
-
-            # Log training progress
-            if (batch_idx + 1) % cfg.log_interval == 0 and acc.is_main_process:
-                # Calculate average loss based on number of actual updates since last log
-                num_updates_since_log = updates - updates_at_last_log
-                avg_loss_mel = running_loss / max(1, num_updates_since_log)
-                curr_updates = min(updates - updates_at_epoch_start, updates_per_epoch)
-                logger.info(
-                    "Epoch [%3d/%d], Step [%4d/%d], Upd [%4d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f",
-                    epoch + 1,
-                    epochs,
-                    batch_idx + 1,
-                    steps_per_epoch,
-                    curr_updates,
-                    updates_per_epoch,
-                    avg_loss_mel,
-                    loss_gen_all,
-                    loss_disc,
-                    loss_mono,
-                    loss_s2s,
-                    loss_slm,
-                )
-
-                if acc.is_main_process:
-                    # Check current VRAM usage
-                    curr_vrams = [
-                        nvidia_smi.nvmlDeviceGetMemoryInfo(
-                            nvidia_smi.nvmlDeviceGetHandleByIndex(device_idx)
-                        ).used
-                        for device_idx in range(n_gpus)
-                    ]
-                    # Update max VRAM usage
-                    curr_vram = max(curr_vrams) >> 30  # Convert bytes to GB
-                    max_vram = max(max_vram, curr_vram)
-
-                    wb_logger.log(
-                        {
-                            "train/mel_loss": avg_loss_mel,
-                            "train/gen_loss": loss_gen_all,
-                            "train/disc_loss": loss_disc,
-                            "train/mono_loss": loss_mono,
-                            "train/s2s_loss": loss_s2s,
-                            "train/slm_loss": loss_slm,
-                            "train/curr_vram": curr_vram,
-                            "train/epoch": epoch,
-                        },
-                        step=iters,
-                    )
+                # Log training progress
+                if updates % cfg.log_interval == 0 and acc.is_main_process:
+                    # Calculate average loss based on number of actual updates since last log
+                    avg_loss_mel = running_loss / steps_per_log
+                    curr_updates = min(updates - updates_at_epoch_start, updates_per_epoch)
 
                     logger.info(
-                        "Max VRAM usage: %d/%d GB (%.2f%%)",
-                        max_vram,
-                        total_vram,
-                        max_vram / total_vram * 100,
+                        "Epoch [%3d/%d], Update [%4d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f",
+                        epoch + 1,
+                        epochs,
+                        curr_updates,
+                        updates_per_epoch,
+                        avg_loss_mel,
+                        loss_gen_all,
+                        loss_disc,
+                        loss_mono,
+                        loss_s2s,
+                        loss_slm,
                     )
-                    logger.info("Time elapsed: %.2f seconds", time.time() - start_time)
 
-                running_loss = 0  # Reset running loss for next log interval
-                updates_at_last_log = updates  # Update checkpoint for next interval
+                    if acc.is_main_process:
+                        # Check current VRAM usage
+                        curr_vrams = [
+                            nvidia_smi.nvmlDeviceGetMemoryInfo(
+                                nvidia_smi.nvmlDeviceGetHandleByIndex(device_idx)
+                            ).used
+                            for device_idx in range(n_gpus)
+                        ]
+                        # Update max VRAM usage
+                        curr_vram = max(curr_vrams) >> 30  # Convert bytes to GB
+                        max_vram = max(max_vram, curr_vram)
+
+                        wb_logger.log(
+                            {
+                                "train/mel_loss": avg_loss_mel,
+                                "train/gen_loss": loss_gen_all,
+                                "train/disc_loss": loss_disc,
+                                "train/mono_loss": loss_mono,
+                                "train/s2s_loss": loss_s2s,
+                                "train/slm_loss": loss_slm,
+                                "train/curr_vram": curr_vram,
+                                "train/epoch": epoch,
+                            },
+                            step=updates,
+                        )
+
+                        logger.info(
+                            "Max VRAM usage: %d/%d GB (%.2f%%)",
+                            max_vram,
+                            total_vram,
+                            max_vram / total_vram * 100,
+                        )
+                        logger.info("Time elapsed: %.2f seconds", time.time() - start_time)
+
+                    running_loss = 0  # Reset running loss for next log interval
+
+            iters += 1  # Increment iteration counter
 
         # === Start of validation part ==============================================
 
@@ -763,15 +764,17 @@ def main():
             best_loss = min(curr_loss, best_loss)
             # Log validation results
             logger.info(
-                "Epoch [%3d/%d]: Validation loss: %.3f (best: %.3f)",
+                "Epoch [%3d/%d] (Update %d, Step %d): Validation loss: %.3f (best: %.3f)",
                 epoch + 1,
                 epochs,
+                updates,
+                (epoch + 1) * steps_per_epoch,
                 curr_loss,
                 best_loss,
             )
             wb_logger.log(
                 {"eval/mel_loss": curr_loss},
-                step=iters,
+                step=updates,
             )
             wb_logger.summary["max_vram"] = max_vram  # Log max VRAM usage per epoch
 
