@@ -578,7 +578,8 @@ class PTS:
                 # Predict duration-related features from ground truth mel spectrogram
                 pros_style = self.model.prosodic_style_encoder(mel_gt.unsqueeze(1))
                 # Predict F0 and norm
-                f0, n = self.model.prosodic_predictor.F0Ntrain(p_en, pros_style)
+                # f0, n = self.model.prosodic_predictor.F0Ntrain(p_en, pros_style)
+                f0, n = self.model.prosodic_predictor(p_en, pros_style, compute_f0=True)
             else:
                 # Extract real F0
                 f0, _, _ = self.model.pitch_extractor(mel_gt.unsqueeze(1))
