@@ -4,11 +4,13 @@ import os
 import os.path as osp
 import time
 import traceback
+from venv import logger
 import warnings
 
 import numpy as np
 import nvidia_smi
 import torch
+
 import torch.nn.functional as F
 import wandb
 import yaml
@@ -41,8 +43,6 @@ warnings.simplefilter("ignore")
 
 h100_fix()  # Fix for H100 GPU
 
-torch.autograd.set_detect_anomaly(True)
-
 
 def main():
     # Parse command line arguments
@@ -73,7 +73,7 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.set_device(local_rank)
 
-    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True, broadcast_buffers=False)
     acc = Accelerator(
         project_dir=log_dir,
         split_batches=True,
@@ -285,10 +285,7 @@ def main():
     dl = DiscriminatorLoss(model.mpd, model.msd).to(device)
     wl = create_slm_loss(cfg.model_params.slm, model.wd, cfg.preprocess_params.sr).to(device)
 
-    gl = acc.prepare(gl)
-    dl = acc.prepare(dl)
-    wl = acc.prepare(wl)
-    wl = wl.eval()
+    # wl = wl.eval()  # ???
 
     sampler = DiffusionSampler(
         acc.unwrap_model(model.diffusion).diffusion,
@@ -443,46 +440,46 @@ def main():
                     ref_pros_style = model.prosodic_style_encoder(ref_mels_batch)
                     ref_style = torch.cat([ref_acoust_style, ref_pros_style], dim=1)
 
-            # # --- Compute the style of the entire utterance ---
-            # # This operation cannot be done in batch because of the avgpool layer
-            # # (may need to work on masked avgpool)
-            # # ---
-            # # Initialize global prosodic and acoustic styles
-            # pros_style = torch.empty(bsize, cfg.model_params.style_dim, device=device)
-            # acoust_style = torch.empty(bsize, cfg.model_params.style_dim, device=device)
-            # for bidx in range(bsize):
-            #     # Extract mel spectrogram for the current sample and unsqueeze
-            #     # to add batch and channel dims
-            #     mels4style = mels[bidx, :, : mel_inp_len[bidx].item()][None, None]
-
-            #     # Compute acoustic and prosodic styles
-            #     acoust_style[bidx, :] = model.acoustic_style_encoder(mels4style)
-            #     # prosodic style used for prosodic prediction => use grad
-            #     pros_style[bidx, :] = model.prosodic_style_encoder(mels4style)
-
-            # # Set ground truth style for denoiser
-            # target_style = torch.cat([acoust_style, pros_style], dim=-1).detach()
-
             # --- Compute the style of the entire utterance ---
             # This operation cannot be done in batch because of the avgpool layer
             # (may need to work on masked avgpool)
             # ---
             # Initialize global prosodic and acoustic styles
-            pros_styles = []
-            acoust_styles = []
+            pros_style = torch.empty(bsize, cfg.model_params.style_dim, device=device)
+            acoust_style = torch.empty(bsize, cfg.model_params.style_dim, device=device)
             for bidx in range(bsize):
                 # Extract mel spectrogram for the current sample and unsqueeze
                 # to add batch and channel dims
                 mels4style = mels[bidx, :, : mel_inp_len[bidx].item()][None, None]
+
                 # Compute acoustic and prosodic styles
-                acoust_styles.append(model.acoustic_style_encoder(mels4style))
+                acoust_style[bidx, :] = model.acoustic_style_encoder(mels4style)
                 # prosodic style used for prosodic prediction => use grad
-                pros_styles.append(model.prosodic_style_encoder(mels4style))
+                pros_style[bidx, :] = model.prosodic_style_encoder(mels4style)
 
             # Set ground truth style for denoiser
-            pros_style = torch.cat(pros_styles, dim=0)
-            acoust_style = torch.cat(acoust_styles, dim=0)
             target_style = torch.cat([acoust_style, pros_style], dim=-1).detach()
+
+            # # --- Compute the style of the entire utterance ---
+            # # This operation cannot be done in batch because of the avgpool layer
+            # # (may need to work on masked avgpool)
+            # # ---
+            # # Initialize global prosodic and acoustic styles
+            # pros_styles = []
+            # acoust_styles = []
+            # for bidx in range(bsize):
+            #     # Extract mel spectrogram for the current sample and unsqueeze
+            #     # to add batch and channel dims
+            #     mels4style = mels[bidx, :, : mel_inp_len[bidx].item()][None, None]
+            #     # Compute acoustic and prosodic styles
+            #     acoust_styles.append(model.acoustic_style_encoder(mels4style))
+            #     # prosodic style used for prosodic prediction => use grad
+            #     pros_styles.append(model.prosodic_style_encoder(mels4style))
+
+            # # Set ground truth style for denoiser
+            # pros_style = torch.cat(pros_styles, dim=0)
+            # acoust_style = torch.cat(acoust_styles, dim=0)
+            # target_style = torch.cat([acoust_style, pros_style], dim=-1).detach()
 
             try:
                 # Compute contextualized embeddings from phonetic input
@@ -506,16 +503,17 @@ def main():
                     # Completely detach from computation graph
                     sigma_data_val = target_style.detach().std(axis=-1).mean().item()
                     running_std.append(sigma_data_val)
+                    acc.unwrap_model(model.diffusion).diffusion.sigma_data = sigma_data_val
 
-                    # Update sigma_data without tracking gradients
-                    with torch.no_grad():
-                        diffusion_module = acc.unwrap_model(model.diffusion).diffusion
-                        # If sigma_data is a buffer, use copy_
-                        if hasattr(diffusion_module.sigma_data, "copy_"):
-                            diffusion_module.sigma_data.copy_(torch.tensor(sigma_data_val))
-                        else:
-                            # If it's just an attribute, direct assignment
-                            diffusion_module.sigma_data = sigma_data_val
+                    # # Update sigma_data without tracking gradients
+                    # with torch.no_grad():
+                    #     diffusion_module = acc.unwrap_model(model.diffusion).diffusion
+                    #     # If sigma_data is a buffer, use copy_
+                    #     if hasattr(diffusion_module.sigma_data, "copy_"):
+                    #         diffusion_module.sigma_data.copy_(torch.tensor(sigma_data_val))
+                    #     else:
+                    #         # If it's just an attribute, direct assignment
+                    #         diffusion_module.sigma_data = sigma_data_val
 
                 if model.multispeaker:
                     pred_style = sampler(
@@ -559,109 +557,20 @@ def main():
             # Predict prosodic features
             d, p_algn = model.prosodic_predictor(
                 h_bert_en,
-                pros_style,  # .detach(),  # .clone(),
+                pros_style.clone(),
                 ph_inp_lens,
                 d_algn_mono,
                 ph_mask,
             )
 
-            # # --- Pre-allocated Segment Extraction ---
-
-            # # Set up maximum lengths based on `max_len` from config
-            # # TODO: Use max and pad shorter segments?
-            # # Gather lengths from all processes for balanced load
-            # mel_len_gt_all = acc.gather(mel_inp_len)
-            # mel_len_gt = min([int(mel_len_gt_all.min().item() / 2 - 1), max_len // 2])
-            # # mel_len_gt = min(int(mel_inp_len.min().item() / 2 - 1), cfg.max_len // 2)
-            # # Early check for segment length:
-            # # - mel_len_gt * 2 is the length of the original mel spectrogram
-            # # - multiplication by 2 is due to the downsampling factor between mel and text aligner
-            # if mel_len_gt * 2 < 80:
-            #     logger.warning(
-            #         "Segment is too short (%d frames, %d samples)=> skipping batch %d.",
-            #         mel_len_gt * 2,
-            #         (mel_len_gt * 2) * cfg.preprocess_params.spect_params.hop_length,
-            #         batch_idx,
-            #     )
-            #     continue
-            # mel_len_st = int(mel_inp_len.min().item() / 2 - 1)
-
-            # bsize = mel_inp_len.shape[0]  # Use current batch size
-            # # Calculate fixed waveform segment length
-            # wav_len = (mel_len_gt * 2) * cfg.preprocess_params.spect_params.hop_length
-
-            # # Pre-allocate tensors with the calculated fixed length
-            # ph_algn = torch.empty(
-            #     bsize,
-            #     h_algn.shape[1],
-            #     mel_len_gt,
-            #     device=device,
-            #     dtype=h_algn.dtype,
-            # )
-            # pros_algn = torch.empty(
-            #     bsize,
-            #     p_algn.shape[1],
-            #     mel_len_gt,
-            #     device=device,
-            #     dtype=p_algn.dtype,
-            # )
-            # mel_gt = torch.empty(
-            #     bsize,
-            #     mels.shape[1],
-            #     mel_len_gt * 2,
-            #     device=device,
-            #     dtype=mels.dtype,
-            # )
-            # mel_st = torch.empty(
-            #     bsize,
-            #     mels.shape[1],
-            #     mel_len_st * 2,
-            #     device=device,
-            #     dtype=mels.dtype,
-            # )
-            # wav_gt = torch.empty(bsize, wav_len, device=device, dtype=torch.float)
-
-            # # Iterate through the batch samples
-            # for bidx in range(bsize):
-            #     # Mel-spectrogram length (dividing by 2 due to a downsampling factor?)
-            #     mel_len = int(mel_inp_len[bidx].item() / 2)
-
-            #     # --- Segment for en, mel_gt, wav_gt ---
-            #     # Randomly select a start point for the mel spectrogram within valid range
-            #     beg_gt = np.random.randint(0, mel_len - mel_len_gt)
-
-            #     # Extract text-audio aligned encoded features and assign to tensor
-            #     ph_algn[bidx] = h_algn[bidx, :, beg_gt : beg_gt + mel_len_gt]
-            #     pros_algn[bidx] = p_algn[bidx, :, beg_gt : beg_gt + mel_len_gt]
-            #     # Extract ground-truth mel spectrogram and assign to tensor
-            #     mel_gt[bidx] = mels[bidx, :, (beg_gt * 2) : ((beg_gt + mel_len_gt) * 2)]
-            #     # Extract corresponding ground-truth audio and assign to tensor
-            #     beg_idx_wav = (beg_gt * 2) * cfg.preprocess_params.spect_params.hop_length
-            #     end_idx_wav = beg_idx_wav + wav_len  # Use pre-calculated length
-            #     wav_gt[bidx] = waves[bidx][beg_idx_wav:end_idx_wav]
-
-            #     # --- Segment for mel_st ---
-            #     # Style reference (better to be different from the GT)
-            #     beg_st = np.random.randint(0, mel_len - mel_len_st)
-            #     # Extract style reference mel spectrogram for style conditioning
-            #     # and assign to tensor
-            #     mel_st[bidx] = mels[bidx, :, (beg_st * 2) : ((beg_st + mel_len_st) * 2)]
-
-            # # Detach tensors to avoid unnecessary gradient tracking
-            # # `en` and `p_en` are not detached as they are used for gradient computation
-            # mel_gt = mel_gt.detach()
-            # mel_st = mel_st.detach()
-            # wav_gt = wav_gt.detach()
-
-            # # --- End of Pre-allocated Segment Extraction ---
+            # --- Pre-allocated Segment Extraction ---
 
             # Set up maximum lengths based on `max_len` from config
             # TODO: Use max and pad shorter segments?
             # Gather lengths from all processes for balanced load
             mel_len_gt_all = acc.gather(mel_inp_len)
             mel_len_gt = min([int(mel_len_gt_all.min().item() / 2 - 1), cfg.max_len // 2])
-            mel_len_st = int(mel_inp_len.min().item() / 2 - 1)
-
+            # mel_len_gt = min(int(mel_inp_len.min().item() / 2 - 1), cfg.max_len // 2)
             # Early check for segment length:
             # - mel_len_gt * 2 is the length of the original mel spectrogram
             # - multiplication by 2 is due to the downsampling factor between mel and text aligner
@@ -673,12 +582,42 @@ def main():
                     batch_idx,
                 )
                 continue
-
-            ph_algn, pros_algn, mel_gt, mel_st, wav_gt = [], [], [], [], []
+            mel_len_st = int(mel_inp_len.min().item() / 2 - 1)
 
             bsize = mel_inp_len.shape[0]  # Use current batch size
             # Calculate fixed waveform segment length
             wav_len = (mel_len_gt * 2) * cfg.preprocess_params.spect_params.hop_length
+
+            # Pre-allocate tensors with the calculated fixed length
+            ph_algn = torch.empty(
+                bsize,
+                h_algn.shape[1],
+                mel_len_gt,
+                device=device,
+                dtype=h_algn.dtype,
+            )
+            pros_algn = torch.empty(
+                bsize,
+                p_algn.shape[1],
+                mel_len_gt,
+                device=device,
+                dtype=p_algn.dtype,
+            )
+            mel_gt = torch.empty(
+                bsize,
+                mels.shape[1],
+                mel_len_gt * 2,
+                device=device,
+                dtype=mels.dtype,
+            )
+            mel_st = torch.empty(
+                bsize,
+                mels.shape[1],
+                mel_len_st * 2,
+                device=device,
+                dtype=mels.dtype,
+            )
+            wav_gt = torch.empty(bsize, wav_len, device=device, dtype=torch.float)
 
             # Iterate through the batch samples
             for bidx in range(bsize):
@@ -690,32 +629,91 @@ def main():
                 beg_gt = np.random.randint(0, mel_len - mel_len_gt)
 
                 # Extract text-audio aligned encoded features and assign to tensor
-                ph_algn.append(h_algn[bidx, :, beg_gt : beg_gt + mel_len_gt])
-                pros_algn.append(p_algn[bidx, :, beg_gt : beg_gt + mel_len_gt])
+                ph_algn[bidx] = h_algn[bidx, :, beg_gt : beg_gt + mel_len_gt]
+                pros_algn[bidx] = p_algn[bidx, :, beg_gt : beg_gt + mel_len_gt]
                 # Extract ground-truth mel spectrogram and assign to tensor
-                mel_gt.append(mels[bidx, :, (beg_gt * 2) : ((beg_gt + mel_len_gt) * 2)])
+                mel_gt[bidx] = mels[bidx, :, (beg_gt * 2) : ((beg_gt + mel_len_gt) * 2)]
                 # Extract corresponding ground-truth audio and assign to tensor
                 beg_idx_wav = (beg_gt * 2) * cfg.preprocess_params.spect_params.hop_length
                 end_idx_wav = beg_idx_wav + wav_len  # Use pre-calculated length
-                w_gt = waves[bidx][beg_idx_wav:end_idx_wav]
-                wav_gt.append(w_gt)
+                wav_gt[bidx] = waves[bidx][beg_idx_wav:end_idx_wav]
 
                 # --- Segment for mel_st ---
                 # Style reference (better to be different from the GT)
                 beg_st = np.random.randint(0, mel_len - mel_len_st)
                 # Extract style reference mel spectrogram for style conditioning
                 # and assign to tensor
-                mel_st.append(mels[bidx, :, (beg_st * 2) : ((beg_st + mel_len_st) * 2)])
+                mel_st[bidx] = mels[bidx, :, (beg_st * 2) : ((beg_st + mel_len_st) * 2)]
 
-            wav_gt = torch.stack(wav_gt).float().detach()
             # Detach tensors to avoid unnecessary gradient tracking
             # `en` and `p_en` are not detached as they are used for gradient computation
-            ph_algn = torch.stack(ph_algn)
-            pros_algn = torch.stack(pros_algn)
-            mel_gt = torch.stack(mel_gt).detach()
-            mel_st = torch.stack(mel_st).detach()
+            mel_gt = mel_gt.detach()
+            mel_st = mel_st.detach()
+            wav_gt = wav_gt.detach()
 
             # --- End of Pre-allocated Segment Extraction ---
+
+            # # Set up maximum lengths based on `max_len` from config
+            # # TODO: Use max and pad shorter segments?
+            # # Gather lengths from all processes for balanced load
+            # mel_len_gt_all = acc.gather(mel_inp_len)
+            # mel_len_gt = min([int(mel_len_gt_all.min().item() / 2 - 1), cfg.max_len // 2])
+            # mel_len_st = int(mel_inp_len.min().item() / 2 - 1)
+
+            # # Early check for segment length:
+            # # - mel_len_gt * 2 is the length of the original mel spectrogram
+            # # - multiplication by 2 is due to the downsampling factor between mel and text aligner
+            # if mel_len_gt * 2 < 80:
+            #     logger.warning(
+            #         "Segment is too short (%d frames, %d samples)=> skipping batch %d.",
+            #         mel_len_gt * 2,
+            #         (mel_len_gt * 2) * cfg.preprocess_params.spect_params.hop_length,
+            #         batch_idx,
+            #     )
+            #     continue
+
+            # ph_algn, pros_algn, mel_gt, mel_st, wav_gt = [], [], [], [], []
+
+            # bsize = mel_inp_len.shape[0]  # Use current batch size
+            # # Calculate fixed waveform segment length
+            # wav_len = (mel_len_gt * 2) * cfg.preprocess_params.spect_params.hop_length
+
+            # # Iterate through the batch samples
+            # for bidx in range(bsize):
+            #     # Mel-spectrogram length (dividing by 2 due to a downsampling factor?)
+            #     mel_len = int(mel_inp_len[bidx].item() / 2)
+
+            #     # --- Segment for en, mel_gt, wav_gt ---
+            #     # Randomly select a start point for the mel spectrogram within valid range
+            #     beg_gt = np.random.randint(0, mel_len - mel_len_gt)
+
+            #     # Extract text-audio aligned encoded features and assign to tensor
+            #     ph_algn.append(h_algn[bidx, :, beg_gt : beg_gt + mel_len_gt])
+            #     pros_algn.append(p_algn[bidx, :, beg_gt : beg_gt + mel_len_gt])
+            #     # Extract ground-truth mel spectrogram and assign to tensor
+            #     mel_gt.append(mels[bidx, :, (beg_gt * 2) : ((beg_gt + mel_len_gt) * 2)])
+            #     # Extract corresponding ground-truth audio and assign to tensor
+            #     beg_idx_wav = (beg_gt * 2) * cfg.preprocess_params.spect_params.hop_length
+            #     end_idx_wav = beg_idx_wav + wav_len  # Use pre-calculated length
+            #     w_gt = waves[bidx][beg_idx_wav:end_idx_wav]
+            #     wav_gt.append(w_gt)
+
+            #     # --- Segment for mel_st ---
+            #     # Style reference (better to be different from the GT)
+            #     beg_st = np.random.randint(0, mel_len - mel_len_st)
+            #     # Extract style reference mel spectrogram for style conditioning
+            #     # and assign to tensor
+            #     mel_st.append(mels[bidx, :, (beg_st * 2) : ((beg_st + mel_len_st) * 2)])
+
+            # wav_gt = torch.stack(wav_gt).float().detach()
+            # # Detach tensors to avoid unnecessary gradient tracking
+            # # `en` and `p_en` are not detached as they are used for gradient computation
+            # ph_algn = torch.stack(ph_algn)
+            # pros_algn = torch.stack(pros_algn)
+            # mel_gt = torch.stack(mel_gt).detach()
+            # mel_st = torch.stack(mel_st).detach()
+
+            # # --- End of Pre-allocated Segment Extraction ---
 
             # Recompute styles based on the extracted segments
             # Use mel_gt for single speaker, mel_st for multispeaker reference
@@ -743,9 +741,10 @@ def main():
             # f0_fake, n_fake = model.prosodic_predictor.F0Ntrain(pros_algn, pros_style)
             f0_fake, n_fake = model.prosodic_predictor(
                 pros_algn,
-                pros_style,  # .detach().clone(),
+                pros_style.clone(),
                 compute_f0=True,
             )
+
             # Reconstruct waveform using predicted F0/Norm
             y_rec = model.decoder(ph_algn, f0_fake, n_fake, acoust_style)
 
@@ -761,6 +760,7 @@ def main():
                 # Use Accelerate's accumulate context manager for proper gradient accumulation
                 with acc.accumulate(model.mpd, model.msd):
                     inputs = list(model.mpd.parameters()) + list(model.msd.parameters())
+                    # acc.backward(loss_disc, inputs=[model.mpd.parameters(), model.msd.parameters()])
                     acc.backward(loss_disc, inputs=inputs)
 
                     # Gradient clipping should only be applied when gradients are synced
@@ -817,121 +817,24 @@ def main():
             )
 
             # Prepare models for gradient accumulation
-            models_to_accum = [
+            modules_to_accum = [
                 model.bert,
                 model.bert_encoder,
                 model.prosodic_predictor,
                 model.prosodic_style_encoder,
             ]
-            inputs = (
-                list(model.bert.parameters())
-                + list(model.bert_encoder.parameters())
-                + list(model.prosodic_predictor.parameters())
-                + list(model.prosodic_style_encoder.parameters())
-            )
             if epoch >= diff_epoch:
-                models_to_accum.append(model.diffusion)
-                inputs += list(model.diffusion.parameters())
+                modules_to_accum.append(model.diffusion)
             if epoch >= joint_epoch:
-                models_to_accum.extend([model.decoder, model.acoustic_style_encoder])
-                inputs += list(model.decoder.parameters())
-                inputs += list(model.acoustic_style_encoder.parameters())
+                modules_to_accum.extend([model.decoder, model.acoustic_style_encoder])
 
             # Use Accelerate's accumulate context manager for proper gradient accumulation
-            with acc.accumulate(*models_to_accum):
-                # Před voláním backward
-                logger.debug("=== PRE-BACKWARD STATE ===")
-                logger.debug(
-                    "pros_style: requires_grad=%s, version=%s",
-                    pros_style.requires_grad,
-                    pros_style._version,
-                )
-                logger.debug(
-                    "acoust_style: requires_grad=%s, version=%s",
-                    acoust_style.requires_grad,
-                    acoust_style._version,
-                )
-                logger.debug(
-                    "h_bert_en: requires_grad=%s, version=%s",
-                    h_bert_en.requires_grad,
-                    h_bert_en._version,
-                )
-                # PŘIDEJ KONTROLU VŠECH PARAMETRŮ
-                logger.debug("=== CHECKING ALL PARAMETERS ===")
-                for name, param in model.bert_encoder.named_parameters():
-                    if param.requires_grad and param.numel() == 512:
-                        logger.debug(
-                            "bert_encoder.%s: shape=%s, version=%s",
-                            name,
-                            param.shape,
-                            param._version,
-                        )
-
-                for name, param in model.prosodic_predictor.named_parameters():
-                    if param.requires_grad and param.numel() == 512:
-                        logger.debug(
-                            "prosodic_predictor.%s: shape=%s, version=%s",
-                            name,
-                            param.shape,
-                            param._version,
-                        )
-
-                # PŘIDEJ KONTROLU VŠECH BUFFERŮ
-                logger.debug("=== CHECKING ALL BUFFERS ===")
-                for name, buffer in model.bert_encoder.named_buffers():
-                    if buffer.numel() == 512:
-                        logger.debug(
-                            "bert_encoder.%s: shape=%s, version=%s",
-                            name,
-                            buffer.shape,
-                            buffer._version,
-                        )
-
-                for name, buffer in model.prosodic_predictor.named_buffers():
-                    if buffer.numel() == 512:
-                        logger.debug(
-                            "prosodic_predictor.%s: shape=%s, version=%s",
-                            name,
-                            buffer.shape,
-                            buffer._version,
-                        )
-
-                # acc.backward(loss_gen, inputs=inputs)
-
-                # Pokus o backward
+            with acc.accumulate(*modules_to_accum):
+                inputs = [p for m in modules_to_accum for p in m.parameters()]
                 try:
                     acc.backward(loss_gen, inputs=inputs)
                 except RuntimeError as e:
                     logger.error("Backward failed: %s", e)
-                    # Vypsat, který tensor má problém
-                    for name, tensor in [
-                        ("pros_style", pros_style),
-                        ("acoust_style", acoust_style),
-                        ("h_bert_en", h_bert_en),
-                        ("y_rec", y_rec),
-                    ]:
-                        if tensor.requires_grad:
-                            logger.error("%s: version=%s", name, tensor._version)
-                    # PŘIDEJ KONTROLU PARAMETRŮ PO CHYBĚ
-                    logger.error("=== PARAMETERS AFTER ERROR ===")
-                    for name, param in model.bert_encoder.named_parameters():
-                        if param.requires_grad and param.numel() == 512:
-                            logger.error(
-                                "bert_encoder.%s: shape=%s, version=%s",
-                                name,
-                                param.shape,
-                                param._version,
-                            )
-
-                    for name, param in model.prosodic_predictor.named_parameters():
-                        if param.requires_grad and param.numel() == 512:
-                            logger.error(
-                                "prosodic_predictor.%s: shape=%s, version=%s",
-                                name,
-                                param.shape,
-                                param._version,
-                            )
-
                     raise
 
                 # Gradient clipping should only be applied when gradients are synced
@@ -1176,7 +1079,7 @@ def main():
                     # f0_fake, n_fake = model.prosodic_predictor.F0Ntrain(pros_algn, pros_style)
                     f0_fake, n_fake = model.prosodic_predictor(
                         pros_algn,
-                        pros_style,  # .clone(),
+                        pros_style.clone(),
                         compute_f0=True,
                     )
 
@@ -1242,7 +1145,7 @@ def main():
                     "eval/dur_loss": avg_loss_align,
                     "eval/F0_loss": avg_loss_f,
                 },
-                step=iters,
+                step=updates,
             )
             wb_logger.summary["max_vram"] = max_vram  # Log max VRAM usage per epoch
 
