@@ -24,7 +24,11 @@ class SpectralConvergengeLoss(torch.nn.Module):
         Returns:
             Tensor: Spectral convergence loss value.
         """
-        return torch.norm(y_mag - x_mag, p=1) / torch.norm(y_mag, p=1)
+        # Stabilize division for low‑energy targets to avoid NaNs/Inf in backward
+        denom = torch.norm(y_mag, p=1).clamp(min=1e-8)
+        num = torch.norm(y_mag - x_mag, p=1)
+        sc = num / denom
+        return torch.nan_to_num(sc, nan=0.0, posinf=1e4, neginf=0.0)
 
 
 class STFTLoss(torch.nn.Module):
