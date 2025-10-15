@@ -1,5 +1,6 @@
 # coding:utf-8
 
+from contextlib import contextmanager
 import copy
 import math
 import os
@@ -1840,6 +1841,36 @@ class StyleTTS2:
             iters = 0
 
         return optimizer, epoch, iters
+
+    @contextmanager
+    def unwrapped(self, accelerator):
+        """
+        Context manager for temporary unwrapping with minimal memory overhead.
+
+        Stores only references to wrapped modules, not full copies, minimizing
+        memory usage during the unwrap/re-wrap cycle.
+
+        Example:
+            >>> with model.unwrapped(accelerator):
+            >>>     model.save(optimizer, epoch, iters, loss, "checkpoint", save_dir)
+            >>> # model is automatically re-wrapped here
+        """
+        # Store wrapped module REFERENCES and unwrap them
+        wrapped_refs = {}
+        for key, module in self._model.items():
+            if hasattr(module, "to"):
+                wrapped_refs[key] = module  # Store wrapped reference
+                # Unwrap and replace in-place
+                self._model[key] = accelerator.unwrap_model(module)
+                logger.debug("Component '%s' temporarily unwrapped", key)
+
+        try:
+            yield self  # Provide unwrapped model
+        finally:
+            # Restore wrapped modules from saved references
+            for key, wrapped_module in wrapped_refs.items():
+                self._model[key] = wrapped_module
+                logger.debug("Component '%s' re-wrapped", key)
 
     # def params_for_optimizer(
     #     self,
