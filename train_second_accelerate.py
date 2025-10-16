@@ -4,7 +4,6 @@ import os
 import os.path as osp
 import time
 import traceback
-from venv import logger
 import warnings
 
 import numpy as np
@@ -18,7 +17,6 @@ from accelerate import Accelerator, DistributedDataParallelKwargs
 from IPython.core.debugger import set_trace
 from monotonic_align import mask_from_lens
 from munch import munchify
-from torch import nn
 
 from logger import add_logging_args, get_logger, setup_logging
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, create_slm_loss
