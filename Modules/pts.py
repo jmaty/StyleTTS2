@@ -455,6 +455,14 @@ class PTS:
         """
         with torch.no_grad():
             logger.debug("Infering from phonetic features")
+
+            # Access the original model using .module if wrapped by DDP/FSDP
+            try:
+                prosodic_predictor = self.model.prosodic_predictor.module
+            except AttributeError:
+                # Model is not wrapped (e.g., single GPU or CPU)
+                prosodic_predictor = self.model.prosodic_predictor
+
             # Sampling from the diffusion model
             # - generate style embedding from contextual PL-BERT based features
             # - represent timbre and prosody
@@ -505,16 +513,14 @@ class PTS:
 
             # Style-conditioned phonetic features
             # - enriches linguistic features with style information
-            d = self.model.prosodic_predictor.text_encoder(
-                d_en, pros_style, input_lengths, text_mask
-            )
+            d = prosodic_predictor.text_encoder(d_en, pros_style, input_lengths, text_mask)
 
             # xLSTM processed phonetic features
-            x = self.model.prosodic_predictor.lstm(d)
-            x_mod = self.model.prosodic_predictor.prepare_projection(x)  # 640 -> 512
+            x = prosodic_predictor.lstm(d)
+            x_mod = prosodic_predictor.prepare_projection(x)  # 640 -> 512
 
             # Duration prediction: number of frames for each phoneme
-            duration = self.model.prosodic_predictor.duration_proj(x_mod)
+            duration = prosodic_predictor.duration_proj(x_mod)
             duration = torch.sigmoid(duration).sum(axis=-1) / self.speech_rate
             pred_dur = torch.round(duration.squeeze()).clamp(min=1)
 
@@ -541,7 +547,7 @@ class PTS:
                 en = en_new
 
             # Predict F0 and normalization (loudness)
-            f0_pred, n_pred = self.model.prosodic_predictor.F0Ntrain(en, pros_style)
+            f0_pred, n_pred = prosodic_predictor(en, pros_style, compute_f0=True)
             asr = t_en @ pred_aln_trg.unsqueeze(0).to(self.device)
             if self.model.decoder.type == "hifigan":
                 asr_new = torch.zeros_like(asr)
